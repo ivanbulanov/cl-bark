@@ -1,0 +1,26 @@
+;;; packages.lisp — Package definitions (auto-generated)
+
+(defpackage "BARK"
+  (:shadow "DEBUG" "ERROR" "TRACE" "WARN")
+  (:export "*COMPILE-TIME-MAX-LEVEL*"
+           "*LOG-CONTEXT*"
+           "*LOGGER*"
+           "ASYNC-OUTPUT"
+           "CHILD"
+           "DEBUG"
+           "ERROR"
+           "FATAL"
+           "INFO"
+           "JSON-FORMATTER"
+           "LOGFMT-FORMATTER"
+           "LOGGER"
+           "MAKE-LOGGER"
+           "PRETTY-FORMATTER"
+           "SET-LEVEL"
+           "SET-SAMPLING"
+           "START"
+           "STOP"
+           "TRACE"
+           "WARN"
+           "WITH-CAPTURED-LOGS"
+           "WITH-CONTEXT"))
