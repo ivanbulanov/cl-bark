@@ -56,25 +56,25 @@
     "35")   ; fatal = magenta
   "ANSI color codes indexed by (/ level 10).")
 
-(defparameter bark::*level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level 10).")
+(defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level 10).")
 
-(defparameter bark::*level-prefixes* #("{\"level\":10" "{\"level\":20" "{\"level\":30" "{\"level\":40" "{\"level\":50" "{\"level\":60") "Pre-computed JSON level prefixes indexed by (1- (/ level 10)).")
+(defparameter *level-prefixes* #("{\"level\":10" "{\"level\":20" "{\"level\":30" "{\"level\":40" "{\"level\":50" "{\"level\":60") "Pre-computed JSON level prefixes indexed by (1- (/ level 10)).")
 
 (defvar *log-context* nil "Dynamic context bindings for the current log scope.")
 
 (defvar *logger* nil "The current bark logger.")
 
-(defconstant bark::+debug+ 20 "Debug log level.")
+(defconstant +debug+ 20 "Debug log level.")
 
-(defconstant bark::+error+ 50 "Error log level.")
+(defconstant +error+ 50 "Error log level.")
 
-(defconstant bark::+fatal+ 60 "Fatal log level.")
+(defconstant +fatal+ 60 "Fatal log level.")
 
-(defconstant bark::+info+ 30 "Info log level.")
+(defconstant +info+ 30 "Info log level.")
 
-(defconstant bark::+trace+ 10 "Trace log level.")
+(defconstant +trace+ 10 "Trace log level.")
 
-(defconstant bark::+warn+ 40 "Warning log level.")
+(defconstant +warn+ 40 "Warning log level.")
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
 
@@ -94,14 +94,6 @@
                  :sampler (logger-sampler parent))))
     (set-level child (logger-level parent))
     child))
-
-(declaim (ftype (function (&rest t) nil) debug))
-
-(define-compiler-macro debug (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +debug+ *compile-time-max-level*))
-      '(values)
-      form))
 
 (declaim (ftype (function (stream list) (values null &optional)) emit-context-fields))
 
@@ -156,22 +148,6 @@
                            value))
                 (write-char #\} stream))))
 
-(declaim (ftype (function (&rest t) nil) error))
-
-(define-compiler-macro error (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +error+ *compile-time-max-level*))
-      '(values)
-      form))
-
-(declaim (ftype (function (&rest t) nil) fatal))
-
-(define-compiler-macro fatal (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +fatal+ *compile-time-max-level*))
-      '(values)
-      form))
-
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
 
 (defun flush-async-output (async-output)
@@ -189,14 +165,6 @@
   "Return current Unix timestamp in milliseconds."
   (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
     (+ (* sec 1000) (floor usec 1000))))
-
-(declaim (ftype (function (&rest t) nil) info))
-
-(define-compiler-macro info (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +info+ *compile-time-max-level*))
-      '(values)
-      form))
 
 (declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) json-formatter))
 
@@ -369,8 +337,6 @@
     (set-level lgr level)
     lgr))
 
-(declaim (ftype (function (t t &rest t) *) noop))
-
 (defun noop (logger message &rest fields)
   "No-op log function for disabled levels."
   (declare (ignore logger message fields))
@@ -486,22 +452,6 @@
     (when (async-output-thread async-output)
       (bt:join-thread (async-output-thread async-output)))
     (force-output (async-output-stream async-output))))
-
-(declaim (ftype (function (&rest t) nil) trace))
-
-(define-compiler-macro trace (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +trace+ *compile-time-max-level*))
-      '(values)
-      form))
-
-(declaim (ftype (function (&rest t) nil) warn))
-
-(define-compiler-macro warn (&whole form message &rest fields)
-  (declare (ignore message fields))
-  (if (and (plusp *compile-time-max-level*) (< +warn+ *compile-time-max-level*))
-      '(values)
-      form))
 
 (declaim (ftype (function (simple-string stream) (values null &optional)) write-json-escaped-string))
 
