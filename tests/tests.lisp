@@ -253,7 +253,7 @@
     (let ((*logger* (make-logger :name "myapp" :level :info
                                   :formatter #'json-formatter
                                   :output collector)))
-      (info "hello")
+      (funcall (logger-info-fn *logger*) *logger* "hello")
       (let ((line (first (funcall results-fn))))
         (funhouse.test:assert-true (search "\"name\":\"myapp\"" line))))))
 
