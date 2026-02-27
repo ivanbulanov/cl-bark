@@ -1,6 +1,7 @@
 ;;; packages.lisp — Package definitions (auto-generated)
 
 (defpackage "BARK"
+  (:use "COMMON-LISP")
   (:shadow "DEBUG" "ERROR" "TRACE" "WARN")
   (:export "*COMPILE-TIME-MAX-LEVEL*"
            "*LOG-CONTEXT*"
