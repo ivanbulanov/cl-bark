@@ -69,6 +69,11 @@
   (error-fn     #'noop :type function)
   (fatal-fn     #'noop :type function))
 
+(defmethod print-object ((lgr logger) stream)
+  "Print logger showing name and level."
+  (print-unreadable-object (lgr stream :type t :identity t)
+    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
+
 (defvar *logger* nil "The current bark logger.")
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
@@ -176,7 +181,7 @@
                      (keyword (level-from-keyword level))))
         (sampler (or (logger-sampler logger)
                      (make-array 7 :initial-element nil))))
-    (setf (aref sampler (floor level-val 10)) (cons rate 0))
+    (setf (aref sampler (floor level-val 10)) (cons rate (1- rate)))
     (setf (logger-sampler logger) sampler)))
 
 ;;; --- Lifecycle ---
@@ -418,6 +423,13 @@
   (thread   nil :type (or null bt:thread))
   (stream   nil :type (or null stream))
   (running  nil :type boolean))
+
+(defmethod print-object ((ao async-output) stream)
+  "Print async-output without descending into stream/thread slots."
+  (print-unreadable-object (ao stream :type t :identity t)
+    (format stream "~:[stopped~;running~] ~D pending"
+            (async-output-running ao)
+            (sb-concurrency:mailbox-count (async-output-mailbox ao)))))
 
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
 
