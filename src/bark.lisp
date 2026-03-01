@@ -69,11 +69,6 @@
   (error-fn     #'noop :type function)
   (fatal-fn     #'noop :type function))
 
-(defmethod print-object ((lgr logger) stream)
-  "Print logger showing name and level."
-  (print-unreadable-object (lgr stream :type t :identity t)
-    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
-
 (defvar *logger* nil "The current bark logger.")
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
@@ -424,12 +419,21 @@
   (stream   nil :type (or null stream))
   (running  nil :type boolean))
 
+;;; --- Logger ---
+
 (defmethod print-object ((ao async-output) stream)
   "Print async-output without descending into stream/thread slots."
   (print-unreadable-object (ao stream :type t :identity t)
     (format stream "~:[stopped~;running~] ~D pending"
             (async-output-running ao)
             (sb-concurrency:mailbox-count (async-output-mailbox ao)))))
+
+(defmethod print-object ((lgr logger) stream)
+  "Print logger showing name and level."
+  (print-unreadable-object (lgr stream :type t :identity t)
+    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
+
+;;; --- Async Output ---
 
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
 
@@ -501,13 +505,14 @@
 
 ;;; --- Utilities ---
 
-(defmacro with-captured-logs ((&optional (var 'logs)) &body body)
+(defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
   "Execute BODY with a test logger that captures log output.
-   Binds VAR to a function that returns the list of logged strings."
+   Binds VAR to a function that returns the list of logged strings.
+   FORMATTER defaults to #'json-formatter but can be any formatter function."
   `(multiple-value-bind (collector results-fn) (make-list-collector)
      (let* ((*logger* (%make-logger
                        :name "test"
-                       :formatter #'json-formatter
+                       :formatter ,formatter
                        :output collector)))
        (set-level *logger* :trace)
        (let ((,var results-fn))
@@ -532,3 +537,29 @@
     (values
      (lambda (line) (push line results))
      (lambda () (nreverse results)))))
+
+;;; --- Convenience API ---
+
+(defmacro debug (message &rest fields)
+  "Log MESSAGE at debug level to *LOGGER*."
+  `(funcall (logger-debug-fn *logger*) *logger* ,message ,@fields))
+
+(defmacro error (message &rest fields)
+  "Log MESSAGE at error level to *LOGGER*."
+  `(funcall (logger-error-fn *logger*) *logger* ,message ,@fields))
+
+(defmacro fatal (message &rest fields)
+  "Log MESSAGE at fatal level to *LOGGER*."
+  `(funcall (logger-fatal-fn *logger*) *logger* ,message ,@fields))
+
+(defmacro info (message &rest fields)
+  "Log MESSAGE at info level to *LOGGER*."
+  `(funcall (logger-info-fn *logger*) *logger* ,message ,@fields))
+
+(defmacro trace (message &rest fields)
+  "Log MESSAGE at trace level to *LOGGER*."
+  `(funcall (logger-trace-fn *logger*) *logger* ,message ,@fields))
+
+(defmacro warn (message &rest fields)
+  "Log MESSAGE at warn level to *LOGGER*."
+  `(funcall (logger-warn-fn *logger*) *logger* ,message ,@fields))

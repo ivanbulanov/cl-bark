@@ -1,4 +1,4 @@
-;;; cl-bark.asd — System definition
+;;; cl-bark.asd — System definition (auto-generated)
 (asdf:defsystem "cl-bark"
   :depends-on ("bordeaux-threads" "sb-concurrency")
   :serial t
@@ -6,12 +6,14 @@
   ((:file "packages")
    (:module "src"
     :components
-    ((:file "bark")))))
+    ((:file "bark")))
+   ))
 
 (asdf:defsystem "cl-bark/tests"
-  :depends-on ("cl-bark" "fiveam" "yason" "uiop")
+  :depends-on ("cl-bark" "fiveam" "uiop" "yason")
   :serial t
   :components
   ((:module "tests"
     :components
-    ((:file "tests")))))
+    ((:file "tests"))))
+  )

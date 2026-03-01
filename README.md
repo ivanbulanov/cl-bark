@@ -137,10 +137,16 @@ Swap at runtime:
 ### Testing
 
 ```lisp
+;; Captures log output as a list of strings (default: json-formatter)
 (bark:with-captured-logs (get-logs)
   (bark:info "test message" :key "value")
   (let ((lines (funcall get-logs)))
     (assert (= 1 (length lines)))))
+
+;; Use a different formatter for test assertions
+(bark:with-captured-logs (get-logs #'bark:logfmt-formatter)
+  (bark:info "hello")
+  (assert (search "level=info" (first (funcall get-logs)))))
 ```
 
 ## Globals
@@ -162,12 +168,11 @@ SBCL 2.4+ required. No portable fallback in v1.0.
 
 ## Note on Symbol Shadowing
 
-`bark:error` shadows `cl:error`. Packages that `(:use :bark)` must add:
+The convenience macros `bark:trace`, `bark:debug`, `bark:warn`, and `bark:error` shadow `cl:trace`, `cl:debug`, `cl:warn`, and `cl:error`. This only matters if your package `(:use :bark)`. In that case, either shadow-import the ones you need:
 ```lisp
-(:shadowing-import-from :bark #:error)
+(:shadowing-import-from :bark #:error #:warn #:trace #:debug)
 ```
-
-Or use the `bark:` prefix explicitly.
+Or — the recommended approach — don't `(:use :bark)` and call everything with the `bark:` prefix.
 
 ## Design Document
 

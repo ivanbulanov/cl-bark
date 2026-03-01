@@ -1,8 +1,7 @@
 ;;; tests/tests.lisp — cl-bark tests using FiveAM
 
 (defpackage #:bark-tests
-  (:use #:cl #:bark)
-  (:shadow #:debug #:error #:trace #:warn)
+  (:use #:cl)
   (:import-from #:bark
    ;; Level constants and helpers
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
@@ -18,7 +17,12 @@
    ;; Async output internals
    #:async-output-mailbox #:make-async-output #:stop-async-output #:flush-async-output
    ;; Utilities
-   #:noop #:make-list-collector))
+   #:noop #:make-list-collector
+   ;; Public API (non-conflicting)
+   #:make-logger #:child #:set-level #:set-sampling #:start #:stop
+   #:json-formatter #:logfmt-formatter #:pretty-formatter
+   #:with-captured-logs #:with-context
+   #:*logger* #:*log-context*))
 
 (in-package #:bark-tests)
 
@@ -187,7 +191,7 @@
     (let ((*logger* (make-logger :name "myapp" :level :info
                                   :formatter #'json-formatter
                                   :output collector)))
-      (funcall (logger-info-fn *logger*) *logger* "hello")
+      (bark:info "hello")
       (let ((line (first (funcall results-fn))))
         (5am:is-true (search "\"name\":\"myapp\"" line))))))
 
@@ -255,7 +259,7 @@
   "Use with-captured-logs and with-context, verify context fields appear in JSON."
   (with-captured-logs (get-logs)
     (with-context (:request-id "req-123")
-      (funcall (logger-info-fn *logger*) *logger* "ctx message"))
+      (bark:info "ctx message"))
     (let* ((logs (funcall get-logs))
            (line (first logs)))
       (5am:is-true (not (null line)))
@@ -267,7 +271,7 @@
   (with-captured-logs (get-logs)
     (with-context (:outer "a")
       (with-context (:inner "b")
-        (funcall (logger-info-fn *logger*) *logger* "nested")))
+        (bark:info "nested")))
     (let* ((logs (funcall get-logs))
            (line (first logs)))
       (5am:is-true (not (null line)))
@@ -279,8 +283,8 @@
 (5am:test test-with-captured-logs
   "Verify with-captured-logs captures log lines as a list."
   (with-captured-logs (get-logs)
-    (funcall (logger-info-fn *logger*) *logger* "line1")
-    (funcall (logger-warn-fn *logger*) *logger* "line2")
+    (bark:info "line1")
+    (bark:warn "line2")
     (let ((logs (funcall get-logs)))
       (5am:is (= 2 (length logs)))
       (5am:is-true (search "line1" (first logs)))
@@ -290,10 +294,10 @@
   "Set level to :info, log at trace/debug/info/warn, verify only info and warn captured."
   (with-captured-logs (get-logs)
     (set-level *logger* :info)
-    (funcall (logger-trace-fn *logger*) *logger* "t-msg")
-    (funcall (logger-debug-fn *logger*) *logger* "d-msg")
-    (funcall (logger-info-fn *logger*) *logger* "i-msg")
-    (funcall (logger-warn-fn *logger*) *logger* "w-msg")
+    (bark:trace "t-msg")
+    (bark:debug "d-msg")
+    (bark:info "i-msg")
+    (bark:warn "w-msg")
     (let ((logs (funcall get-logs)))
       (5am:is (= 2 (length logs)))
       (5am:is-true (search "i-msg" (first logs)))
@@ -445,12 +449,11 @@
 (5am:test test-with-context-scoping
   "WITH-CONTEXT injects fields within its dynamic scope and does not leak."
   (bark:with-captured-logs (logs)
-    (let ((fn (bark::logger-info-fn bark:*logger*)))
-      (bark:with-context (:svc "api" :ver "1")
-        (funcall fn bark:*logger* "outer")
-        (bark:with-context (:user 42)
-          (funcall fn bark:*logger* "inner")))
-      (funcall fn bark:*logger* "outside"))
+    (bark:with-context (:svc "api" :ver "1")
+      (bark:info "outer")
+      (bark:with-context (:user 42)
+        (bark:info "inner")))
+    (bark:info "outside")
     (let* ((entries (mapcar #'yason:parse (funcall logs)))
            (outer   (first entries))
            (inner   (second entries))
@@ -471,11 +474,9 @@
 (5am:test test-child-logger-fields
   "CHILD logger pre-attaches fields to every message it emits."
   (bark:with-captured-logs (logs)
-    (let* ((child (bark:child bark:*logger* :component "db" :pool 5))
-           (pfn   (bark::logger-info-fn bark:*logger*))
-           (cfn   (bark::logger-info-fn child)))
-      (funcall pfn bark:*logger* "parent msg")
-      (funcall cfn child          "child msg" :query "SELECT 1"))
+    (let ((child (bark:child bark:*logger* :component "db" :pool 5)))
+      (bark:info "parent msg")
+      (funcall (bark::logger-info-fn child) child "child msg" :query "SELECT 1"))
     (let* ((entries (mapcar #'yason:parse (funcall logs)))
            (parent  (first entries))
            (child   (second entries)))
@@ -532,12 +533,11 @@
 (5am:test test-json-string-escaping-roundtrip
   "JSON formatter properly escapes quotes, backslashes, and control chars in strings."
   (bark:with-captured-logs (logs)
-    (let ((fn (bark::logger-info-fn bark:*logger*)))
-      (funcall fn bark:*logger* "escaping"
-               :quote  "say \"hello\""
-               :slash  "back\\slash"
-               :tab    (format nil "has~Ctab" #\Tab)
-               :nl     (format nil "line~%two")))
+    (bark:info "escaping"
+                   :quote  "say \"hello\""
+                   :slash  "back\\slash"
+                   :tab    (format nil "has~Ctab" #\Tab)
+                   :nl     (format nil "line~%two"))
     (let ((raw (first (funcall logs))))
       ;; Raw JSON should contain escaped sequences
       (5am:is-true (search "\\\"hello\\\"" raw))
@@ -567,17 +567,16 @@
 (5am:test test-json-value-types-roundtrip
   "JSON formatter correctly encodes all supported value types."
   (bark:with-captured-logs (logs)
-    (let ((fn (bark::logger-info-fn bark:*logger*)))
-      (funcall fn bark:*logger* "types"
-               :str   "hello"
-               :int   42
-               :float 3.14
-               :true  t
-               :null  nil
-               :sym   :keyword
-               :vec   (vector 1 2 3)
-               :obj   (let ((h (make-hash-table :test 'equal)))
-                        (setf (gethash "k" h) "v") h)))
+    (bark:info "types"
+                   :str   "hello"
+                   :int   42
+                   :float 3.14
+                   :true  t
+                   :null  nil
+                   :sym   :keyword
+                   :vec   (vector 1 2 3)
+                   :obj   (let ((h (make-hash-table :test 'equal)))
+                            (setf (gethash "k" h) "v") h))
     (let ((p (yason:parse (first (funcall logs)))))
       (5am:is (equal "hello"   (gethash "str"   p)))
       (5am:is (= 42            (gethash "int"   p)))
@@ -607,3 +606,50 @@
            (full-rate (count "full-rate-msg" all :test (lambda (k s) (search k s)))))
       (5am:is (= 100 full-rate))
       (5am:is-true (<= 50 throttled 150)))))
+
+(fiveam:test (test-with-captured-logs-formatter :compile-at :definition-time)
+  "WITH-CAPTURED-LOGS accepts an optional formatter argument."
+  ;; Default still uses json
+  (bark:with-captured-logs (logs)
+    (bark:info "hi")
+    (let ((line (first (funcall logs))))
+      (fiveam:is (search "\"level\"" line))))
+  ;; Explicit logfmt
+  (bark:with-captured-logs (logs #'bark:logfmt-formatter)
+    (bark:info "hi")
+    (let ((line (first (funcall logs))))
+      (fiveam:is (search "level=info" line))))
+  ;; Explicit pretty
+  (bark:with-captured-logs (logs #'bark:pretty-formatter)
+    (bark:info "hi")
+    (let ((line (first (funcall logs))))
+      (fiveam:is (search "INFO" line))
+      ;; pretty formatter should NOT have JSON structure
+      (fiveam:is (not (search "\"level\"" line))))))
+
+(fiveam:test (test-convenience-macros :compile-at :definition-time)
+  "BARK:TRACE through BARK:FATAL expand to the correct level funcalls."
+  (bark:with-captured-logs (logs)
+    (bark:trace "t")
+    (bark:debug "d")
+    (bark:info "i")
+    (bark:warn "w")
+    (bark:error "e")
+    (bark:fatal "f")
+    (let ((lines (funcall logs)))
+      (fiveam:is (= 6 (length lines)))
+      ;; Verify each level number in order
+      (fiveam:is (search "\"level\":10" (nth 0 lines)))
+      (fiveam:is (search "\"level\":20" (nth 1 lines)))
+      (fiveam:is (search "\"level\":30" (nth 2 lines)))
+      (fiveam:is (search "\"level\":40" (nth 3 lines)))
+      (fiveam:is (search "\"level\":50" (nth 4 lines)))
+      (fiveam:is (search "\"level\":60" (nth 5 lines))))))
+
+(fiveam:test (test-macros-with-fields :compile-at :definition-time)
+  "Convenience macros pass per-call fields through to the formatter."
+  (bark:with-captured-logs (logs)
+    (bark:info "request" :method "GET" :path "/api")
+    (let ((line (first (funcall logs))))
+      (fiveam:is (search "\"method\":\"GET\"" line))
+      (fiveam:is (search "\"path\":\"/api\"" line)))))
