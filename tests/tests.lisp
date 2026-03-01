@@ -351,13 +351,12 @@
          (ao (bark::make-async-output out :capacity 64)))
     (bark::ring-buffer-push (bark::async-output-ring ao) "hello")
     (bark::ring-buffer-push (bark::async-output-ring ao) "world")
-    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::flush-async-output ao)
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
       (fiveam:is (search "hello" result))
-      (fiveam:is (search "world" result)))))
-(5am:test test-list-collector
+      (fiveam:is (search "world" result)))))(5am:test test-list-collector
   "Test make-list-collector, push items, get-results."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (funcall collector "first")
@@ -375,12 +374,11 @@
          (ao (bark::make-async-output out :capacity 64)))
     (dotimes (i 5)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "line-~d" i)))
-    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::flush-async-output ao)
     (let ((result (get-output-stream-string out)))
       (fiveam:is (= 5 (count #\Newline result))))
-    (bark::stop-async-output ao)))
-;;; --- Helpers ---
+    (bark::stop-async-output ao)));;; --- Helpers ---
 
 (defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
@@ -696,11 +694,10 @@
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 5)
       (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
-    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
       (fiveam:is (search "dropped 5 log messages" result)))))
-
 (fiveam:test test-async-custom-on-drop
   "Custom on-drop callback controls the drop warning message."
   (let* ((out (make-string-output-stream))
@@ -710,11 +707,10 @@
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 3)
       (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
-    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
       (fiveam:is (search "LOST:3" result)))))
-
 (fiveam:test test-async-on-drop-nil-suppresses
   "on-drop returning NIL suppresses the warning line."
   (let* ((out (make-string-output-stream))
@@ -722,7 +718,7 @@
                :on-drop (lambda (n) (declare (ignore n)) nil))))
     (dotimes (i 20)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
-    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
       (fiveam:is (not (search "dropped" result))))))

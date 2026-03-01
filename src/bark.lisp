@@ -107,18 +107,18 @@
                 (return-from log-fn (values))))))
         (let* ((formatter (logger-formatter lgr))
                (line (funcall formatter
-                             level-value
-                             (logger-chindings lgr)
-                             (logger-raw-bindings lgr)
-                             *log-context*
-                             message
-                             fields))
+                              level-value
+                              (logger-chindings lgr)
+                              (logger-raw-bindings lgr)
+                              *log-context*
+                              message
+                              fields))
                (output (logger-output lgr)))
           (when output
             (if (async-output-p output)
                 (progn
                   (ring-buffer-push (async-output-ring output) line)
-                  (sb-thread:signal-semaphore (async-output-notify output)))
+                  (bt:signal-semaphore (async-output-notify output)))
                 (etypecase output
                   (stream (write-string line output) (terpri output) (force-output output))
                   (function (funcall output line))))))
@@ -444,10 +444,10 @@
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
   "Lock-free MPSC ring buffer with drop-on-full semantics."
   (slots    #()  :type simple-vector)
-  (mask     0    :type sb-ext:word)
-  (head     0    :type sb-ext:word)
-  (tail     0    :type sb-ext:word)
-  (dropped  0    :type sb-ext:word))
+  (mask     0    :type (unsigned-byte 64))
+  (head     0    :type (unsigned-byte 64))
+  (tail     0    :type (unsigned-byte 64))
+  (dropped  0    :type (unsigned-byte 64)))
 
 (defun default-on-drop (count)
   "Default drop handler. Returns a JSON warning line."
@@ -458,17 +458,17 @@
 (defun flush-async-output (async-output)
   "Flush the async writer. Blocks until current queue is drained."
   (when (and async-output (async-output-running async-output))
-    (let ((ack (sb-thread:make-semaphore :name "bark-flush-ack")))
+    (let ((ack (bt:make-semaphore :name "bark-flush-ack")))
       (setf (async-output-flush-ack async-output) ack)
-      (sb-thread:signal-semaphore (async-output-notify async-output))
-      (sb-thread:wait-on-semaphore ack :timeout 5.0)))
+      (bt:signal-semaphore (async-output-notify async-output))
+      (bt:wait-on-semaphore ack :timeout 5.0)))
   nil)
 
 (declaim (ftype (function (t) (values async-output &optional)) make-async-output))
 
 (defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop))
   "Create an async output that writes to STREAM via a background thread."
-  (let* ((notify (sb-thread:make-semaphore :name "bark-notify"))
+  (let* ((notify (bt:make-semaphore :name "bark-notify"))
          (ao (%make-async-output
               :ring (make-ring-buffer capacity)
               :stream stream
@@ -499,10 +499,10 @@
       (let* ((idx (logand tail (ring-buffer-mask rb)))
              (val (svref (ring-buffer-slots rb) idx)))
         (loop while (null val) do
-          (sb-ext:spin-loop-hint)
+          #+sbcl (sb-ext:spin-loop-hint)
           (setf val (svref (ring-buffer-slots rb) idx)))
         (setf (svref (ring-buffer-slots rb) idx) nil)
-        (sb-ext:atomic-incf (ring-buffer-tail rb))
+        (atomics:atomic-incf (ring-buffer-tail rb))
         val))))
 
 (defun ring-buffer-push (rb value)
@@ -513,9 +513,9 @@
            (tail (ring-buffer-tail rb))
            (size (- head tail)))
       (when (>= size (1+ (ring-buffer-mask rb)))
-        (sb-ext:atomic-incf (ring-buffer-dropped rb))
+        (atomics:atomic-incf (ring-buffer-dropped rb))
         (return nil))
-      (when (eql head (sb-ext:cas (ring-buffer-head rb) head (1+ head)))
+      (when (atomics:cas (ring-buffer-head rb) head (1+ head))
         (setf (svref (ring-buffer-slots rb) (logand head (ring-buffer-mask rb))) value)
         (return t)))))
 
@@ -526,7 +526,7 @@
   (when (and async-output (async-output-running async-output))
     (flush-async-output async-output)
     (setf (async-output-running async-output) nil)
-    (sb-thread:signal-semaphore (async-output-notify async-output))
+    (bt:signal-semaphore (async-output-notify async-output))
     (when (async-output-thread async-output)
       (bt:join-thread (async-output-thread async-output)))
     (let ((ring (async-output-ring async-output))
@@ -545,7 +545,7 @@
         (notify (async-output-notify async-output)))
     (handler-case
         (loop while (async-output-running async-output) do
-          (sb-thread:wait-on-semaphore notify :timeout 0.1)
+          (bt:wait-on-semaphore notify :timeout 0.1)
           (loop for line = (ring-buffer-pop ring) while line do
             (write-string line stream)
             (terpri stream))
@@ -553,7 +553,7 @@
           (let ((dropped (ring-buffer-dropped ring)))
             (when (plusp dropped)
               (loop for old = (ring-buffer-dropped ring)
-                    until (eql old (sb-ext:cas (ring-buffer-dropped ring) old 0)))
+                    until (atomics:cas (ring-buffer-dropped ring) old 0))
               (let ((on-drop (async-output-on-drop async-output)))
                 (when on-drop
                   (let ((warning (funcall on-drop dropped)))
@@ -564,7 +564,7 @@
           (let ((ack (async-output-flush-ack async-output)))
             (when ack
               (setf (async-output-flush-ack async-output) nil)
-              (sb-thread:signal-semaphore ack))))
+              (bt:signal-semaphore ack))))
       (cl:error (e)
         (format *error-output* "bark writer-loop error: ~a~%" e)
         (force-output *error-output*)))))
@@ -591,8 +591,13 @@
 
 (defun get-unix-timestamp-ms ()
   "Return current Unix timestamp in milliseconds."
+  #+sbcl
   (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
-    (+ (* sec 1000) (floor usec 1000))))
+    (+ (* sec 1000) (floor usec 1000)))
+  #-sbcl
+  (let ((now (local-time:now)))
+    (+ (* (local-time:timestamp-to-unix now) 1000)
+       (floor (local-time:nsec-of now) 1000000))))
 
 (declaim (ftype (function nil (values function function &optional)) make-list-collector))
 

@@ -1,7 +1,7 @@
-;;; cl-bark.asd — System definition (auto-generated)
+;;; cl-bark.asd — System definition
 (asdf:defsystem "cl-bark"
+  :depends-on ("atomics" "bordeaux-threads" "local-time")
   :version "1.1.0"
-  :depends-on ("bordeaux-threads")
   :serial t
   :components
   ((:file "packages")

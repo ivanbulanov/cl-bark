@@ -184,9 +184,11 @@ Control the buffer size and drop behavior:
 
 | Dependency | Purpose |
 |-----------|---------|
-| `bordeaux-threads` | Thread creation for async writer |
+| `bordeaux-threads` | Portable thread creation and semaphores |
+| `atomics` | Portable CAS and atomic increment for the lock-free ring buffer |
+| `local-time` | Portable Unix millisecond timestamps |
 
-SBCL 2.4+ required. Uses `sb-ext:cas`, `sb-ext:atomic-incf`, `sb-thread:semaphore` for the lock-free ring buffer.
+Compatible with any implementation supported by [atomics](https://github.com/Shinmera/atomics): SBCL, CCL, ECL, Allegro, LispWorks, CMUCL.
 
 ## Note on Symbol Shadowing
 
@@ -216,12 +218,12 @@ Producer threads              Writer thread
 
 **Ring buffer internals:**
 - Pre-allocated `simple-vector` of size 2^N (minimum 16)
-- `head` (write cursor) and `tail` (read cursor) are `sb-ext:word` slots supporting `sb-ext:atomic-incf` and `sb-ext:cas`
+- `head` (write cursor) and `tail` (read cursor) are `(unsigned-byte 64)` slots; producers use `atomics:cas` to claim a slot and `atomics:atomic-incf` to record drops
 - Producers CAS-loop on `head` to claim a slot, then write the formatted string. If `head - tail >= capacity`, the message is dropped and `dropped` is atomically incremented
-- The consumer (single writer thread) reads sequentially from `tail`, spinning briefly if a producer has claimed a slot but hasn't written yet (`sb-ext:spin-loop-hint`)
+- The consumer (single writer thread) reads sequentially from `tail`, spinning briefly if a producer has claimed a slot but hasn't written yet (uses `sb-ext:spin-loop-hint` on SBCL)
 - `mask` = capacity - 1 enables `logand` instead of `mod` for index calculation
 
-**Flush protocol:** `flush-async-output` creates a fresh `sb-thread:semaphore`, stores it in the `flush-ack` slot, signals the writer's `notify` semaphore, then blocks on the ack. The writer checks `flush-ack` at the end of each drain cycle and signals it after processing.
+**Flush protocol:** `flush-async-output` creates a fresh `bt:semaphore`, stores it in the `flush-ack` slot, signals the writer's `notify` semaphore, then blocks on the ack. The writer checks `flush-ack` at the end of each drain cycle and signals it after processing.
 
 **Drop reporting:** After each drain cycle, the writer atomically reads and resets the `dropped` counter. If non-zero, it calls the `on-drop` function (default: `default-on-drop`) which returns a warning string written inline to the output stream. This ensures drop notifications appear in the same log pipeline the user is consuming.
 
