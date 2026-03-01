@@ -375,17 +375,9 @@
       (5am:is-true (search "line1" output)))
     (stop-async-output ao)))
 
-(funhouse.test:deftest-suite :bark-suite "Tests for the cl-bark logging library.")
+;;; --- Helpers ---
 
-(funhouse.test:deftest test-json-level-numbers :suite :bark-suite
-  "All 6 levels emit the correct numeric level code in JSON output."
-  (loop for (kw expected) in '((:trace 10) (:debug 20) (:info 30)
-                                (:warn 40) (:error 50) (:fatal 60))
-        do (let* ((line (bark-tests::log-to-string kw #'bark:json-formatter))
-                  (level (gethash "level" (yason:parse line))))
-             (funhouse.test:assert-equal expected level))))
-
-(defun bark-tests::log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
+(defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
   (let ((out (make-string-output-stream)))
     (let ((l (bark:make-logger :level logger-level :formatter fmt :output out)))
@@ -400,40 +392,59 @@
         (funcall fn l "test")))
     (get-output-stream-string out)))
 
-(funhouse.test:deftest test-level-filtering :suite :bark-suite
+(defun log-to-string (level &optional (formatter #'bark:json-formatter))
+  "Log one message at LEVEL with FORMATTER, return output string."
+  (log-at level level formatter))
+
+;;; --- JSON Level Numbers ---
+
+(5am:test test-json-level-numbers
+  "All 6 levels emit the correct numeric level code in JSON output."
+  (loop for (kw expected) in '((:trace 10) (:debug 20) (:info 30)
+                                (:warn 40) (:error 50) (:fatal 60))
+        do (let* ((line (log-to-string kw #'bark:json-formatter))
+                  (level (gethash "level" (yason:parse line))))
+             (5am:is (= expected level)))))
+
+;;; --- Level Filtering (threshold matrix) ---
+
+(5am:test test-level-filtering-thresholds
   "Messages below the logger's threshold are dropped; at/above it are emitted."
   (loop for (threshold silent loud)
         in '((:warn  (:trace :debug :info)       (:warn :error :fatal))
              (:info  (:trace :debug)             (:info :warn :error :fatal))
              (:error (:trace :debug :info :warn) (:error :fatal)))
         do (dolist (kw silent)
-             (funhouse.test:assert-true (string= "" (bark-tests::log-at threshold kw))))
+             (5am:is (string= "" (log-at threshold kw))))
            (dolist (kw loud)
-             (funhouse.test:assert-true (plusp (length (bark-tests::log-at threshold kw)))))))
+             (5am:is-true (plusp (length (log-at threshold kw)))))))
 
-(funhouse.test:deftest test-formatters :suite :bark-suite
+;;; --- Formatter Coverage ---
+
+(5am:test test-formatters
   "All three formatters produce non-empty, format-appropriate output."
   ;; JSON: must be valid JSON with level/ts/msg keys
-  (let* ((s (bark-tests::log-at :info :info #'bark:json-formatter))
+  (let* ((s (log-at :info :info #'bark:json-formatter))
          (p (yason:parse s)))
-    (funhouse.test:assert-true (hash-table-p p))
-    (funhouse.test:assert-true (integerp (gethash "level" p)))
-    (funhouse.test:assert-true (integerp (gethash "ts"    p)))
-    (funhouse.test:assert-true (stringp  (gethash "msg"   p))))
+    (5am:is-true (hash-table-p p))
+    (5am:is-true (integerp (gethash "level" p)))
+    (5am:is-true (integerp (gethash "ts"    p)))
+    (5am:is-true (stringp  (gethash "msg"   p))))
   ;; Logfmt: key=value structure, contains level= and msg=
-  (let ((s (bark-tests::log-at :info :info #'bark:logfmt-formatter)))
-    (funhouse.test:assert-true (search "level=info" s))
-    (funhouse.test:assert-true (search "msg="       s))
-    (funhouse.test:assert-true (search "ts="        s)))
+  (let ((s (log-at :info :info #'bark:logfmt-formatter)))
+    (5am:is-true (search "level=info" s))
+    (5am:is-true (search "msg="       s))
+    (5am:is-true (search "ts="        s)))
   ;; Pretty: contains ANSI escape codes and the message text
-  (let ((s (bark-tests::log-at :info :info #'bark:pretty-formatter)))
-    (funhouse.test:assert-true (search (string #\Escape) s))
-    (funhouse.test:assert-true (search "test" s))))
+  (let ((s (log-at :info :info #'bark:pretty-formatter)))
+    (5am:is-true (search (string #\Escape) s))
+    (5am:is-true (search "test" s))))
 
-(funhouse.test:deftest test-with-context :suite :bark-suite
-  "WITH-CONTEXT injects fields into every log call within its dynamic scope."
+;;; --- Context Scoping ---
+
+(5am:test test-with-context-scoping
+  "WITH-CONTEXT injects fields within its dynamic scope and does not leak."
   (bark:with-captured-logs (logs)
-    ;; Nested contexts: inner adds to outer
     (let ((fn (bark::logger-info-fn bark:*logger*)))
       (bark:with-context (:svc "api" :ver "1")
         (funcall fn bark:*logger* "outer")
@@ -445,17 +456,19 @@
            (inner   (second entries))
            (outside (third entries)))
       ;; outer: has svc/ver, no user
-      (funhouse.test:assert-equal "api" (gethash "svc" outer))
-      (funhouse.test:assert-equal "1"   (gethash "ver" outer))
-      (funhouse.test:assert-false (gethash "user" outer))
+      (5am:is (equal "api" (gethash "svc" outer)))
+      (5am:is (equal "1"   (gethash "ver" outer)))
+      (5am:is-false (gethash "user" outer))
       ;; inner: has all three
-      (funhouse.test:assert-equal "api" (gethash "svc"  inner))
-      (funhouse.test:assert-equal 42    (gethash "user" inner))
+      (5am:is (equal "api" (gethash "svc"  inner)))
+      (5am:is (= 42        (gethash "user" inner)))
       ;; outside: no context at all
-      (funhouse.test:assert-false (gethash "svc"  outside))
-      (funhouse.test:assert-false (gethash "user" outside)))))
+      (5am:is-false (gethash "svc"  outside))
+      (5am:is-false (gethash "user" outside)))))
 
-(funhouse.test:deftest test-child-logger :suite :bark-suite
+;;; --- Child Logger Fields ---
+
+(5am:test test-child-logger-fields
   "CHILD logger pre-attaches fields to every message it emits."
   (bark:with-captured-logs (logs)
     (let* ((child (bark:child bark:*logger* :component "db" :pool 5))
@@ -467,14 +480,16 @@
            (parent  (first entries))
            (child   (second entries)))
       ;; Parent has no child fields
-      (funhouse.test:assert-false (gethash "component" parent))
+      (5am:is-false (gethash "component" parent))
       ;; Child carries pre-attached bindings
-      (funhouse.test:assert-equal "db" (gethash "component" child))
-      (funhouse.test:assert-equal 5    (gethash "pool"      child))
+      (5am:is (equal "db" (gethash "component" child)))
+      (5am:is (= 5        (gethash "pool"      child)))
       ;; Child also carries call-site fields
-      (funhouse.test:assert-equal "SELECT 1" (gethash "query" child)))))
+      (5am:is (equal "SELECT 1" (gethash "query" child))))))
 
-(funhouse.test:deftest test-set-level-dynamic :suite :bark-suite
+;;; --- Dynamic Level Changes ---
+
+(5am:test test-set-level-dynamic
   "SET-LEVEL swaps fn slots so level changes take effect immediately."
   (let ((out (make-string-output-stream)))
     (let ((l (bark:make-logger :level :trace :formatter #'bark:json-formatter :output out)))
@@ -487,11 +502,13 @@
     (let ((lines (remove "" (uiop:split-string (get-output-stream-string out)
                                                :separator '(#\Newline))
                          :test #'equal)))
-      (funhouse.test:assert-equal 2 (length lines))
-      (funhouse.test:assert-true (search "should-emit"       (first  lines)))
-      (funhouse.test:assert-true (search "should-emit-again" (second lines))))))
+      (5am:is (= 2 (length lines)))
+      (5am:is-true (search "should-emit"       (first  lines)))
+      (5am:is-true (search "should-emit-again" (second lines))))))
 
-(funhouse.test:deftest test-async-output :suite :bark-suite
+;;; --- Async Output Integration ---
+
+(5am:test test-async-output-integration
   "START creates an async-backed logger; STOP flushes all pending messages."
   (let ((out (make-string-output-stream)))
     (let ((bark:*logger* (bark:start :stream out :level :debug
@@ -501,17 +518,18 @@
         (dotimes (i 5) (funcall ifn bark:*logger* "async-write" :seq i))
         (funcall efn bark:*logger* "final-error" :code 503))
       ;; Output slot is ASYNC-OUTPUT struct, not the raw stream
-      (funhouse.test:assert-true
-       (typep (bark::logger-output bark:*logger*) 'bark::async-output))
+      (5am:is-true (typep (bark::logger-output bark:*logger*) 'bark::async-output))
       (bark:stop))
     (let ((lines (remove "" (uiop:split-string (get-output-stream-string out)
                                                :separator '(#\Newline))
                          :test #'equal)))
-      (funhouse.test:assert-equal 6 (length lines))
-      (funhouse.test:assert-true (search "async-write" (first lines)))
-      (funhouse.test:assert-true (search "final-error" (sixth lines))))))
+      (5am:is (= 6 (length lines)))
+      (5am:is-true (search "async-write" (first lines)))
+      (5am:is-true (search "final-error" (sixth lines))))))
 
-(funhouse.test:deftest test-json-string-escaping :suite :bark-suite
+;;; --- JSON String Escaping ---
+
+(5am:test test-json-string-escaping-roundtrip
   "JSON formatter properly escapes quotes, backslashes, and control chars in strings."
   (bark:with-captured-logs (logs)
     (let ((fn (bark::logger-info-fn bark:*logger*)))
@@ -522,12 +540,14 @@
                :nl     (format nil "line~%two")))
     (let ((raw (first (funcall logs))))
       ;; Raw JSON should contain escaped sequences
-      (funhouse.test:assert-true (search "\\\"hello\\\"" raw))
-      (funhouse.test:assert-true (search "back\\\\slash" raw))
+      (5am:is-true (search "\\\"hello\\\"" raw))
+      (5am:is-true (search "back\\\\slash" raw))
       ;; Must be single-line (newline-delimited transport requirement)
-      (funhouse.test:assert-false (find #\Newline raw)))))
+      (5am:is-false (find #\Newline raw)))))
 
-(funhouse.test:deftest test-logfmt-quoting :suite :bark-suite
+;;; --- Logfmt Quoting ---
+
+(5am:test test-logfmt-quoting-rules
   "Logfmt formatter quotes values containing spaces; bare values are unquoted."
   (let ((out (make-string-output-stream)))
     (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
@@ -537,12 +557,14 @@
                :num   42
                :url   "http://x.com/p?q=a b"))
     (let ((s (get-output-stream-string out)))
-      (funhouse.test:assert-true (search "bare=simple"          s))
-      (funhouse.test:assert-true (search "space=\"has spaces\"" s))
-      (funhouse.test:assert-true (search "num=42"               s))
-      (funhouse.test:assert-true (search "url=\"http://"        s)))))
+      (5am:is-true (search "bare=simple"          s))
+      (5am:is-true (search "space=\"has spaces\"" s))
+      (5am:is-true (search "num=42"               s))
+      (5am:is-true (search "url=\"http://"        s)))))
 
-(funhouse.test:deftest test-json-value-types :suite :bark-suite
+;;; --- JSON Value Types ---
+
+(5am:test test-json-value-types-roundtrip
   "JSON formatter correctly encodes all supported value types."
   (bark:with-captured-logs (logs)
     (let ((fn (bark::logger-info-fn bark:*logger*)))
@@ -557,17 +579,19 @@
                :obj   (let ((h (make-hash-table :test 'equal)))
                         (setf (gethash "k" h) "v") h)))
     (let ((p (yason:parse (first (funcall logs)))))
-      (funhouse.test:assert-equal "hello"   (gethash "str"   p))
-      (funhouse.test:assert-equal 42        (gethash "int"   p))
-      (funhouse.test:assert-true  (floatp   (gethash "float" p)))
+      (5am:is (equal "hello"   (gethash "str"   p)))
+      (5am:is (= 42            (gethash "int"   p)))
+      (5am:is-true  (floatp    (gethash "float" p)))
       ;; yason:parse returns CL T for JSON true
-      (funhouse.test:assert-equal t  (gethash "true" p))
-      (funhouse.test:assert-false    (gethash "null" p))
-      (funhouse.test:assert-equal "keyword" (gethash "sym"   p))
-      (funhouse.test:assert-true (listp      (gethash "vec"  p)))
-      (funhouse.test:assert-true (hash-table-p (gethash "obj" p))))))
+      (5am:is (eq t (gethash "true" p)))
+      (5am:is-false  (gethash "null" p))
+      (5am:is (equal "keyword" (gethash "sym"   p)))
+      (5am:is-true (listp      (gethash "vec"  p)))
+      (5am:is-true (hash-table-p (gethash "obj" p))))))
 
-(funhouse.test:deftest test-sampling :suite :bark-suite
+;;; --- Sampling Rate ---
+
+(5am:test test-sampling-rate
   "SET-SAMPLING passes ~1/N messages at the given level; unsampled levels unaffected."
   (bark:with-captured-logs (logs)
     (let ((l bark:*logger*))
@@ -581,5 +605,5 @@
     (let* ((all       (funcall logs))
            (throttled (count "throttled-msg" all :test (lambda (k s) (search k s))))
            (full-rate (count "full-rate-msg" all :test (lambda (k s) (search k s)))))
-      (funhouse.test:assert-equal 100 full-rate)
-      (funhouse.test:assert-true (<= 50 throttled 150)))))
+      (5am:is (= 100 full-rate))
+      (5am:is-true (<= 50 throttled 150)))))

@@ -9,7 +9,7 @@
     ((:file "bark")))))
 
 (asdf:defsystem "cl-bark/tests"
-  :depends-on ("cl-bark" "fiveam")
+  :depends-on ("cl-bark" "fiveam" "yason" "uiop")
   :serial t
   :components
   ((:module "tests"
