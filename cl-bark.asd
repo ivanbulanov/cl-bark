@@ -6,8 +6,7 @@
   ((:file "packages")
    (:module "src"
     :components
-    ((:file "bark")))
-   ))
+    ((:file "bark")))))
 
 (asdf:defsystem "cl-bark/tests"
   :depends-on ("cl-bark" "fiveam" "uiop" "yason")
@@ -15,5 +14,4 @@
   :components
   ((:module "tests"
     :components
-    ((:file "tests"))))
-  )
+    ((:file "tests")))))
