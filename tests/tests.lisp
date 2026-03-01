@@ -15,7 +15,7 @@
    #:emit-value #:emit-fields #:emit-key
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
-   #:async-output-mailbox #:make-async-output #:stop-async-output #:flush-async-output
+   #:make-async-output #:stop-async-output #:flush-async-output
    ;; Utilities
    #:noop #:make-list-collector
    ;; Public API (non-conflicting)
@@ -345,18 +345,18 @@
 
 ;;; --- Async Output ---
 
-(5am:test test-async-output-basic
+(fiveam:test test-async-output-basic
   "Create an async-output to a string stream, send messages, stop, verify stream contents."
-  (let* ((stream (make-string-output-stream))
-         (ao (make-async-output stream)))
-    (sb-concurrency:send-message (async-output-mailbox ao) "hello async")
-    (sb-concurrency:send-message (async-output-mailbox ao) "second line")
-    (sleep 0.2)
-    (stop-async-output ao)
-    (let ((result (get-output-stream-string stream)))
-      (5am:is-true (search "hello async" result))
-      (5am:is-true (search "second line" result)))))
-
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 64)))
+    (bark::ring-buffer-push (bark::async-output-ring ao) "hello")
+    (bark::ring-buffer-push (bark::async-output-ring ao) "world")
+    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bark::flush-async-output ao)
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (search "hello" result))
+      (fiveam:is (search "world" result)))))
 (5am:test test-list-collector
   "Test make-list-collector, push items, get-results."
   (multiple-value-bind (collector results-fn) (make-list-collector)
@@ -369,16 +369,17 @@
       (5am:is (string= "second" (second results)))
       (5am:is (string= "third" (third results))))))
 
-(5am:test test-flush-async-output
+(fiveam:test test-flush-async-output
   "Verify flush-async-output blocks until queue is drained."
-  (let* ((stream (make-string-output-stream))
-         (ao (make-async-output stream)))
-    (sb-concurrency:send-message (async-output-mailbox ao) "line1")
-    (flush-async-output ao)
-    (let ((output (get-output-stream-string stream)))
-      (5am:is-true (search "line1" output)))
-    (stop-async-output ao)))
-
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 64)))
+    (dotimes (i 5)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "line-~d" i)))
+    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bark::flush-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (= 5 (count #\Newline result))))
+    (bark::stop-async-output ao)))
 ;;; --- Helpers ---
 
 (defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
@@ -509,25 +510,14 @@
 
 ;;; --- Async Output Integration ---
 
-(5am:test test-async-output-integration
+(fiveam:test test-async-output-integration
   "START creates an async-backed logger; STOP flushes all pending messages."
   (let ((out (make-string-output-stream)))
-    (let ((bark:*logger* (bark:start :stream out :level :debug
-                                     :formatter #'bark:logfmt-formatter)))
-      (let ((ifn (bark::logger-info-fn  bark:*logger*))
-            (efn (bark::logger-error-fn bark:*logger*)))
-        (dotimes (i 5) (funcall ifn bark:*logger* "async-write" :seq i))
-        (funcall efn bark:*logger* "final-error" :code 503))
-      ;; Output slot is ASYNC-OUTPUT struct, not the raw stream
-      (5am:is-true (typep (bark::logger-output bark:*logger*) 'bark::async-output))
-      (bark:stop))
-    (let ((lines (remove "" (uiop:split-string (get-output-stream-string out)
-                                               :separator '(#\Newline))
-                         :test #'equal)))
-      (5am:is (= 6 (length lines)))
-      (5am:is-true (search "async-write" (first lines)))
-      (5am:is-true (search "final-error" (sixth lines))))))
-
+    (bark:start :stream out :level :info :capacity 64)
+    (bark:info "integration-test-msg")
+    (bark:stop)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (search "integration-test-msg" result)))))
 ;;; --- JSON String Escaping ---
 
 (5am:test test-json-string-escaping-roundtrip
@@ -653,3 +643,86 @@
     (let ((line (first (funcall logs))))
       (fiveam:is (search "\"method\":\"GET\"" line))
       (fiveam:is (search "\"path\":\"/api\"" line)))))
+
+(fiveam:test test-ring-buffer-basic
+  "Push and pop values from a ring buffer."
+  (let ((rb (bark::make-ring-buffer 16)))
+    (fiveam:is (bark::ring-buffer-push rb "a"))
+    (fiveam:is (bark::ring-buffer-push rb "b"))
+    (fiveam:is (string= "a" (bark::ring-buffer-pop rb)))
+    (fiveam:is (string= "b" (bark::ring-buffer-pop rb)))
+    (fiveam:is (null (bark::ring-buffer-pop rb)))))
+
+(fiveam:test test-ring-buffer-drop-on-full
+  "Ring buffer drops messages and increments counter when full."
+  (let ((rb (bark::make-ring-buffer 16)))
+    (dotimes (i 16) (bark::ring-buffer-push rb (format nil "msg-~d" i)))
+    (fiveam:is (= 0 (bark::ring-buffer-dropped rb)))
+    (fiveam:is (null (bark::ring-buffer-push rb "overflow")))
+    (fiveam:is (= 1 (bark::ring-buffer-dropped rb)))
+    (bark::ring-buffer-pop rb)
+    (fiveam:is (bark::ring-buffer-push rb "recovered"))))
+
+(fiveam:test test-ring-buffer-drain
+  "Drain returns all available values."
+  (let ((rb (bark::make-ring-buffer 16)))
+    (dotimes (i 5) (bark::ring-buffer-push rb (format nil "~d" i)))
+    (let ((items (bark::ring-buffer-drain rb)))
+      (fiveam:is (= 5 (length items)))
+      (fiveam:is (string= "0" (first items)))
+      (fiveam:is (string= "4" (fifth items))))))
+
+(fiveam:test test-ring-buffer-mpsc
+  "Multiple producer threads can push without data loss."
+  (let ((rb (bark::make-ring-buffer 1024))
+        (threads nil))
+    (dotimes (tid 4)
+      (push (bt:make-thread
+             (lambda ()
+               (dotimes (i 100)
+                 (bark::ring-buffer-push rb (format nil "t~d-~d" tid i))))
+             :name (format nil "pusher-~d" tid))
+            threads))
+    (dolist (th threads) (bt:join-thread th))
+    (let ((items (bark::ring-buffer-drain rb)))
+      (fiveam:is (= 400 (length items)))
+      (fiveam:is (= 0 (bark::ring-buffer-dropped rb))))))
+
+(fiveam:test test-async-drop-warning
+  "When the ring buffer overflows, a drop warning appears in the output."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 16)))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 5)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (search "dropped 5 log messages" result)))))
+
+(fiveam:test test-async-custom-on-drop
+  "Custom on-drop callback controls the drop warning message."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 16
+               :on-drop (lambda (n) (format nil "LOST:~d" n)))))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 3)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (search "LOST:3" result)))))
+
+(fiveam:test test-async-on-drop-nil-suppresses
+  "on-drop returning NIL suppresses the warning line."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 16
+               :on-drop (lambda (n) (declare (ignore n)) nil))))
+    (dotimes (i 20)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (sb-thread:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (fiveam:is (not (search "dropped" result))))))

@@ -99,14 +99,12 @@
     (lambda (lgr message &rest fields)
       (declare (ignorable lgr) (dynamic-extent fields))
       (block log-fn
-        ;; Sampling check
         (let ((sampler (logger-sampler lgr)))
           (when (and sampler (aref sampler level-index))
             (let ((sample-state (aref sampler level-index)))
               (when (and (consp sample-state)
                          (not (zerop (mod (incf (cdr sample-state)) (car sample-state)))))
                 (return-from log-fn (values))))))
-        ;; Format and output
         (let* ((formatter (logger-formatter lgr))
                (line (funcall formatter
                              level-value
@@ -118,7 +116,9 @@
                (output (logger-output lgr)))
           (when output
             (if (async-output-p output)
-                (sb-concurrency:send-message (async-output-mailbox output) line)
+                (progn
+                  (ring-buffer-push (async-output-ring output) line)
+                  (sb-thread:signal-semaphore (async-output-notify output)))
                 (etypecase output
                   (stream (write-string line output) (terpri output) (force-output output))
                   (function (funcall output line))))))
@@ -184,11 +184,12 @@
 (declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function) (:name string))
  (values logger &optional)) start))
 
-(defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter) (name ""))
+(defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter)
+                   (name "") (capacity 8192) (on-drop #'default-on-drop))
   "Start the global logger with an async writer thread."
   (when (and *logger* (logger-output *logger*) (async-output-p (logger-output *logger*)))
     (stop))
-  (let* ((ao (make-async-output stream))
+  (let* ((ao (make-async-output stream :capacity capacity :on-drop on-drop))
          (chindings (if (string= name "")
                         ""
                         (with-output-to-string (s)
@@ -413,20 +414,25 @@
 ;;; --- Async Output ---
 
 (defstruct (async-output (:constructor %make-async-output))
-  "Writer thread + mailbox for async log delivery."
-  (mailbox  nil :type t)
-  (thread   nil :type (or null bt:thread))
-  (stream   nil :type (or null stream))
-  (running  nil :type boolean))
+  "Writer thread + ring buffer for async log delivery."
+  (ring      nil :type (or null ring-buffer))
+  (thread    nil :type (or null bt:thread))
+  (stream    nil :type (or null stream))
+  (running   nil :type boolean)
+  (on-drop   nil :type (or null function))
+  (notify    nil :type t)
+  (flush-ack nil :type t))
 
 ;;; --- Logger ---
 
 (defmethod print-object ((ao async-output) stream)
   "Print async-output without descending into stream/thread slots."
   (print-unreadable-object (ao stream :type t :identity t)
-    (format stream "~:[stopped~;running~] ~D pending"
-            (async-output-running ao)
-            (sb-concurrency:mailbox-count (async-output-mailbox ao)))))
+    (let ((ring (async-output-ring ao)))
+      (format stream "~:[stopped~;running~] ~D pending ~D dropped"
+              (async-output-running ao)
+              (if ring (- (ring-buffer-head ring) (ring-buffer-tail ring)) 0)
+              (if ring (ring-buffer-dropped ring) 0)))))
 
 (defmethod print-object ((lgr logger) stream)
   "Print logger showing name and level."
@@ -435,73 +441,133 @@
 
 ;;; --- Async Output ---
 
+(defstruct (ring-buffer (:constructor %make-ring-buffer))
+  "Lock-free MPSC ring buffer with drop-on-full semantics."
+  (slots    #()  :type simple-vector)
+  (mask     0    :type sb-ext:word)
+  (head     0    :type sb-ext:word)
+  (tail     0    :type sb-ext:word)
+  (dropped  0    :type sb-ext:word))
+
+(defun default-on-drop (count)
+  "Default drop handler. Returns a JSON warning line."
+  (format nil "{\"level\":40,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" count))
+
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
 
 (defun flush-async-output (async-output)
   "Flush the async writer. Blocks until current queue is drained."
   (when (and async-output (async-output-running async-output))
-    (let ((done (sb-concurrency:make-mailbox :name "bark-flush-done")))
-      (sb-concurrency:send-message (async-output-mailbox async-output)
-                                    (cons :flush done))
-      (sb-concurrency:receive-message done :timeout 5.0)))
+    (let ((ack (sb-thread:make-semaphore :name "bark-flush-ack")))
+      (setf (async-output-flush-ack async-output) ack)
+      (sb-thread:signal-semaphore (async-output-notify async-output))
+      (sb-thread:wait-on-semaphore ack :timeout 5.0)))
   nil)
 
 (declaim (ftype (function (t) (values async-output &optional)) make-async-output))
 
-(defun make-async-output (stream)
+(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop))
   "Create an async output that writes to STREAM via a background thread."
-  (let* ((ao (%make-async-output
-              :mailbox (sb-concurrency:make-mailbox :name "bark-mailbox")
+  (let* ((notify (sb-thread:make-semaphore :name "bark-notify"))
+         (ao (%make-async-output
+              :ring (make-ring-buffer capacity)
               :stream stream
-              :running t)))
+              :running t
+              :on-drop on-drop
+              :notify notify)))
     (setf (async-output-thread ao)
           (bt:make-thread (lambda () (writer-loop ao))
                           :name "bark-writer"))
     ao))
+
+(defun make-ring-buffer (capacity)
+  "Create a ring buffer with CAPACITY rounded up to the next power of two."
+  (let* ((actual (max 16 (expt 2 (ceiling (log capacity 2)))))
+         (slots (make-array actual :initial-element nil)))
+    (%make-ring-buffer :slots slots :mask (1- actual))))
+
+(defun ring-buffer-drain (rb)
+  "Drain all available values from the ring buffer into a list. Single-consumer only."
+  (loop for val = (ring-buffer-pop rb) while val collect val))
+
+(defun ring-buffer-pop (rb)
+  "Pop the next value from the ring buffer. Returns NIL if empty. Single-consumer only."
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((tail (ring-buffer-tail rb))
+        (head (ring-buffer-head rb)))
+    (when (< tail head)
+      (let* ((idx (logand tail (ring-buffer-mask rb)))
+             (val (svref (ring-buffer-slots rb) idx)))
+        (loop while (null val) do
+          (sb-ext:spin-loop-hint)
+          (setf val (svref (ring-buffer-slots rb) idx)))
+        (setf (svref (ring-buffer-slots rb) idx) nil)
+        (sb-ext:atomic-incf (ring-buffer-tail rb))
+        val))))
+
+(defun ring-buffer-push (rb value)
+  "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
+  (declare (optimize (speed 3) (safety 1)))
+  (loop
+    (let* ((head (ring-buffer-head rb))
+           (tail (ring-buffer-tail rb))
+           (size (- head tail)))
+      (when (>= size (1+ (ring-buffer-mask rb)))
+        (sb-ext:atomic-incf (ring-buffer-dropped rb))
+        (return nil))
+      (when (eql head (sb-ext:cas (ring-buffer-head rb) head (1+ head)))
+        (setf (svref (ring-buffer-slots rb) (logand head (ring-buffer-mask rb))) value)
+        (return t)))))
 
 (declaim (ftype (function (t) (values null &optional)) stop-async-output))
 
 (defun stop-async-output (async-output)
   "Stop the async writer thread, draining all pending messages first."
   (when (and async-output (async-output-running async-output))
-    ;; Flush first so pending messages are written before the thread sees :shutdown
     (flush-async-output async-output)
     (setf (async-output-running async-output) nil)
-    (sb-concurrency:send-message (async-output-mailbox async-output) :shutdown)
+    (sb-thread:signal-semaphore (async-output-notify async-output))
     (when (async-output-thread async-output)
       (bt:join-thread (async-output-thread async-output)))
-    (force-output (async-output-stream async-output))))
+    (let ((ring (async-output-ring async-output))
+          (stream (async-output-stream async-output)))
+      (loop for line = (ring-buffer-pop ring) while line do
+        (write-string line stream)
+        (terpri stream))
+      (force-output stream))))
 
 (declaim (ftype (function (async-output) (values null &optional)) writer-loop))
 
 (defun writer-loop (async-output)
-  "Main loop for the async writer thread. Batch-drains the mailbox."
-  (let ((mailbox (async-output-mailbox async-output))
-        (stream  (async-output-stream async-output)))
-    (loop while (async-output-running async-output) do
-      (let ((first (sb-concurrency:receive-message mailbox :timeout 0.1)))
-        (when first
-          (cond
-            ((eq first :shutdown) (return))
-            ((and (consp first) (eq (car first) :flush))
-             (force-output stream)
-             (sb-concurrency:send-message (cdr first) t))
-            (t 
-             (write-string first stream)
-             (terpri stream)
-             (let ((pending (sb-concurrency:receive-pending-messages mailbox)))
-               (dolist (line pending)
-                 (cond
-                   ((eq line :shutdown)
-                    (force-output stream)
-                    (return-from writer-loop))
-                   ((and (consp line) (eq (car line) :flush))
-                    (force-output stream)
-                    (sb-concurrency:send-message (cdr line) t))
-                   (t
-                    (write-string line stream)
-                    (terpri stream)))))
-             (force-output stream))))))))
+  "Main loop for the async writer thread. Batch-drains the ring buffer."
+  (let ((ring   (async-output-ring async-output))
+        (stream (async-output-stream async-output))
+        (notify (async-output-notify async-output)))
+    (handler-case
+        (loop while (async-output-running async-output) do
+          (sb-thread:wait-on-semaphore notify :timeout 0.1)
+          (loop for line = (ring-buffer-pop ring) while line do
+            (write-string line stream)
+            (terpri stream))
+          (force-output stream)
+          (let ((dropped (ring-buffer-dropped ring)))
+            (when (plusp dropped)
+              (loop for old = (ring-buffer-dropped ring)
+                    until (eql old (sb-ext:cas (ring-buffer-dropped ring) old 0)))
+              (let ((on-drop (async-output-on-drop async-output)))
+                (when on-drop
+                  (let ((warning (funcall on-drop dropped)))
+                    (when warning
+                      (write-string warning stream)
+                      (terpri stream)
+                      (force-output stream)))))))
+          (let ((ack (async-output-flush-ack async-output)))
+            (when ack
+              (setf (async-output-flush-ack async-output) nil)
+              (sb-thread:signal-semaphore ack))))
+      (cl:error (e)
+        (format *error-output* "bark writer-loop error: ~a~%" e)
+        (force-output *error-output*)))))
 
 ;;; --- Utilities ---
 

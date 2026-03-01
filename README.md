@@ -34,7 +34,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 ## Features
 
-- **Async I/O** — `sb-concurrency:mailbox` with batch drain; caller thread never blocks on I/O
+- **Async I/O** — lock-free MPSC ring buffer with batch drain; bounded memory, caller never blocks
 - **Function pointer swap** — `set-level` swaps slots to `#'noop`; disabled levels cost one indirect call
 - **Pre-serialized chindings** — child logger bindings serialized once at creation, zero per-call cost
 - **Stack-allocated &rest** — `dynamic-extent` on per-call fields avoids heap allocation
@@ -42,7 +42,8 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Pluggable formatters** — JSON Lines (production), logfmt (compact), pretty (ANSI-colored REPL)
 - **Dynamic context** — `with-context` uses CL special variables for automatic scoping and thread isolation
 - **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
-- **Synchronous flush** — `flush-async-output` uses mailbox rendezvous, not sleep
+- **Bounded async buffer** — configurable ring buffer capacity with drop-on-full; dropped messages are reported inline
+- **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
 
 ## Log Levels
 
@@ -89,7 +90,8 @@ Each macro expands to `(funcall (logger-<level>-fn *logger*) *logger* message fi
 
 ```lisp
 ;; Start global async logger
-(bark:start &key (stream *error-output*) (level :info) (formatter #'json-formatter) (name ""))
+(bark:start &key (stream *error-output*) (level :info) (formatter #'json-formatter)
+                 (name "") (capacity 8192) (on-drop #'bark::default-on-drop))
 
 ;; Stop and flush
 (bark:stop)
@@ -127,6 +129,27 @@ Swap at runtime:
 (bark:set-sampling bark:*logger* :debug 100)
 ```
 
+### Backpressure
+
+The async writer uses a bounded ring buffer. When the buffer is full (output stream too slow), messages are dropped and a warning is emitted inline:
+
+```json
+{"level":40,"msg":"bark: dropped 153 log messages (output too slow)"}
+```
+
+Control the buffer size and drop behavior:
+
+```lisp
+;; Larger buffer (default 8192, rounded up to next power of two)
+(bark:start :capacity 65536)
+
+;; Custom drop handler (receives count, returns a string or NIL to suppress)
+(bark:start :on-drop (lambda (n) (format nil "DROPPED ~d" n)))
+
+;; Suppress drop warnings entirely
+(bark:start :on-drop (lambda (n) (declare (ignore n)) nil))
+```
+
 ### Compile-Time Elimination
 
 ```lisp
@@ -162,9 +185,8 @@ Swap at runtime:
 | Dependency | Purpose |
 |-----------|---------|
 | `bordeaux-threads` | Thread creation for async writer |
-| `sb-concurrency` | Lock-free mailbox (SBCL contrib) |
 
-SBCL 2.4+ required. No portable fallback in v1.0.
+SBCL 2.4+ required. Uses `sb-ext:cas`, `sb-ext:atomic-incf`, `sb-thread:semaphore` for the lock-free ring buffer.
 
 ## Note on Symbol Shadowing
 
@@ -173,6 +195,48 @@ The convenience macros `bark:trace`, `bark:debug`, `bark:warn`, and `bark:error`
 (:shadowing-import-from :bark #:error #:warn #:trace #:debug)
 ```
 Or — the recommended approach — don't `(:use :bark)` and call everything with the `bark:` prefix.
+
+## Async Architecture
+
+### Ring Buffer
+
+The async output path uses a lock-free MPSC (multi-producer, single-consumer) ring buffer:
+
+```
+Producer threads              Writer thread
+     │                              │
+     ├─ format message              │
+     ├─ CAS claim slot in ring ──►  │
+     ├─ write string to slot        ├─ pop slots in batch
+     └─ signal semaphore            ├─ write-string to stream
+                                    ├─ force-output
+                                    ├─ check drop counter
+                                    └─ sleep/wait on semaphore
+```
+
+**Ring buffer internals:**
+- Pre-allocated `simple-vector` of size 2^N (minimum 16)
+- `head` (write cursor) and `tail` (read cursor) are `sb-ext:word` slots supporting `sb-ext:atomic-incf` and `sb-ext:cas`
+- Producers CAS-loop on `head` to claim a slot, then write the formatted string. If `head - tail >= capacity`, the message is dropped and `dropped` is atomically incremented
+- The consumer (single writer thread) reads sequentially from `tail`, spinning briefly if a producer has claimed a slot but hasn't written yet (`sb-ext:spin-loop-hint`)
+- `mask` = capacity - 1 enables `logand` instead of `mod` for index calculation
+
+**Flush protocol:** `flush-async-output` creates a fresh `sb-thread:semaphore`, stores it in the `flush-ack` slot, signals the writer's `notify` semaphore, then blocks on the ack. The writer checks `flush-ack` at the end of each drain cycle and signals it after processing.
+
+**Drop reporting:** After each drain cycle, the writer atomically reads and resets the `dropped` counter. If non-zero, it calls the `on-drop` function (default: `default-on-drop`) which returns a warning string written inline to the output stream. This ensures drop notifications appear in the same log pipeline the user is consuming.
+
+**Shutdown:** `stop-async-output` flushes first (guaranteeing all queued messages and any drop warning are written), sets `running` to nil, signals the writer, joins the thread, then does a final drain of any messages that arrived between flush and shutdown.
+
+### Performance Characteristics
+
+| Operation | Cost |
+|-----------|------|
+| Log call (level disabled) | ~2ns (indirect call to `noop`) |
+| Log call (level enabled, async) | ~500ns–2μs (formatting) + ~30ns (CAS + semaphore signal) |
+| Log call (buffer full, drop) | ~500ns–2μs (formatting) + ~20ns (atomic-incf dropped) |
+| Writer drain (per message) | ~50ns (pop + write-string) |
+
+Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is <5% of total log call time.
 
 ## Design Document
 

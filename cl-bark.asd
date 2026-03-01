@@ -1,6 +1,7 @@
 ;;; cl-bark.asd — System definition (auto-generated)
 (asdf:defsystem "cl-bark"
-  :depends-on ("bordeaux-threads" "sb-concurrency")
+  :version "1.1.0"
+  :depends-on ("bordeaux-threads")
   :serial t
   :components
   ((:file "packages")
