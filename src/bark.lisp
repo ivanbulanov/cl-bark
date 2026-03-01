@@ -446,8 +446,10 @@
 (declaim (ftype (function (t) (values null &optional)) stop-async-output))
 
 (defun stop-async-output (async-output)
-  "Stop the async writer thread. Blocks until the writer has drained."
+  "Stop the async writer thread, draining all pending messages first."
   (when (and async-output (async-output-running async-output))
+    ;; Flush first so pending messages are written before the thread sees :shutdown
+    (flush-async-output async-output)
     (setf (async-output-running async-output) nil)
     (sb-concurrency:send-message (async-output-mailbox async-output) :shutdown)
     (when (async-output-thread async-output)
