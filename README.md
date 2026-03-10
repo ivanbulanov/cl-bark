@@ -18,12 +18,12 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 (bark:debug "cache miss" :key "session:abc")  ; silenced at :info level — noop call
 
-;; Structured context (scoped to dynamic extent)
+;; Dynamic context (scoped to dynamic extent)
 (bark:with-context (:request-id "req-123" :tenant "acme")
   (bark:info "processing request")
   (bark:warn "slow query" :duration-ms 1500))
 
-;; Child loggers with pre-serialized bindings
+;; Static context (pre-serialized, fixed for the logger's lifetime)
 (let ((auth-logger (bark:child bark:*logger* :component "auth")))
   (let ((bark:*logger* auth-logger))
     (bark:info "token verified")))
@@ -36,11 +36,11 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 - **Async I/O** — lock-free MPSC ring buffer with batch drain; bounded memory, caller never blocks
 - **Function pointer swap** — `set-level` swaps slots to `#'noop`; disabled levels cost one indirect call
-- **Pre-serialized chindings** — child logger bindings serialized once at creation, zero per-call cost
+- **Static context** — child logger fields serialized once at creation, zero per-call cost
+- **Dynamic context** — `with-context` uses CL special variables for automatic scoping and thread isolation
 - **Stack-allocated &rest** — `dynamic-extent` on per-call fields avoids heap allocation
 - **Compile-time elimination** — set `*compile-time-max-level*` before compiling to strip calls entirely
 - **Pluggable formatters** — JSON Lines (production), logfmt (compact), pretty (ANSI-colored REPL)
-- **Dynamic context** — `with-context` uses CL special variables for automatic scoping and thread isolation
 - **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
 - **Bounded async buffer** — configurable ring buffer capacity with drop-on-full; dropped messages are reported inline
 - **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
@@ -79,8 +79,8 @@ Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is 
 ;; Create a logger (sync or with custom output)
 (bark:make-logger &key (name "") (level :info) (formatter #'json-formatter) output)
 
-;; Create child logger with pre-serialized bindings
-(bark:child parent &rest bindings)
+;; Create child logger with static context (pre-serialized fields)
+(bark:child parent &rest context)
 
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
@@ -99,17 +99,29 @@ Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is 
 
 ### Context
 
+Log output includes fields from three sources, merged in this order:
+
+1. **Static context** — fixed fields on the logger, set once via `bark:child`. Pre-serialized at creation time; zero cost per log call.
+2. **Dynamic context** — scoped fields via `bark:with-context`. Active for all log calls within the dynamic extent. Thread-isolated via CL special variables.
+3. **Per-call fields** — the `&rest` arguments passed directly to `bark:info`, `bark:warn`, etc.
+
 ```lisp
-;; Dynamic context — fields added to all log calls within scope
-(bark:with-context (:request-id id :tenant name)
-  body...)
+;; Static context — lives on the logger
+(let ((bark:*logger* (bark:child bark:*logger* :component "auth")))
+
+  ;; Dynamic context — scoped to this body
+  (bark:with-context (:request-id "req-123")
+
+    ;; Per-call fields
+    (bark:info "token verified" :user-id 42)))
+;; Output merges all three: component, request-id, user-id
 ```
 
 ### Formatters
 
 A formatter is a function with signature:
 ```
-(level chindings raw-bindings context message fields) -> string
+(level static-context-str static-context-plist dynamic-context message fields) -> string
 ```
 
 Built-in formatters:
@@ -193,7 +205,7 @@ To capture and assert on log output, use `with-captured-logs` which binds a temp
 | Variable | Purpose |
 |----------|---------|
 | `bark:*logger*` | Current logger (bind per-thread or globally) |
-| `bark:*log-context*` | Dynamic context alist (managed by `with-context`) |
+| `bark:*log-context*` | Dynamic context plist (managed by `with-context`) |
 | `bark:*compile-time-max-level*` | When positive, compiler macros eliminate calls below this level |
 
 ## Dependencies
