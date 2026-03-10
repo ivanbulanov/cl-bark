@@ -139,6 +139,19 @@ Swap at runtime:
 (setf (bark::logger-formatter bark:*logger*) #'bark:pretty-formatter)
 ```
 
+### Value Serialization
+
+Field values are serialized to JSON and logfmt without signaling errors on any input type. Strings, numbers (including ratios), booleans, symbols, pathnames, and characters serialize natively. Lists, vectors, and hash-tables serialize as JSON arrays/objects with configurable depth and length limits. Unsupported types (CLOS objects, functions, streams, etc.) produce a `<type-name>` placeholder.
+
+```lisp
+(bark:info "event" :user "alice" :count 42 :ratio 1/3 :path #P"/tmp/log" :tags '(:a :b))
+;; => {"level":30,...,"user":"alice","count":42,"ratio":0.333...,"path":"/tmp/log","tags":["a","b"],...}
+```
+
+Control collection output with `*max-emit-depth*` (default 4) and `*max-emit-length*` (default 20).
+
+See [Value Serialization](docs/value-serialization.md) for the full type tables, key coercion rules, and API reference.
+
 ### Sampling
 
 ```lisp
@@ -212,6 +225,8 @@ To capture and assert on log output, use `with-captured-logs` which binds a temp
 | `bark:*logger*` | Current logger (bind per-thread or globally) |
 | `bark:*log-context*` | Dynamic context plist (managed by `with-context`) |
 | `bark:*compile-time-max-level*` | When positive, compiler macros eliminate calls below this level |
+| `bark:*max-emit-depth*` | Max nesting depth for JSON collections (default 4) |
+| `bark:*max-emit-length*` | Max elements per JSON collection before truncation (default 20) |
 
 ## Dependencies
 

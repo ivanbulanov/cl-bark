@@ -252,7 +252,7 @@ The root logger is automatically wrapped in a child with these fields."
     (princ (get-unix-timestamp-ms) s)
     (write-string chindings s)
     (emit-context-fields s context)
-    (emit-fields s fields)
+    (emit-json-fields s fields)
     (write-string ",\"msg\":\"" s)
     (write-json-escaped-string message s)
     (write-string "\"}" s)))
@@ -270,23 +270,29 @@ The root logger is automatically wrapped in a child with these fields."
     ;; Child logger bindings from raw-bindings plist
     (loop for (k v) on raw-bindings by #'cddr do
       (write-char #\Space s)
-      (logfmt-write-key s k)
-      (write-char #\= s)
-      (logfmt-write-value s v))
+      (emit-logfmt-key s k)
+      (if (eq v t)
+          nil ; bare key = true in logfmt
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s v))))
     ;; Dynamic context
     (dolist (pair context)
       (write-char #\Space s)
-      (logfmt-write-key s (car pair))
-      (write-char #\= s)
-      (logfmt-write-value s (cdr pair)))
+      (emit-logfmt-key s (car pair))
+      (if (eq (cdr pair) t)
+          nil
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s (cdr pair)))))
     ;; Per-call fields
     (loop for (k v) on fields by #'cddr do
       (write-char #\Space s)
-      (logfmt-write-key s k)
-      (write-char #\= s)
-      (logfmt-write-value s v))
+      (emit-logfmt-key s k)
+      (if (eq v t)
+          nil
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s v))))
     (write-string " msg=" s)
-    (logfmt-write-value s message)))
+    (emit-logfmt-value s message)))
 
 (declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
 
@@ -302,76 +308,33 @@ The root logger is automatically wrapped in a child with these fields."
       ;; Child logger bindings
       (loop for (k v) on raw-bindings by #'cddr do
         (format s " ~c[2m~a~c[0m=" #\Esc
-                (etypecase k (string k) (symbol (string-downcase (symbol-name k))))
+                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
                 #\Esc)
         (princ v s))
       ;; Context fields
       (dolist (pair context)
         (format s " ~c[2m~a~c[0m=" #\Esc
-                (etypecase (car pair) (string (car pair)) (symbol (string-downcase (symbol-name (car pair)))))
+                (typecase (car pair) (string (car pair)) (symbol (string-downcase (symbol-name (car pair)))))
                 #\Esc)
         (princ (cdr pair) s))
       ;; Per-call fields
       (loop for (k v) on fields by #'cddr do
         (format s " ~c[2m~a~c[0m=" #\Esc
-                (etypecase k (string k) (symbol (string-downcase (symbol-name k))))
+                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
                 #\Esc)
         (princ v s)))))
 
+;;; --- Serialization Limits ---
+
+(defvar *max-emit-depth* 4
+  "Maximum nesting depth for collections in emit-json-value.
+   At depth 0, collections become <type> placeholders.")
+
+(defvar *max-emit-length* 20
+  "Maximum number of elements emitted per collection.
+   Excess elements are replaced by a single \"...\" sentinel.")
+
 ;;; --- JSON Output ---
-
-(declaim (ftype (function (stream list) (values null &optional)) emit-context-fields))
-
-(defun emit-context-fields (stream context)
-  "Write dynamic context fields (alist) as JSON key-value pairs to STREAM."
-  (dolist (pair context)
-    (emit-key stream (car pair))
-    (emit-value stream (cdr pair))))
-
-(declaim (ftype (function (stream list) (values null &optional)) emit-fields))
-
-(defun emit-fields (stream fields)
-  "Write a plist of FIELDS as JSON key-value pairs to STREAM."
-  (loop for (k v) on fields by #'cddr do
-    (emit-key stream k)
-    (emit-value stream v)))
-
-(declaim (ftype (function (stream (or string symbol)) (values t &optional)) emit-key))
-
-(defun emit-key (stream key)
-  "Write KEY as a JSON object key to STREAM."
-  (write-string ",\"" stream)
-  (etypecase key
-    (string (write-json-escaped-string key stream))
-    (symbol (write-string (string-downcase (symbol-name key)) stream)))
-  (write-string "\":" stream))
-
-(declaim (ftype (function (stream t) (values t &optional)) emit-value))
-
-(defun emit-value (stream value)
-  "Write VALUE as JSON to STREAM."
-  (etypecase value
-    (string (write-char #\" stream) (write-json-escaped-string value stream) (write-char #\" stream))
-    (integer (princ value stream))
-    (float (princ value stream))
-    ((eql t) (write-string "true" stream))
-    (null (write-string "null" stream))
-    (symbol (write-char #\" stream) (write-string (string-downcase (symbol-name value)) stream) (write-char #\" stream))
-    (vector (write-char #\[ stream)
-            (loop for i from 0 below (length value)
-                  when (plusp i) do (write-char #\, stream)
-                  do (emit-value stream (aref value i)))
-            (write-char #\] stream))
-    (hash-table (write-char #\{ stream)
-                (let ((first t))
-                  (maphash (lambda (k v)
-                             (if first (setf first nil) (write-char #\, stream))
-                             (write-char #\" stream)
-                             (write-json-escaped-string (string k) stream)
-                             (write-string "\":" stream)
-                             (emit-value stream v))
-                           value))
-                (write-char #\} stream))))
 
 (declaim (ftype (function (simple-string stream) (values null &optional)) write-json-escaped-string))
 
@@ -390,29 +353,160 @@ The root logger is automatically wrapped in a child with these fields."
              (format stream "\\u~4,'0X" (char-code c))
              (write-char c stream))))))
 
+(defun emit-type-placeholder (stream value)
+  "Write a \"<type>\" placeholder for VALUE to STREAM as a JSON string."
+  (let ((type-name (string-downcase (princ-to-string (type-of value)))))
+    (write-char #\" stream)
+    (write-char #\< stream)
+    (write-string type-name stream)
+    (write-char #\> stream)
+    (write-char #\" stream)))
+
+(defun emit-json-key (stream key)
+  "Write KEY as a JSON object key to STREAM."
+  (write-string ",\"" stream)
+  (typecase key
+    (string (write-json-escaped-string key stream))
+    (symbol (write-string (string-downcase (symbol-name key)) stream)))
+  (write-string "\":" stream))
+
+(defun coerce-hash-key (k)
+  "Coerce hash-table key K to a string for JSON output."
+  (typecase k
+    (string k)
+    (symbol (string-downcase (symbol-name k)))
+    (pathname (namestring k))
+    (t (string-downcase (princ-to-string (type-of k))))))
+
+(defun emit-json-value (stream value &optional (depth *max-emit-depth*))
+  "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
+  (typecase value
+    (string
+     (write-char #\" stream)
+     (write-json-escaped-string value stream)
+     (write-char #\" stream))
+    (character
+     (write-char #\" stream)
+     (write-json-escaped-string (string value) stream)
+     (write-char #\" stream))
+    (integer (princ value stream))
+    (float (princ value stream))
+    (ratio (format stream "~F" (coerce value 'double-float)))
+    ((eql t) (write-string "true" stream))
+    (null (write-string "null" stream))
+    (symbol
+     (write-char #\" stream)
+     (write-string (string-downcase (symbol-name value)) stream)
+     (write-char #\" stream))
+    (pathname
+     (write-char #\" stream)
+     (write-json-escaped-string (namestring value) stream)
+     (write-char #\" stream))
+    (cons
+     (if (<= depth 0)
+         (emit-type-placeholder stream value)
+         (progn
+           (write-char #\[ stream)
+           (loop for cell on value
+                 for i from 0
+                 for first = t then nil
+                 when (>= i *max-emit-length*)
+                   do (write-string ",\"...\"" stream)
+                      (loop-finish)
+                 unless first do (write-char #\, stream)
+                 do (emit-json-value stream (car cell) (1- depth))
+                 when (and (cdr cell) (atom (cdr cell)))
+                   do (write-char #\, stream)
+                      (emit-json-value stream (cdr cell) (1- depth))
+                      (loop-finish))
+           (write-char #\] stream))))
+    (vector
+     (if (<= depth 0)
+         (emit-type-placeholder stream value)
+         (let ((len (length value)))
+           (write-char #\[ stream)
+           (loop for i from 0 below len
+                 when (>= i *max-emit-length*)
+                   do (write-string ",\"...\"" stream)
+                      (loop-finish)
+                 when (plusp i) do (write-char #\, stream)
+                 do (emit-json-value stream (aref value i) (1- depth)))
+           (write-char #\] stream))))
+    (hash-table
+     (if (<= depth 0)
+         (emit-type-placeholder stream value)
+         (let ((first t)
+               (count 0))
+           (write-char #\{ stream)
+           (maphash (lambda (k v)
+                      (when (>= count *max-emit-length*)
+                        (write-string ",\"...\":\"...\"" stream)
+                        (return-from emit-json-value))
+                      (if first (setf first nil) (write-char #\, stream))
+                      (write-char #\" stream)
+                      (write-json-escaped-string (coerce-hash-key k) stream)
+                      (write-string "\":" stream)
+                      (emit-json-value stream v (1- depth))
+                      (incf count))
+                    value)
+           (write-char #\} stream))))
+    (t (emit-type-placeholder stream value))))
+
+(defun emit-json-fields (stream fields)
+  "Write a plist of FIELDS as JSON key-value pairs to STREAM."
+  (loop for (k v) on fields by #'cddr do
+    (emit-json-key stream k)
+    (emit-json-value stream v)))
+
+(defun emit-context-fields (stream context)
+  "Write dynamic context fields (alist) as JSON key-value pairs to STREAM."
+  (dolist (pair context)
+    (emit-json-key stream (car pair))
+    (emit-json-value stream (cdr pair))))
+
+;; Legacy aliases
+(setf (fdefinition 'emit-value) #'emit-json-value)
+(setf (fdefinition 'emit-key) #'emit-json-key)
+(setf (fdefinition 'emit-fields) #'emit-json-fields)
+
+(defun serialize-bindings (bindings)
+  "Pre-serialize BINDINGS plist to a JSON fragment string."
+  (with-output-to-string (s)
+    (emit-json-fields s bindings)))
+
 ;;; --- Logfmt Output ---
 
-(declaim (ftype (function (stream (or string symbol)) (values t &optional)) logfmt-write-key))
-
-(defun logfmt-write-key (stream key)
+(defun emit-logfmt-key (stream key)
   "Write a logfmt key to STREAM."
-  (etypecase key
+  (typecase key
     (string (write-string key stream))
     (symbol (write-string (string-downcase (symbol-name key)) stream))))
 
-(declaim (ftype (function (stream t) (values t &optional)) logfmt-write-value))
+(defun logfmt-write-bare-or-quoted (stream string)
+  "Write STRING to STREAM, quoting if it contains space, quote, or equals."
+  (if (find-if (lambda (c) (or (char= c #\Space) (char= c #\") (char= c #\=))) string)
+      (progn (write-char #\" stream) (write-string string stream) (write-char #\" stream))
+      (write-string string stream)))
 
-(defun logfmt-write-value (stream value)
-  "Write a logfmt value to STREAM."
-  (etypecase value
-    (string (if (find-if (lambda (c) (or (char= c #\Space) (char= c #\") (char= c #\=))) value)
-                (progn (write-char #\" stream) (write-string value stream) (write-char #\" stream))
-                (write-string value stream)))
+(defun emit-logfmt-value (stream value)
+  "Write VALUE as a logfmt value to STREAM.  Scalars only."
+  (typecase value
+    (string (logfmt-write-bare-or-quoted stream value))
+    (character (write-string (string value) stream))
     (integer (princ value stream))
     (float (princ value stream))
-    ((eql t) (write-string "true" stream))
+    (ratio (format stream "~F" (coerce value 'double-float)))
     (null (write-string "null" stream))
-    (symbol (write-string (string-downcase (symbol-name value)) stream))))
+    (symbol (write-string (string-downcase (symbol-name value)) stream))
+    (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
+    (t (let ((type-name (string-downcase (princ-to-string (type-of value)))))
+         (write-char #\< stream)
+         (write-string type-name stream)
+         (write-char #\> stream)))))
+
+;; Legacy aliases
+(setf (fdefinition 'logfmt-write-key) #'emit-logfmt-key)
+(setf (fdefinition 'logfmt-write-value) #'emit-logfmt-value)
 
 ;;; --- Async Output ---
 

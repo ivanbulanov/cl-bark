@@ -11,7 +11,11 @@
    #:logger-output #:logger-chindings #:logger-raw-bindings #:logger-sampler
    #:logger-trace-fn #:logger-debug-fn #:logger-info-fn
    #:logger-warn-fn #:logger-error-fn #:logger-fatal-fn
-   ;; JSON/serialization internals
+   ;; JSON/serialization internals (new names)
+   #:emit-json-value #:emit-json-fields #:emit-json-key
+   #:emit-logfmt-value #:emit-logfmt-key
+   #:*max-emit-depth* #:*max-emit-length*
+   ;; JSON/serialization internals (old names, until migrated)
    #:emit-value #:emit-fields #:emit-key
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
@@ -121,6 +125,176 @@
     (5am:is-true (search "web" r))
     (5am:is-true (search "version" r))
     (5am:is-true (search "2" r))))
+
+;;; --- JSON Value Serialization (new types) ---
+
+(5am:test test-emit-json-value-character
+  "Characters serialize as single-char JSON strings."
+  (let ((r (with-output-to-string (s) (emit-json-value s #\a))))
+    (5am:is (string= "\"a\"" r)))
+  (let ((r (with-output-to-string (s) (emit-json-value s #\Space))))
+    (5am:is (string= "\" \"" r))))
+
+(5am:test test-emit-json-value-ratio
+  "Ratios coerce to double-float without d0 suffix."
+  (let ((r (with-output-to-string (s) (emit-json-value s 1/3))))
+    (5am:is-true (search "0.333" r))
+    (5am:is-false (search "d0" r))
+    (5am:is-false (search "D0" r))))
+
+(5am:test test-emit-json-value-pathname
+  "Pathnames serialize as quoted namestrings."
+  (let ((r (with-output-to-string (s) (emit-json-value s #P"/var/log/app.log"))))
+    (5am:is (string= "\"/var/log/app.log\"" r))))
+
+(5am:test test-emit-json-value-cons
+  "Proper lists serialize as JSON arrays."
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 3)))))
+    (5am:is (string= "[1,2,3]" r)))
+  ;; Nested list
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 (2 3))))))
+    (5am:is (string= "[1,[2,3]]" r))))
+
+(5am:test test-emit-json-value-dotted-pair
+  "Dotted pairs serialize as JSON arrays with cdr appended."
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 . 2)))))
+    (5am:is (string= "[1,2]" r)))
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 . 3)))))
+    (5am:is (string= "[1,2,3]" r))))
+
+(5am:test test-emit-json-value-hash-table-symbol-keys
+  "Hash-tables with symbol keys produce lowercased string keys."
+  (let ((h (make-hash-table)))
+    (setf (gethash :name h) "alice")
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      (5am:is-true (search "\"name\":\"alice\"" r)))))
+
+(5am:test test-emit-json-value-hash-table-pathname-keys
+  "Hash-tables with pathname keys produce namestring keys."
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash #P"/tmp/log" h) 42)
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      (5am:is-true (search "\"/tmp/log\":42" r)))))
+
+(5am:test test-emit-json-value-hash-table-unsupported-keys
+  "Hash-tables with unsupported key types produce type-name keys."
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash 42 h) "the-answer")
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      ;; Integer key becomes type placeholder (type-of 42 is implementation-dependent)
+      (5am:is-true (search "\"the-answer\"" r))
+      ;; Key should not be "42" (raw number as string)
+      (5am:is-false (string= "{\"42\":\"the-answer\"}" r)))))
+
+(5am:test test-emit-json-value-fallback-placeholder
+  "Unsupported types produce <type-name> placeholder."
+  ;; Function
+  (let ((r (with-output-to-string (s) (emit-json-value s #'car))))
+    (5am:is-true (search "<" r))
+    (5am:is-true (search ">" r))
+    (5am:is (char= #\" (char r 0)))))
+
+(5am:test test-emit-json-value-clos-placeholder
+  "CLOS objects produce <class-name> placeholder."
+  (let ((r (with-output-to-string (s) (emit-json-value s (make-hash-table)))))
+    ;; hash-table is supported, so test with a condition object instead
+    (5am:is-true (hash-table-p (yason:parse r))))
+  ;; Use a condition object as the CLOS test
+  (let ((r (with-output-to-string (s)
+             (emit-json-value s (make-condition 'simple-error
+                                  :format-control "test"
+                                  :format-arguments nil)))))
+    (5am:is-true (search "<" r))))
+
+;;; --- JSON Serialization Limits ---
+
+(5am:test test-emit-json-value-depth-limit
+  "Nested collections become placeholders at depth 0."
+  ;; At depth 1, top-level list serializes but nested list becomes placeholder
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 (2 3)) 1))))
+    (5am:is-true (search "1" r))
+    (5am:is-true (search "<cons>" r)))
+  ;; At depth 0, even top-level becomes placeholder
+  (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 3) 0))))
+    (5am:is-true (search "<cons>" r))))
+
+(5am:test test-emit-json-value-length-limit-cons
+  "Lists longer than *max-emit-length* are truncated with ellipsis."
+  (let ((bark:*max-emit-length* 3))
+    (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 3 4 5)))))
+      (5am:is (string= "[1,2,3,\"...\"]" r)))))
+
+(5am:test test-emit-json-value-length-limit-vector
+  "Vectors longer than *max-emit-length* are truncated with ellipsis."
+  (let ((bark:*max-emit-length* 2))
+    (let ((r (with-output-to-string (s) (emit-json-value s #(10 20 30 40)))))
+      (5am:is (string= "[10,20,\"...\"]" r)))))
+
+(5am:test test-emit-json-value-length-limit-hash-table
+  "Hash-tables larger than *max-emit-length* are truncated."
+  (let ((bark:*max-emit-length* 1)
+        (h (make-hash-table :test 'equal)))
+    (setf (gethash "a" h) 1 (gethash "b" h) 2 (gethash "c" h) 3)
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      (5am:is-true (search "\"...\":\"...\"" r)))))
+
+(5am:test test-emit-json-value-depth-and-length
+  "Depth and length limits compose correctly."
+  (let ((bark:*max-emit-length* 2))
+    ;; depth=2: top list OK, nested list OK, doubly-nested → placeholder
+    (let ((r (with-output-to-string (s) (emit-json-value s '((1 2) (3 4) (5 6)) 2))))
+      ;; Length limit truncates to 2 elements + ellipsis
+      (5am:is-true (search "\"...\"" r)))))
+
+;;; --- logfmt Value Serialization ---
+
+(5am:test test-emit-logfmt-value-character
+  "Characters serialize as bare single char in logfmt."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s #\x))))
+    (5am:is (string= "x" r))))
+
+(5am:test test-emit-logfmt-value-ratio
+  "Ratios coerce to double-float in logfmt."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s 1/4))))
+    (5am:is-true (search "0.25" r))
+    (5am:is-false (search "d0" r))))
+
+(5am:test test-emit-logfmt-value-pathname
+  "Pathnames serialize via namestring in logfmt."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s #P"/tmp/log"))))
+    (5am:is (string= "/tmp/log" r)))
+  ;; Pathname with spaces gets quoted
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s #P"/tmp/my log"))))
+    (5am:is (string= "\"/tmp/my log\"" r))))
+
+(5am:test test-emit-logfmt-value-collection-placeholder
+  "Collections produce <type> placeholder in logfmt."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s '(1 2 3)))))
+    (5am:is (string= "<cons>" r)))
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s #(1 2 3)))))
+    (5am:is-true (search "<" r)))
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s (make-hash-table)))))
+    (5am:is-true (search "<" r))))
+
+(5am:test test-emit-logfmt-value-fallback-placeholder
+  "Unsupported types produce <type> placeholder in logfmt."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s #'car))))
+    (5am:is-true (search "<" r))
+    (5am:is-true (search ">" r))))
+
+;;; --- logfmt Bare Key for Boolean T ---
+
+(5am:test test-logfmt-bare-key-for-true
+  "In logfmt, boolean t emits bare key with no =value."
+  (let ((out (make-string-output-stream)))
+    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
+      (funcall (bark::logger-info-fn l) l "msg" :verbose t :count 42))
+    (let ((s (get-output-stream-string out)))
+      ;; Should have bare "verbose" without "=true"
+      (5am:is-true (search " verbose " s))
+      (5am:is-false (search "verbose=" s))
+      ;; Other fields should still have =
+      (5am:is-true (search "count=42" s)))))
 
 ;;; --- Logger ---
 

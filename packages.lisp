@@ -6,6 +6,14 @@
   (:export "*COMPILE-TIME-MAX-LEVEL*"
            "*LOG-CONTEXT*"
            "*LOGGER*"
+           "*MAX-EMIT-DEPTH*"
+           "*MAX-EMIT-LENGTH*"
+           ;; Serialization API
+           "EMIT-JSON-VALUE" "EMIT-JSON-KEY" "EMIT-JSON-FIELDS"
+           "EMIT-LOGFMT-VALUE" "EMIT-LOGFMT-KEY"
+           ;; Legacy serialization names (still exported)
+           "EMIT-VALUE" "EMIT-KEY" "EMIT-FIELDS"
+           "WRITE-JSON-ESCAPED-STRING" "SERIALIZE-BINDINGS"
            "ASYNC-OUTPUT"
            "CHILD"
            "DEBUG"
