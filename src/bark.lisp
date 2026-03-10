@@ -181,12 +181,15 @@
 
 ;;; --- Lifecycle ---
 
-(declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function) (:name string))
- (values logger &optional)) start))
+(declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function)
+                                (:name string) (:context list))
+                          (values logger &optional)) start))
 
 (defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter)
-                   (name "") (capacity 8192) (on-drop #'default-on-drop))
-  "Start the global logger with an async writer thread."
+                   (name "") (capacity 8192) (on-drop #'default-on-drop) context)
+  "Start the global logger with an async writer thread.
+CONTEXT, when provided, is a plist of static context fields (e.g. :role \"broker\" :pid 123).
+The root logger is automatically wrapped in a child with these fields."
   (when (and *logger* (logger-output *logger*) (async-output-p (logger-output *logger*)))
     (stop))
   (let* ((ao (make-async-output stream :capacity capacity :on-drop on-drop))
@@ -205,7 +208,7 @@
                :formatter formatter
                :output ao)))
     (set-level lgr level)
-    (setf *logger* lgr)))
+    (setf *logger* (if context (apply #'child lgr context) lgr))))
 
 (declaim (ftype (function nil (values null &optional)) stop))
 

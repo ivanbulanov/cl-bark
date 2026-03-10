@@ -91,7 +91,12 @@ Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is 
 ```lisp
 ;; Start global async logger
 (bark:start &key (stream *error-output*) (level :info) (formatter #'json-formatter)
-                 (name "") (capacity 8192) (on-drop #'bark::default-on-drop))
+                 (name "") (capacity 8192) (on-drop #'bark::default-on-drop)
+                 context)
+
+;; Start with static context (avoids manual bark:child + setf dance)
+(bark:start :name "myapp" :level :info
+            :context '(:component "auth" :region "us-east-1"))
 
 ;; Stop and flush
 (bark:stop)
