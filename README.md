@@ -276,3 +276,11 @@ Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is
 ## Design Document
 
 See [cl-bark-design.md](../funhouse-mcp/docs/plans/2026-02-26-cl-bark-design.md) for the full design rationale, architecture diagrams, and v1.1 roadmap.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Author
+
+[Ivan Bulanov](https://github.com/ivanbulanov)
