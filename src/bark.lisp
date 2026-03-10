@@ -612,25 +612,31 @@
 ;;; --- Convenience API ---
 
 (defmacro debug (message &rest fields)
-  "Log MESSAGE at debug level to *LOGGER*."
-  `(funcall (logger-debug-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at debug level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-debug-fn *logger*) *logger* ,message ,@fields)))
 
 (defmacro error (message &rest fields)
-  "Log MESSAGE at error level to *LOGGER*."
-  `(funcall (logger-error-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at error level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-error-fn *logger*) *logger* ,message ,@fields)))
 
 (defmacro fatal (message &rest fields)
-  "Log MESSAGE at fatal level to *LOGGER*."
-  `(funcall (logger-fatal-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at fatal level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-fatal-fn *logger*) *logger* ,message ,@fields)))
 
 (defmacro info (message &rest fields)
-  "Log MESSAGE at info level to *LOGGER*."
-  `(funcall (logger-info-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at info level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-info-fn *logger*) *logger* ,message ,@fields)))
 
 (defmacro trace (message &rest fields)
-  "Log MESSAGE at trace level to *LOGGER*."
-  `(funcall (logger-trace-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at trace level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-trace-fn *logger*) *logger* ,message ,@fields)))
 
 (defmacro warn (message &rest fields)
-  "Log MESSAGE at warn level to *LOGGER*."
-  `(funcall (logger-warn-fn *logger*) *logger* ,message ,@fields))
+  "Log MESSAGE at warn level to *LOGGER*. No-op when *LOGGER* is nil."
+  `(when *logger*
+     (funcall (logger-warn-fn *logger*) *logger* ,message ,@fields)))

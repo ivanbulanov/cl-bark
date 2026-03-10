@@ -71,7 +71,7 @@ Levels are integer-encoded, spaced by 10 for user-defined intermediate levels.
 (bark:fatal message &rest fields)
 ```
 
-Each macro expands to `(funcall (logger-<level>-fn *logger*) *logger* message fields...)`. When the level is disabled, the function slot is `#'noop`.
+Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is a no-op, otherwise it dispatches to `(logger-<level>-fn *logger*)`. When the level is disabled, the function slot is `#'noop`.
 
 ### Logger Management
 
@@ -158,6 +158,22 @@ Control the buffer size and drop behavior:
 ```
 
 ### Testing
+
+All logging macros are safe to call when `bark:*logger*` is nil — they silently no-op. This means test code that exercises logging call sites can run without initializing a logger:
+
+```lisp
+;; No logger setup needed — log calls are silently ignored
+(defun my-function ()
+  (bark:info "processing" :step 1)
+  (do-work)
+  (bark:debug "done"))
+
+(test my-function-works
+  ;; bark:*logger* is nil here — log calls are harmless no-ops
+  (is (expected-result-p (my-function))))
+```
+
+To capture and assert on log output, use `with-captured-logs` which binds a temporary logger:
 
 ```lisp
 ;; Captures log output as a list of strings (default: json-formatter)
