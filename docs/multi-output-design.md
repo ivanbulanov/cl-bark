@@ -39,10 +39,11 @@ A function. `destinations` is a list of plists, each with the keys:
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level +<level>+)`. Mutually exclusive with `:filter` — specifying both is an error.
 - `:capacity` — ring buffer size for this destination (defaults to 8192, rounded up to next power of two)
 - `:on-drop` — drop handler for this destination (defaults to `#'bark::default-on-drop`)
+- `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream error occurs. Returns a stream to replace the failed one and continue, or nil to let the writer exit (default behavior). When omitted, the writer logs the error to `*error-output*` and exits.
 
 The filter receives the log level (integer) and the per-call fields (the `&rest` plist passed to `bark:info` etc.). It does not see static context (child bindings) or dynamic context (`with-context` bindings) — those are part of formatting, not routing.
 
-Wraps each destination in an async-output (ring buffer + writer thread) and returns a value the logger's `output` slot accepts. `bark:stop` tears down all writer threads.
+Wraps each destination in an async-output (ring buffer + writer thread) and returns a value the logger's `output` slot accepts. `bark:stop` tears down all writer threads but does not close streams — the caller who opened them is responsible for closing them (standard CL convention).
 
 `:level` is sugar — these are equivalent:
 
@@ -72,7 +73,7 @@ Programmatic construction — destinations from a config list:
 (bark:tee &rest destination-specs) -> output
 ```
 
-Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop)`. Expressions are evaluated naturally — no quoting needed:
+Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error)`. Expressions are evaluated naturally — no quoting needed:
 
 ```lisp
 (bark:tee
@@ -128,7 +129,7 @@ All six logging macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) acce
 (bark:info some-logger "message" &rest fields) ; uses some-logger
 ```
 
-Dispatch via `logger-p` on the first argument at runtime (struct type tag check, negligible cost).
+Dispatch via `logger-p` on the first argument at runtime (struct type tag check, negligible cost). The explicit logger must be a `logger` struct — passing nil falls through to the `*logger*` path with the nil value as the message, which is a caller error.
 
 Macro expansion:
 
@@ -162,9 +163,17 @@ Caller thread                      Writer threads (one per destination)
 
 `make-tee` creates the async-outputs when called. `bark:stop` iterates all destinations and tears down each writer thread.
 
+**Thread-per-destination model:** each destination gets its own writer thread and ring buffer. N destinations = N writer threads. This is a deliberate choice:
+
+- **Isolation** — a slow destination (e.g., network sink with high latency) cannot block fast ones (local file, stderr). Each writer drains its ring buffer independently.
+- **Simplicity** — no thread pool scheduling, no multiplexing, no shared-writer coordination. Each writer is a self-contained loop identical to today's single-output writer.
+- **Low cost** — idle writer threads are blocked on a semaphore (OS futex). They consume one kernel thread descriptor and minimal RSS (stack pages are virtual until touched). For the typical 2–4 destinations, the overhead is negligible.
+
+The alternative — sharing a writer thread across destinations — would serialize I/O: one slow `write-string` + `force-output` blocks all other destinations on that thread. This is strictly worse for the common case where destinations have different latencies.
+
 For filtered-out destinations, the caller skips formatting entirely — less work than today's single-output path for those destinations.
 
-**Shared formatter optimization:** at tee construction time, destinations are grouped by formatter identity (`eq`). When multiple destinations share the same formatter function, the log call formats the message once and emits the resulting string to all their ring buffers. This is a guarantee, not just an internal optimization — users can rely on it when choosing to share formatters across destinations:
+**Shared formatter optimization:** at tee construction time, destinations are grouped by formatter identity (`eq`). When multiple destinations share the same formatter function, the log call formats the message once and emits the resulting string to all their ring buffers. Users can rely on this when choosing to share formatters across destinations. The optimization applies to function objects that are `eq` — typically `#'bark:json-formatter` used in multiple destination specs. Separately-created closures or lambda forms are not `eq` even if textually identical.
 
 ```lisp
 ;; Same formatter → formatted once, emitted to both ring buffers
@@ -177,6 +186,134 @@ For filtered-out destinations, the caller skips formatting entirely — less wor
   (*error-output* :formatter #'bark:pretty-formatter)
   (*log-file*     :formatter #'bark:json-formatter))
 ```
+
+### Internal Representation
+
+Two new structs, not exported:
+
+```lisp
+(defstruct destination
+  "A single output destination within a tee."
+  (async-output nil :type async-output)
+  (formatter    nil :type function)
+  (filter       nil :type (or null function))
+  (on-error     nil :type (or null function)))
+
+(defstruct tee-output
+  "Fan-out output: multiple destinations, each with its own formatter, filter, and async-output."
+  (destinations #() :type simple-vector))  ; vector of destination structs
+```
+
+`make-tee` builds a `tee-output`. Each element in the destinations vector holds the per-destination formatter, filter, and async-output (ring buffer + writer thread). The `tee-output` struct goes in the logger's `output` slot — the same slot that today holds a plain `async-output`, stream, or function.
+
+### How `make-log-fn` Changes
+
+Today, `make-log-fn` creates a closure that:
+1. Checks the sampler
+2. Calls `(logger-formatter lgr)` to format the message
+3. Dispatches on `(logger-output lgr)`: async-output → push to ring buffer; stream → write directly; function → funcall
+
+With tee, step 2–3 change based on output type:
+
+```lisp
+(let ((output (logger-output lgr)))
+  (cond
+    ((tee-output-p output)
+     (emit-to-tee output level-value
+                   (logger-chindings lgr) (logger-raw-bindings lgr)
+                   *log-context* message fields))
+    ((async-output-p output)
+     (let ((line (funcall (logger-formatter lgr) ...)))
+       (ring-buffer-push (async-output-ring output) line)
+       (bt:signal-semaphore (async-output-notify output))))
+    ...))
+```
+
+`emit-to-tee` iterates the destinations vector. For each destination:
+1. If filter is non-nil, call it with `(level fields)`. Skip this destination if it returns nil.
+2. Format with the destination's formatter (not the logger's).
+3. Push the formatted string to the destination's ring buffer and signal its writer thread.
+
+The shared-formatter optimization groups destinations by `eq` formatter before iterating. When a group has multiple destinations that all pass their filters, the formatter is called once and the resulting string is pushed to all their ring buffers.
+
+**Hot-path cost:** one `tee-output-p` type check (struct tag comparison) on every log call. For the common non-tee case, this check fails fast and falls through to the existing `async-output-p` branch. The tee path is inherently more expensive (N filter checks + up to N format calls), but that is the cost of multi-output.
+
+### Formatter Slot Interaction
+
+The logger's `formatter` slot and the tee's per-destination formatters are independent:
+
+- **Plain output** (async-output, stream, function): `make-log-fn` uses the logger's `formatter` slot, exactly as today.
+- **Tee output**: `make-log-fn` uses each destination's formatter. The logger's `formatter` slot is ignored.
+
+`start` with `:formatter` sets the logger's `formatter` slot regardless of output type. When `:output` is a tee, the slot is inert — each destination already has its own formatter (defaulting to `#'bark:json-formatter` if omitted in the destination spec).
+
+`child` copies the parent's `formatter` slot. When the parent's output is a tee, the child inherits the (inert) formatter slot along with the tee output. This is harmless — the formatter slot is only consulted for non-tee outputs.
+
+### How `stop` Changes
+
+Today, `stop` checks `(async-output-p output)` and calls `stop-async-output`. With tee, it adds a `tee-output-p` branch:
+
+```lisp
+(defun stop ()
+  (when *logger*
+    (let ((output (logger-output *logger*)))
+      (cond
+        ((and output (tee-output-p output))
+         (map nil (lambda (dest)
+                    (stop-async-output (destination-async-output dest)))
+              (tee-output-destinations output)))
+        ((and output (async-output-p output))
+         (stop-async-output output))))
+    (setf *logger* nil)))
+```
+
+Each destination's async-output is stopped independently: flush, set running to nil, join thread, final drain.
+
+### Error Isolation and Recovery
+
+Destinations are independent. If one destination's stream errors (disk full, broken pipe), other destinations continue unaffected. This is intentional — logging is best-effort and must never crash or block the application.
+
+When a writer thread encounters a stream error, it checks the destination's `:on-error` hook:
+
+```lisp
+(handler-case
+    (progn (write-string line stream) (terpri stream) (force-output stream))
+  (cl:error (e)
+    (let ((on-error (destination-on-error dest)))
+      (if on-error
+          (let ((new-stream (funcall on-error e)))
+            (if new-stream
+                (setf (async-output-stream ao) new-stream)  ; swap and continue
+                (setf (async-output-running ao) nil)))      ; give up
+          (progn
+            (format *error-output* "bark writer-loop error: ~a~%" e)
+            (force-output *error-output*)
+            (setf (async-output-running ao) nil))))))       ; default: log and exit
+```
+
+- **`:on-error` returns a stream** → writer swaps to the new stream and continues draining. The failed message is lost (already attempted), but subsequent messages go to the new stream.
+- **`:on-error` returns nil** → writer exits gracefully.
+- **No `:on-error`** → writer logs the error to `*error-output*` and exits (current behavior).
+
+Example — reopen a log file on error:
+
+```lisp
+(bark:tee
+  (*error-output* :formatter #'bark:pretty-formatter)
+  ((open "/var/log/app.jsonl" :direction :output :if-exists :append)
+   :formatter #'bark:json-formatter
+   :on-error (lambda (condition)
+               (declare (ignore condition))
+               (open "/var/log/app.jsonl"
+                     :direction :output :if-exists :append
+                     :if-does-not-exist :create))))
+```
+
+When a writer exits (no `:on-error` or `:on-error` returns nil), its ring buffer fills and drops subsequent messages via the existing `on-drop` mechanism.
+
+### How `child` Interacts
+
+No change needed. `child` copies the parent's `output` slot, which may be a `tee-output`. The tee-output struct is shared between parent and child — this is correct because child loggers add static context (chindings), they don't reroute. All loggers sharing a tee write to the same set of destinations.
 
 ## Configuration Diagrams
 
