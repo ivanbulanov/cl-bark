@@ -17,6 +17,12 @@
            "EMIT-JSON-VALUE" "EMIT-JSON-KEY" "EMIT-JSON-FIELDS"
            "EMIT-LOGFMT-VALUE" "EMIT-LOGFMT-KEY"
            "WRITE-JSON-ESCAPED-STRING" "SERIALIZE-BINDINGS"
+           ;; Condition serialization
+           "CAPTURE"
+           "CAPTURED-ERROR" "CAPTURED-ERROR-P"
+           "CAPTURED-ERROR-CONDITION" "CAPTURED-ERROR-STACK"
+           "*MAX-JSON-STACK-FRAMES*"
+           "*MAX-PRETTY-STACK-FRAMES*"
            "ASYNC-OUTPUT"
            "CHILD"
            "DEBUG"
