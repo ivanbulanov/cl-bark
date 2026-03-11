@@ -143,6 +143,62 @@
     (write-char #\> stream)
     (write-char #\" stream)))
 
+(defun format-condition-type (condition)
+  "Return the type name of CONDITION as a lowercase string."
+  (string-downcase (princ-to-string (type-of condition))))
+
+(defun format-condition-message (condition)
+  "Return the message text of CONDITION as a simple-string."
+  (coerce (princ-to-string condition) 'simple-string))
+
+(defun emit-json-condition-fields (stream condition)
+  "Write \"type\":\"...\",\"msg\":\"...\" for CONDITION to STREAM.
+   No enclosing braces — callers provide { and }."
+  (write-string "\"type\":\"" stream)
+  (write-json-escaped-string (format-condition-type condition) stream)
+  (write-string "\",\"msg\":\"" stream)
+  (write-json-escaped-string (format-condition-message condition) stream)
+  (write-char #\" stream))
+
+(defun emit-json-stack-frame (stream frame)
+  "Write one stack frame as a JSON object {\"call\":...,\"file\":...,\"line\":...}."
+  (write-string "{\"call\":\"" stream)
+  (let ((call (dissect:call frame)))
+    (write-json-escaped-string
+     (if (symbolp call)
+         (string-downcase (symbol-name call))
+         (string-downcase (princ-to-string call)))
+     stream))
+  (write-char #\" stream)
+  (let ((file (dissect:file frame)))
+    (when file
+      (write-string ",\"file\":\"" stream)
+      (write-json-escaped-string (coerce (namestring file) 'simple-string) stream)
+      (write-char #\" stream)))
+  (let ((line (dissect:line frame)))
+    (when line
+      (write-string ",\"line\":" stream)
+      (princ line stream)))
+  (write-char #\} stream))
+
+(defun emit-json-stack (stream stack)
+  "Write ,\"stack\":[...] bounded by *max-json-stack-frames*."
+  (write-string ",\"stack\":[" stream)
+  (let ((limit *max-json-stack-frames*)
+        (i 0))
+    (cond
+      ((null stack))
+      (t
+       (dolist (frame stack)
+         (when (and limit (>= i limit))
+           (when (plusp i) (write-char #\, stream))
+           (write-string "{\"call\":\"...\"}" stream)
+           (return))
+         (when (plusp i) (write-char #\, stream))
+         (emit-json-stack-frame stream frame)
+         (incf i)))))
+  (write-char #\] stream))
+
 (defun emit-json-key (stream key)
   "Write KEY as a JSON object key to STREAM."
   (write-string ",\"" stream)
@@ -231,6 +287,15 @@
                       (incf count))
                     value)
            (write-char #\} stream))))
+    (captured-error
+     (write-char #\{ stream)
+     (emit-json-condition-fields stream (captured-error-condition value))
+     (emit-json-stack stream (captured-error-stack value))
+     (write-char #\} stream))
+    (condition
+     (write-char #\{ stream)
+     (emit-json-condition-fields stream value)
+     (write-char #\} stream))
     (t (emit-type-placeholder stream value))))
 
 (defun emit-json-fields (stream fields)

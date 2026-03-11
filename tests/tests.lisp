@@ -1483,3 +1483,26 @@
             (when pkg
               (5am:is-false (member (package-name pkg) '("BARK" "DISSECT") :test #'string=)
                             "Frame ~a should not be from BARK or DISSECT" call))))))))
+
+(5am:test test-json-condition-simple-error
+  "emit-json-value on a simple-error produces {\"type\":...,\"msg\":...}."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (json-str (with-output-to-string (s) (emit-json-value s c)))
+         (parsed (yason:parse json-str)))
+    (5am:is (string= "simple-error" (gethash "type" parsed)))
+    (5am:is (string= "boom" (gethash "msg" parsed)))))
+
+(5am:test test-json-condition-type-error
+  "emit-json-value on a type-error shows correct type name."
+  (let* ((c (make-condition 'type-error :datum 42 :expected-type 'string))
+         (json-str (with-output-to-string (s) (emit-json-value s c)))
+         (parsed (yason:parse json-str)))
+    (5am:is (string= "type-error" (gethash "type" parsed)))
+    (5am:is (stringp (gethash "msg" parsed)))))
+
+(5am:test test-json-condition-empty-message
+  "Condition with empty format-control produces empty msg, not omitted."
+  (let* ((c (make-condition 'simple-error :format-control ""))
+         (json-str (with-output-to-string (s) (emit-json-value s c)))
+         (parsed (yason:parse json-str)))
+    (5am:is (string= "" (gethash "msg" parsed)))))
