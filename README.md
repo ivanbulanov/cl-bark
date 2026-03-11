@@ -228,6 +228,42 @@ dynamic context:  request-id=req-123, tenant=acme     (per-request, transient)
 per-call fields:  query="SELECT ...", duration-ms=42   (this specific event)
 ```
 
+### Condition Logging
+
+Conditions passed as field values are automatically serialized with their type and message — no wrapper needed.
+
+```lisp
+(handler-case (process-request)
+  (cl:error (c)
+    (bark:error "request failed" :err c :path "/api/users")))
+;; JSON: {"level":50,...,"err":{"type":"simple-error","msg":"connection refused"},"path":"/api/users","msg":"request failed"}
+;; logfmt: level=error ... err="simple-error: connection refused" path=/api/users msg=request\ failed
+;; pretty: ERROR request failed err=simple-error: connection refused path=/api/users
+```
+
+For stack traces, use `bark:capture` inside `handler-bind` (stack still live):
+
+```lisp
+(handler-bind ((cl:error (lambda (c)
+                           (bark:error "request failed"
+                                       :err (bark:capture c))
+                           (invoke-restart 'abort))))
+  (process-request))
+;; JSON err field: {"type":"simple-error","msg":"...","stack":[{"call":"process-request","file":"api.lisp","line":42},...]}
+;; pretty: ERROR request failed err=simple-error: connection refused
+;;           at PROCESS-REQUEST (api.lisp:42)
+;;           at HANDLE-CONNECTION (server.lisp:88)
+```
+
+`bark:capture` works in `handler-case` too, but the stack trace reflects the handler's location (the stack has already unwound), not the error origin.
+
+Stack frame limits:
+
+```lisp
+(setf bark:*max-json-stack-frames* 20)    ; default 10, NIL = unlimited
+(setf bark:*max-pretty-stack-frames* 30)  ; default 20, NIL = unlimited
+```
+
 ### Formatters
 
 A formatter is a function with signature:
@@ -255,6 +291,8 @@ Built-in formatters:
 | `vector` | `[1,2,3]` | `"#(1 2 3)"` | as-is |
 | `hash-table` | `{"k":"v"}` | `"#<HASH-TABLE ...>"` | as-is |
 | `pathname` | `"/var/log/app.jsonl"` | `/var/log/app.jsonl` | as-is |
+| `condition` | `{"type":"...","msg":"..."}` | `"type: msg"` | type: msg |
+| `captured-error` | `{"type":"...","msg":"...","stack":[...]}` | `"type: msg"` | type: msg + stack |
 | everything else | `"princ-to-string"` | `"princ-to-string"` | as-is |
 
 All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and complex types are quoted via `princ-to-string`. The fallback for all other types is `princ-to-string` — specialize `print-object` on your classes to control their log representation.
@@ -560,6 +598,8 @@ Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is
 | `bark:*logger*` | Current logger (bind per-thread or globally) |
 | `bark:*log-context*` | Dynamic context (managed by `with-context`) |
 | `bark:*compile-time-max-level*` | When positive, compiler macros eliminate calls below this level |
+| `bark:*max-json-stack-frames*` | Max stack frames in JSON condition output (default 10, nil = unlimited) |
+| `bark:*max-pretty-stack-frames*` | Max stack frames in pretty condition output (default 20, nil = unlimited) |
 
 ## Dependencies
 
@@ -567,6 +607,7 @@ Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is
 |-----------|---------|
 | `bordeaux-threads` | Portable thread creation and semaphores |
 | `atomics` | Portable CAS and atomic increment for the lock-free ring buffer |
+| `dissect` | Portable stack trace capture for condition logging |
 | `local-time` | Portable Unix millisecond timestamps (non-SBCL fallback) |
 
 Compatible with any implementation supported by [atomics](https://github.com/Shinmera/atomics): SBCL, CCL, ECL, Allegro, LispWorks, CMUCL.
