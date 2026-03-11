@@ -18,6 +18,8 @@
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
+   #:async-output-stream #:async-output-running #:async-output-ring #:async-output-thread
+   #:async-output-notify #:ring-buffer-push
    ;; Multi-output internals
    #:destination-p #:destination-async-output #:destination-formatter #:destination-filter
    #:formatter-group-formatter #:formatter-group-destinations
@@ -1280,3 +1282,62 @@
     ;; Both streams should have the message
     (5am:is-true (search "before stop" (get-output-stream-string s1)))
     (5am:is-true (search "before stop" (get-output-stream-string s2)))))
+
+;;; --- Multi-Output: Error Recovery ---
+
+(5am:test test-on-error-stream-recovery
+  "on-error returning a new stream causes the writer to swap and continue."
+  (let* ((bad-write-count 0)
+         (recovery-stream (make-string-output-stream))
+         (failing-stream (make-broadcast-stream))  ; broadcast to nothing -> won't error, need custom
+         (ao (bark::make-async-output
+              (make-string-output-stream)  ; initial stream
+              :capacity 64
+              :on-error (lambda (e)
+                          (declare (ignore e))
+                          recovery-stream))))
+    ;; Close the initial stream to cause write errors
+    (close (bark::async-output-stream ao))
+    ;; Push a message — writer should hit error, recover to recovery-stream
+    (bark::ring-buffer-push (bark::async-output-ring ao) "recovered message")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    ;; Give writer time to process
+    (sleep 0.2)
+    (bark::stop-async-output ao)
+    ;; The recovery stream should have subsequent messages
+    ;; (the failed message is lost, but the writer continues)
+    (5am:is (eq recovery-stream (bark::async-output-stream ao)))))
+
+(5am:test test-on-error-returns-nil-stops-writer
+  "on-error returning NIL causes the writer thread to exit."
+  (let* ((ao (bark::make-async-output
+              (make-string-output-stream)
+              :capacity 64
+              :on-error (lambda (e) (declare (ignore e)) nil))))
+    (close (bark::async-output-stream ao))
+    (bark::ring-buffer-push (bark::async-output-ring ao) "will fail")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (sleep 0.2)
+    ;; Writer should have exited
+    (5am:is-false (bark::async-output-running ao))
+    ;; Clean up thread
+    (when (bark::async-output-thread ao)
+      (bt:join-thread (bark::async-output-thread ao)))))
+
+(5am:test test-no-on-error-default-behavior
+  "Without on-error, writer logs to *error-output* and exits."
+  (let* ((err-out (make-string-output-stream))
+         (*error-output* err-out)
+         (ao (bark::make-async-output
+              (make-string-output-stream)
+              :capacity 64)))
+    (close (bark::async-output-stream ao))
+    (bark::ring-buffer-push (bark::async-output-ring ao) "will fail")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (sleep 0.2)
+    ;; Writer should have exited
+    (5am:is-false (bark::async-output-running ao))
+    ;; Error should be logged to *error-output*
+    (5am:is-true (search "bark writer-loop error" (get-output-stream-string err-out)))
+    (when (bark::async-output-thread ao)
+      (bt:join-thread (bark::async-output-thread ao)))))

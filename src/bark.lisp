@@ -407,9 +407,12 @@
               :on-drop on-drop
               :on-error on-error
               :notify notify)))
-    (setf (async-output-thread ao)
-          (bt:make-thread (lambda () (writer-loop ao))
-                          :name "bark-writer"))
+    (let ((err-output *error-output*))
+      (setf (async-output-thread ao)
+            (bt:make-thread (lambda ()
+                              (let ((*error-output* err-output))
+                                (writer-loop ao)))
+                            :name "bark-writer")))
     ao))
 
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
@@ -447,31 +450,52 @@
   (let ((ring   (async-output-ring async-output))
         (stream (async-output-stream async-output))
         (notify (async-output-notify async-output)))
-    (handler-case
-        (loop while (async-output-running async-output) do
-          (bt:wait-on-semaphore notify :timeout 0.1)
-          (loop for line = (ring-buffer-pop ring) while line do
-            (write-string line stream)
-            (terpri stream))
-          (force-output stream)
-          (let ((dropped (ring-buffer-dropped ring)))
-            (when (plusp dropped)
-              (loop for old = (ring-buffer-dropped ring)
-                    until (atomics:cas (ring-buffer-dropped ring) old 0))
-              (let ((on-drop (async-output-on-drop async-output)))
-                (when on-drop
-                  (let ((warning (funcall on-drop dropped)))
-                    (when warning
-                      (write-string warning stream)
-                      (terpri stream)
-                      (force-output stream)))))))
-          (let ((ack (async-output-flush-ack async-output)))
-            (when ack
-              (setf (async-output-flush-ack async-output) nil)
-              (bt:signal-semaphore ack))))
-      (cl:error (e)
-        (format *error-output* "bark writer-loop error: ~a~%" e)
-        (force-output *error-output*)))))
+    (flet ((handle-stream-error (e)
+             "Handle a stream write error. Returns T if recovered, NIL to exit."
+             (let ((on-error (async-output-on-error async-output)))
+               (if on-error
+                   (handler-case
+                       (let ((new-stream (funcall on-error e)))
+                         (if new-stream
+                             (progn (setf stream new-stream
+                                          (async-output-stream async-output) new-stream)
+                                    t)
+                             (progn (setf (async-output-running async-output) nil)
+                                    nil)))
+                     (cl:error (handler-error)
+                       (format *error-output* "bark on-error handler failed: ~a (original: ~a)~%" handler-error e)
+                       (force-output *error-output*)
+                       (setf (async-output-running async-output) nil)
+                       nil))
+                   (progn
+                     (format *error-output* "bark writer-loop error: ~a~%" e)
+                     (force-output *error-output*)
+                     (setf (async-output-running async-output) nil)
+                     nil)))))
+      (loop while (async-output-running async-output) do
+        (bt:wait-on-semaphore notify :timeout 0.1)
+        (loop for line = (ring-buffer-pop ring) while line do
+          (handler-case
+              (progn (write-string line stream) (terpri stream))
+            (cl:error (e) (unless (handle-stream-error e) (return)))))
+        (when (async-output-running async-output)
+          (handler-case (force-output stream)
+            (cl:error (e) (handle-stream-error e))))
+        (let ((dropped (ring-buffer-dropped ring)))
+          (when (plusp dropped)
+            (loop for old = (ring-buffer-dropped ring)
+                  until (atomics:cas (ring-buffer-dropped ring) old 0))
+            (let ((on-drop (async-output-on-drop async-output)))
+              (when on-drop
+                (let ((warning (funcall on-drop dropped)))
+                  (when warning
+                    (handler-case
+                        (progn (write-string warning stream) (terpri stream) (force-output stream))
+                      (cl:error () nil))))))))
+        (let ((ack (async-output-flush-ack async-output)))
+          (when ack
+            (setf (async-output-flush-ack async-output) nil)
+            (bt:signal-semaphore ack)))))))
 
 ;;; --- Multi-Output ---
 
