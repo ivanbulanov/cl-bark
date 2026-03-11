@@ -331,6 +331,14 @@
       (progn (write-char #\" stream) (write-string string stream) (write-char #\" stream))
       (write-string string stream)))
 
+(defun emit-logfmt-condition (stream condition)
+  "Write CONDITION as a quoted logfmt value: \"type: message\"."
+  (write-char #\" stream)
+  (write-string (format-condition-type condition) stream)
+  (write-string ": " stream)
+  (write-string (format-condition-message condition) stream)
+  (write-char #\" stream))
+
 (defun emit-logfmt-value (stream value)
   "Write VALUE as a logfmt value to STREAM.  Scalars only."
   (typecase value
@@ -342,6 +350,8 @@
     (null (write-string "null" stream))
     (symbol (write-string (string-downcase (symbol-name value)) stream))
     (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
+    (captured-error (emit-logfmt-condition stream (captured-error-condition value)))
+    (condition (emit-logfmt-condition stream value))
     (t (let ((type-name (string-downcase (princ-to-string (type-of value)))))
          (write-char #\< stream)
          (write-string type-name stream)

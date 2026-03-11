@@ -1563,3 +1563,16 @@
          (json-str (with-output-to-string (s) (emit-json-value s ce)))
          (parsed (yason:parse json-str)))
     (5am:is (equal '() (gethash "stack" parsed)))))
+
+(5am:test test-logfmt-condition
+  "emit-logfmt-value on a condition produces quoted type: message."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (result (with-output-to-string (s) (emit-logfmt-value s c))))
+    (5am:is (string= "\"simple-error: boom\"" result))))
+
+(5am:test test-logfmt-captured-error
+  "emit-logfmt-value on captured-error produces same as plain condition."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c))
+         (result (with-output-to-string (s) (emit-logfmt-value s ce))))
+    (5am:is (string= "\"simple-error: boom\"" result))))
