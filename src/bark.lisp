@@ -473,6 +473,75 @@
         (format *error-output* "bark writer-loop error: ~a~%" e)
         (force-output *error-output*)))))
 
+;;; --- Multi-Output ---
+
+(defstruct destination
+  "A single output destination within a tee."
+  (async-output nil :type async-output)
+  (formatter    nil :type function)
+  (filter       nil :type (or null function)))
+
+(defstruct formatter-group
+  "Destinations sharing an eq formatter, for shared-formatter optimization."
+  (formatter    nil :type function)
+  (destinations #() :type simple-vector))
+
+(defstruct tee-output
+  "Fan-out output: destinations grouped by formatter for shared-format optimization."
+  (groups #() :type simple-vector))
+
+(declaim (ftype (function (list) (values tee-output &optional)) make-tee))
+
+(defun make-tee (destinations)
+  "Create a fan-out output from a list of destination plists.
+Each plist accepts :stream (required), :formatter, :filter, :level, :capacity, :on-drop, :on-error.
+Specifying both :level and :filter is an error."
+  (let ((dests
+          (mapcar
+           (lambda (spec)
+             (let ((stream    (getf spec :stream))
+                   (formatter (or (getf spec :formatter) #'json-formatter))
+                   (filter-fn (getf spec :filter))
+                   (level-kw  (getf spec :level))
+                   (capacity  (or (getf spec :capacity) 8192))
+                   (on-drop   (or (getf spec :on-drop) #'default-on-drop))
+                   (on-error  (getf spec :on-error)))
+               (when (and filter-fn level-kw)
+                 (cl:error "Cannot specify both :filter and :level for a tee destination"))
+               (let ((actual-filter
+                       (cond
+                         (filter-fn filter-fn)
+                         (level-kw
+                          (let ((threshold (level-from-keyword level-kw)))
+                            (lambda (level fields)
+                              (declare (ignore fields))
+                              (>= level threshold))))
+                         (t nil))))
+                 (make-destination
+                  :async-output (make-async-output stream
+                                                   :capacity capacity
+                                                   :on-drop on-drop
+                                                   :on-error on-error)
+                  :formatter formatter
+                  :filter actual-filter))))
+           destinations)))
+    ;; Group by eq formatter for shared-formatter optimization
+    (let ((groups (make-hash-table :test 'eq))
+          (order nil))
+      (dolist (dest dests)
+        (let ((fmt (destination-formatter dest)))
+          (unless (gethash fmt groups)
+            (push fmt order))
+          (push dest (gethash fmt groups))))
+      (make-tee-output
+       :groups (coerce
+                (loop for fmt in (nreverse order)
+                      collect (make-formatter-group
+                               :formatter fmt
+                               :destinations (coerce (nreverse (gethash fmt groups))
+                                                     'simple-vector)))
+                'simple-vector)))))
+
 ;;; --- Logger ---
 
 (defun noop (logger message &rest fields)

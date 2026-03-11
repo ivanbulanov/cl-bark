@@ -18,6 +18,11 @@
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
+   ;; Multi-output internals
+   #:destination-p #:destination-async-output #:destination-formatter #:destination-filter
+   #:formatter-group-formatter #:formatter-group-destinations
+   #:tee-output-p #:tee-output-groups
+   #:make-tee
    ;; Utilities
    #:noop #:make-list-collector
    ;; Public API (non-conflicting)
@@ -907,3 +912,105 @@
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
       (5am:is (not (search "dropped" result))))))
+
+;;; --- Multi-Output: make-tee ---
+
+(5am:test test-make-tee-basic
+  "make-tee creates a tee-output with correct number of destinations."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:make-tee
+               (list (list :stream s1 :formatter #'json-formatter)
+                     (list :stream s2 :formatter #'pretty-formatter)))))
+    (unwind-protect
+         (progn
+           (5am:is-true (tee-output-p tee))
+           ;; Two different formatters -> two groups
+           (5am:is (= 2 (length (tee-output-groups tee))))
+           ;; Each group has one destination
+           (5am:is (= 1 (length (formatter-group-destinations (aref (tee-output-groups tee) 0)))))
+           (5am:is (= 1 (length (formatter-group-destinations (aref (tee-output-groups tee) 1))))))
+      ;; Cleanup: stop all async outputs
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))
+
+(5am:test test-make-tee-shared-formatter-grouping
+  "Destinations with eq formatters are grouped together."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (s3 (make-string-output-stream))
+         (tee (bark:make-tee
+               (list (list :stream s1 :formatter #'json-formatter)
+                     (list :stream s2 :formatter #'pretty-formatter)
+                     (list :stream s3 :formatter #'json-formatter)))))
+    (unwind-protect
+         (progn
+           ;; Two formatters (json shared by 2, pretty by 1) -> two groups
+           (5am:is (= 2 (length (tee-output-groups tee))))
+           ;; Find the json group (has 2 destinations)
+           (let ((json-group (find #'json-formatter (tee-output-groups tee)
+                                   :key #'formatter-group-formatter)))
+             (5am:is-true (not (null json-group)))
+             (5am:is (= 2 (length (formatter-group-destinations json-group))))))
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))
+
+(5am:test test-make-tee-level-filter
+  "The :level shorthand creates a filter that checks >= threshold."
+  (let* ((s1 (make-string-output-stream))
+         (tee (bark:make-tee
+               (list (list :stream s1 :formatter #'json-formatter :level :error)))))
+    (unwind-protect
+         (let* ((group (aref (tee-output-groups tee) 0))
+                (dest (aref (formatter-group-destinations group) 0))
+                (filter (destination-filter dest)))
+           (5am:is-true (not (null filter)))
+           ;; Below error -> filtered out
+           (5am:is-false (funcall filter +info+ nil))
+           (5am:is-false (funcall filter +warn+ nil))
+           ;; At or above error -> passes
+           (5am:is-true (funcall filter +error+ nil))
+           (5am:is-true (funcall filter +fatal+ nil)))
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))
+
+(5am:test test-make-tee-default-formatter
+  "Omitting :formatter defaults to #'json-formatter."
+  (let* ((s1 (make-string-output-stream))
+         (tee (bark:make-tee (list (list :stream s1)))))
+    (unwind-protect
+         (let ((group (aref (tee-output-groups tee) 0)))
+           (5am:is (eq #'json-formatter (formatter-group-formatter group))))
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))
+
+(5am:test test-make-tee-level-and-filter-conflict
+  "Specifying both :level and :filter signals an error."
+  (let ((s1 (make-string-output-stream)))
+    (5am:signals cl:error
+      (bark:make-tee
+       (list (list :stream s1
+                   :level :error
+                   :filter (lambda (level fields) (declare (ignore level fields)) t)))))))
+
+(5am:test test-make-tee-custom-capacity-and-on-drop
+  "Per-destination :capacity and :on-drop are passed to async-output."
+  (let* ((s1 (make-string-output-stream))
+         (custom-drop (lambda (n) (format nil "CUSTOM:~d" n)))
+         (tee (bark:make-tee
+               (list (list :stream s1 :capacity 1024 :on-drop custom-drop)))))
+    (unwind-protect
+         (let* ((group (aref (tee-output-groups tee) 0))
+                (dest (aref (formatter-group-destinations group) 0))
+                (ao (destination-async-output dest)))
+           ;; Ring buffer capacity should be 1024
+           (5am:is (= 1023 (bark::ring-buffer-mask (bark::async-output-ring ao))))
+           ;; on-drop should be our custom function
+           (5am:is (eq custom-drop (bark::async-output-on-drop ao))))
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))
