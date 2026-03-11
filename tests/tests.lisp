@@ -696,7 +696,7 @@
 (5am:test test-async-output-integration
   "START creates an async-backed logger; STOP flushes all pending messages."
   (let ((out (make-string-output-stream)))
-    (bark:start :stream out :level :info :capacity 64)
+    (bark:start :output out :level :info :capacity 64)
     (bark:info "integration-test-msg")
     (bark:stop)
     (let ((result (get-output-stream-string out)))
@@ -1216,3 +1216,67 @@
              (5am:is-false (search "should not appear" out))
              (5am:is-true (search "should appear" out))))
       (stop-tee tee))))
+
+;;; --- Multi-Output: Lifecycle ---
+
+(5am:test test-start-with-plain-stream
+  "start with :output as a plain stream wraps it in async-output."
+  (let ((out (make-string-output-stream)))
+    (bark:start :output out :level :info :name "plain")
+    (bark:info "stream test")
+    (bark:stop)
+    (5am:is-true (search "stream test" (get-output-stream-string out)))))
+
+(5am:test test-start-with-tee-output
+  "start with :output as a tee-output uses it directly."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream)))
+    (bark:start :name "tee" :level :info
+                :output (bark:tee
+                         (s1 :formatter #'json-formatter)
+                         (s2 :formatter #'pretty-formatter)))
+    (bark:info "tee start test" :key "val")
+    (bark:stop)
+    (let ((json-out (get-output-stream-string s1))
+          (pretty-out (get-output-stream-string s2)))
+      (5am:is-true (search "tee start test" json-out))
+      (5am:is-true (search "tee start test" pretty-out))
+      (5am:is-true (search "\"msg\"" json-out)))))
+
+(5am:test test-start-default-output
+  "start with no :output defaults to *error-output*."
+  (let* ((out (make-string-output-stream))
+         (*error-output* out))
+    (bark:start :name "default" :level :info)
+    (bark:info "default test")
+    (bark:stop)
+    (5am:is-true (search "default test" (get-output-stream-string out)))))
+
+(5am:test test-start-with-context-and-tee
+  "start with :context and :output tee wraps in child with context."
+  (let* ((s1 (make-string-output-stream)))
+    (bark:start :name "ctx" :level :info
+                :output (bark:tee (s1 :formatter #'json-formatter))
+                :context '(:role "broker" :pid 123))
+    (bark:info "context tee test")
+    (bark:stop)
+    (let ((out (get-output-stream-string s1)))
+      (5am:is-true (search "context tee test" out))
+      (5am:is-true (search "role" out))
+      (5am:is-true (search "broker" out)))))
+
+(5am:test test-stop-tears-down-tee
+  "stop with tee output stops all writer threads."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream)))
+    (bark:start :name "teardown" :level :info
+                :output (bark:tee
+                         (s1 :formatter #'json-formatter)
+                         (s2 :formatter #'json-formatter)))
+    (bark:info "before stop")
+    (bark:stop)
+    ;; After stop, *logger* should be nil
+    (5am:is-true (null *logger*))
+    ;; Both streams should have the message
+    (5am:is-true (search "before stop" (get-output-stream-string s1)))
+    (5am:is-true (search "before stop" (get-output-stream-string s2)))))

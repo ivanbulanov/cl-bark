@@ -725,18 +725,24 @@ Specifying both :level and :filter is an error."
 
 ;;; --- Lifecycle ---
 
-(declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function)
-                                (:name string) (:capacity fixnum) (:on-drop function) (:context list))
+(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
+                                (:name string) (:capacity fixnum) (:on-drop (or null function))
+                                (:context list))
                           (values logger &optional)) start))
 
-(defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter)
+(defun start (&key output (level :info) (formatter #'json-formatter)
                    (name "") (capacity 8192) (on-drop #'default-on-drop) context)
-  "Start the global logger with an async writer thread.
-CONTEXT, when provided, is a plist of static context fields (e.g. :role \"broker\" :pid 123).
-The root logger is automatically wrapped in a child with these fields."
-  (when (and *logger* (logger-output *logger*) (async-output-p (logger-output *logger*)))
+  "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
+When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
+When OUTPUT is a tee-output, the async-outputs are already created.
+CONTEXT, when provided, is a plist of static context fields."
+  (when (and *logger* (logger-output *logger*))
     (stop))
-  (let* ((ao (make-async-output stream :capacity capacity :on-drop on-drop))
+  (let* ((actual-output (cond
+                          ((tee-output-p output) output)
+                          ((streamp output) (make-async-output output :capacity capacity :on-drop on-drop))
+                          ((null output) (make-async-output *error-output* :capacity capacity :on-drop on-drop))
+                          (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
          (chindings (if (string= name "")
                         ""
                         (with-output-to-string (s)
@@ -750,18 +756,21 @@ The root logger is automatically wrapped in a child with these fields."
                :chindings chindings
                :raw-bindings raw-bindings
                :formatter formatter
-               :output ao)))
+               :output actual-output)))
     (set-level lgr level)
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 
-(declaim (ftype (function nil (values null &optional)) stop))
-
 (defun stop ()
-  "Flush and stop the global logger's writer thread."
+  "Flush and stop the global logger's writer thread(s)."
   (when *logger*
     (let ((output (logger-output *logger*)))
-      (when (and output (async-output-p output))
-        (stop-async-output output)))
+      (cond
+        ((and output (tee-output-p output))
+         (loop for group across (tee-output-groups output)
+               do (loop for dest across (formatter-group-destinations group)
+                        do (stop-async-output (destination-async-output dest)))))
+        ((and output (async-output-p output))
+         (stop-async-output output))))
     (setf *logger* nil)))
 
 ;;; --- Context ---
