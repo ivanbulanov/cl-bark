@@ -390,12 +390,14 @@
   (stream    nil :type (or null stream))
   (running   nil :type boolean)
   (on-drop   nil :type (or null function))
+  (on-error  nil :type (or null function))
   (notify    nil :type t)
   (flush-ack nil :type t))
 
-(declaim (ftype (function (t &key (:capacity fixnum) (:on-drop function)) (values async-output &optional)) make-async-output))
+(declaim (ftype (function (t &key (:capacity fixnum) (:on-drop (or null function)) (:on-error (or null function)))
+                          (values async-output &optional)) make-async-output))
 
-(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop))
+(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop) on-error)
   "Create an async output that writes to STREAM via a background thread."
   (let* ((notify (bt:make-semaphore :name "bark-notify"))
          (ao (%make-async-output
@@ -403,6 +405,7 @@
               :stream stream
               :running t
               :on-drop on-drop
+              :on-error on-error
               :notify notify)))
     (setf (async-output-thread ao)
           (bt:make-thread (lambda () (writer-loop ao))
