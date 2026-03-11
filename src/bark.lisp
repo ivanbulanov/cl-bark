@@ -551,6 +551,28 @@ Specifying both :level and :filter is an error."
                        (cl:error "Cannot specify both :level and :filter in tee destination spec"))
                   collect `(list :stream ,stream-expr ,@keys)))))
 
+(declaim (ftype (function (tee-output fixnum simple-string list list string list) (values &optional)) emit-to-tee))
+
+(defun emit-to-tee (tee-output level-value chindings raw-bindings context message fields)
+  "Emit a log event to all destinations in TEE-OUTPUT, grouped by formatter."
+  (declare (optimize (speed 3) (safety 1)))
+  (loop for group across (tee-output-groups tee-output) do
+    (let ((passing nil))
+      ;; Collect destinations that pass their filter
+      (loop for dest across (formatter-group-destinations group)
+            for filter = (destination-filter dest)
+            when (or (null filter) (funcall filter level-value fields))
+              do (push dest passing))
+      ;; Format once for the group, push to all passing destinations
+      (when passing
+        (let ((line (funcall (formatter-group-formatter group)
+                             level-value chindings raw-bindings context message fields)))
+          (dolist (dest passing)
+            (let ((ao (destination-async-output dest)))
+              (ring-buffer-push (async-output-ring ao) line)
+              (bt:signal-semaphore (async-output-notify ao))))))))
+  (values))
+
 ;;; --- Logger ---
 
 (defun noop (logger message &rest fields)
@@ -596,24 +618,27 @@ Specifying both :level and :filter is an error."
                       (rate (the fixnum (car sample-state))))
                   (unless (zerop (the fixnum (mod count rate)))
                     (return-from log-fn (values))))))))
-        (let* ((formatter (the function (logger-formatter lgr)))
-               (line (funcall formatter
-                              level-value
-                              (logger-chindings lgr)
-                              (logger-raw-bindings lgr)
-                              *log-context*
-                              message
-                              fields))
-               (output (logger-output lgr)))
+        (let ((output (logger-output lgr)))
           (when output
-            (if (async-output-p output)
-                (progn
-                  (ring-buffer-push (async-output-ring output) line)
-                  (bt:signal-semaphore (async-output-notify output)))
-                (etypecase output
-                  (stream (write-string line output) (terpri output) (force-output output))
-                  (function (funcall output line))))))
-        (values)))))
+            (if (tee-output-p output)
+                (emit-to-tee output level-value
+                             (logger-chindings lgr) (logger-raw-bindings lgr)
+                             *log-context* message fields)
+                (let ((line (funcall (the function (logger-formatter lgr))
+                                     level-value
+                                     (logger-chindings lgr)
+                                     (logger-raw-bindings lgr)
+                                     *log-context*
+                                     message
+                                     fields)))
+                  (if (async-output-p output)
+                      (progn
+                        (ring-buffer-push (async-output-ring output) line)
+                        (bt:signal-semaphore (async-output-notify output)))
+                      (etypecase output
+                        (stream (write-string line output) (terpri output) (force-output output))
+                        (function (funcall output line)))))))
+        (values))))))
 
 (declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function) (:output t))
  (values logger &optional)) make-logger))

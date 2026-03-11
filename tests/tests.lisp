@@ -559,6 +559,12 @@
 
 ;;; --- Helpers ---
 
+(defun stop-tee (tee-output)
+  "Stop all async outputs in a tee-output. For test cleanup."
+  (loop for group across (tee-output-groups tee-output)
+        do (loop for dest across (formatter-group-destinations group)
+                 do (bark::stop-async-output (destination-async-output dest)))))
+
 (defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
   (let ((out (make-string-output-stream)))
@@ -1036,3 +1042,177 @@
       (loop for group across (tee-output-groups tee)
             do (loop for dest across (formatter-group-destinations group)
                      do (bark::stop-async-output (destination-async-output dest)))))))
+
+;;; --- Multi-Output: Tee Logging ---
+
+(5am:test test-tee-mirror-two-destinations
+  "Tee with two destinations: same event goes to both with different formatters."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:tee
+               (s1 :formatter #'json-formatter)
+               (s2 :formatter #'logfmt-formatter))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "tee-test" :level :info :output tee)))
+           (bark:info "hello" :key "val")
+           (stop-tee tee)
+           (let ((json-out (get-output-stream-string s1))
+                 (logfmt-out (get-output-stream-string s2)))
+             ;; Both streams got the message
+             (5am:is-true (search "hello" json-out))
+             (5am:is-true (search "hello" logfmt-out))
+             ;; JSON output has JSON structure
+             (5am:is-true (search "\"msg\"" json-out))
+             ;; Logfmt output has logfmt structure
+             (5am:is-true (search "msg=" logfmt-out))))
+      (stop-tee tee))))
+
+(5am:test test-tee-level-filter-routing
+  "Tee with level filter: info goes to console only, error goes to both."
+  (let* ((s-all (make-string-output-stream))
+         (s-errors (make-string-output-stream))
+         (tee (bark:tee
+               (s-all    :formatter #'json-formatter)
+               (s-errors :formatter #'json-formatter :level :error))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "route" :level :info :output tee)))
+           (bark:info "all good")
+           (bark:error "disk full")
+           (stop-tee tee)
+           (let ((all-out (get-output-stream-string s-all))
+                 (err-out (get-output-stream-string s-errors)))
+             ;; All stream gets both messages
+             (5am:is-true (search "all good" all-out))
+             (5am:is-true (search "disk full" all-out))
+             ;; Error stream only gets the error
+             (5am:is-false (search "all good" err-out))
+             (5am:is-true (search "disk full" err-out))))
+      (stop-tee tee))))
+
+(5am:test test-tee-custom-filter
+  "Tee with a custom filter that routes based on per-call fields."
+  (let* ((s-all (make-string-output-stream))
+         (s-audit (make-string-output-stream))
+         (tee (bark:tee
+               (s-all   :formatter #'json-formatter)
+               (s-audit :formatter #'json-formatter
+                        :filter (lambda (level fields)
+                                  (declare (ignore level))
+                                  (getf fields :audit))))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "filter" :level :info :output tee)))
+           (bark:info "page loaded" :path "/home")
+           (bark:info "user login" :audit t :user-id 42)
+           (stop-tee tee)
+           (let ((all-out (get-output-stream-string s-all))
+                 (audit-out (get-output-stream-string s-audit)))
+             ;; All stream gets both
+             (5am:is-true (search "page loaded" all-out))
+             (5am:is-true (search "user login" all-out))
+             ;; Audit stream only gets the audit event
+             (5am:is-false (search "page loaded" audit-out))
+             (5am:is-true (search "user login" audit-out))))
+      (stop-tee tee))))
+
+(5am:test test-tee-shared-formatter-optimization
+  "When destinations share an eq formatter, it's called once per log event."
+  (let* ((call-count 0)
+         (counting-fmt
+          (lambda (level chindings raw-bindings context message fields)
+            (incf call-count)
+            (json-formatter level chindings raw-bindings context message fields)))
+         (s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         ;; Both destinations use the SAME formatter object
+         (tee (bark:make-tee
+               (list (list :stream s1 :formatter counting-fmt)
+                     (list :stream s2 :formatter counting-fmt)))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "opt" :level :info :output tee)))
+           (bark:info "shared format test")
+           (stop-tee tee)
+           ;; Formatter should have been called exactly once (not twice)
+           (5am:is (= 1 call-count))
+           ;; Both streams should have received the message
+           (5am:is-true (search "shared format test" (get-output-stream-string s1)))
+           (5am:is-true (search "shared format test" (get-output-stream-string s2))))
+      (stop-tee tee))))
+
+(5am:test test-tee-shared-formatter-with-filter
+  "Shared formatter optimization respects per-destination filters."
+  (let* ((call-count 0)
+         (counting-fmt
+          (lambda (level chindings raw-bindings context message fields)
+            (incf call-count)
+            (json-formatter level chindings raw-bindings context message fields)))
+         (s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:make-tee
+               (list (list :stream s1 :formatter counting-fmt)
+                     (list :stream s2 :formatter counting-fmt :level :error)))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "opt-filter" :level :info :output tee)))
+           ;; Info message: only s1 passes filter, s2 filtered out
+           (bark:info "info only")
+           (stop-tee tee)
+           ;; Formatter called once (for s1; s2 was filtered but format happens for group)
+           (5am:is (= 1 call-count))
+           (5am:is-true (search "info only" (get-output-stream-string s1)))
+           (5am:is-false (search "info only" (get-output-stream-string s2))))
+      (stop-tee tee))))
+
+(5am:test test-tee-child-inherits
+  "Child logger inherits parent's tee output."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:tee
+               (s1 :formatter #'json-formatter)
+               (s2 :formatter #'json-formatter))))
+    (unwind-protect
+         (let* ((parent (make-logger :name "parent" :level :info :output tee))
+                (ch (child parent :component "auth")))
+           (let ((*logger* ch))
+             (bark:info "token verified" :user-id 42))
+           (stop-tee tee)
+           (let ((out1 (get-output-stream-string s1))
+                 (out2 (get-output-stream-string s2)))
+             ;; Both destinations receive the event
+             (5am:is-true (search "token verified" out1))
+             (5am:is-true (search "token verified" out2))
+             ;; Both include static context from child
+             (5am:is-true (search "component" out1))
+             (5am:is-true (search "auth" out1))
+             (5am:is-true (search "component" out2))))
+      (stop-tee tee))))
+
+(5am:test test-tee-with-context
+  "Dynamic context applies to all tee destinations."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:tee
+               (s1 :formatter #'json-formatter)
+               (s2 :formatter #'json-formatter))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "ctx" :level :info :output tee)))
+           (bark:with-context (:request-id "req-123")
+             (bark:info "hello"))
+           (stop-tee tee)
+           (let ((out1 (get-output-stream-string s1)))
+             (5am:is-true (search "request-id" out1))
+             (5am:is-true (search "req-123" out1))))
+      (stop-tee tee))))
+
+(5am:test test-tee-level-filtering-respects-logger-level
+  "Logger level threshold still applies before tee dispatch."
+  (let* ((s1 (make-string-output-stream))
+         (tee (bark:tee (s1 :formatter #'json-formatter))))
+    (unwind-protect
+         (let ((*logger* (make-logger :name "lvl" :level :warn :output tee)))
+           ;; Info is below logger level -> noop function -> never reaches tee
+           (bark:info "should not appear")
+           (bark:warn "should appear")
+           (stop-tee tee)
+           (let ((out (get-output-stream-string s1)))
+             (5am:is-false (search "should not appear" out))
+             (5am:is-true (search "should appear" out))))
+      (stop-tee tee))))
