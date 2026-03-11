@@ -1606,3 +1606,54 @@
         ;; Should have truncation marker
         (5am:is-true (search "... (" line))
         (5am:is-true (search "more frames)" line))))))
+
+;;; --- Integration Tests: Condition Serialization ---
+
+(5am:test test-integration-json-condition
+  "Full pipeline: bark:error with a condition field, JSON formatter."
+  (bark:with-captured-logs (get-logs #'json-formatter)
+    (let ((c (make-condition 'simple-error :format-control "db down")))
+      (bark:error "query failed" :err c)
+      (let* ((lines (funcall get-logs))
+             (parsed (yason:parse (first lines))))
+        (5am:is (= 1 (length lines)))
+        ;; err is a JSON object with type and msg
+        (let ((err (gethash "err" parsed)))
+          (5am:is (hash-table-p err))
+          (5am:is (string= "simple-error" (gethash "type" err)))
+          (5am:is (string= "db down" (gethash "msg" err))))
+        ;; Top-level msg is the log message
+        (5am:is (string= "query failed" (gethash "msg" parsed)))))))
+
+(5am:test test-integration-json-captured-error
+  "Full pipeline: bark:error with captured-error field, JSON formatter."
+  (bark:with-captured-logs (get-logs #'json-formatter)
+    (let ((c (make-condition 'simple-error :format-control "db down")))
+      (bark:error "query failed" :err (bark:capture c))
+      (let* ((lines (funcall get-logs))
+             (parsed (yason:parse (first lines)))
+             (err (gethash "err" parsed)))
+        (5am:is (hash-table-p err))
+        (5am:is (string= "simple-error" (gethash "type" err)))
+        (5am:is (listp (gethash "stack" err)))))))
+
+(5am:test test-integration-logfmt-condition
+  "Full pipeline: bark:error with a condition field, logfmt formatter."
+  (bark:with-captured-logs (get-logs #'logfmt-formatter)
+    (let ((c (make-condition 'simple-error :format-control "db down")))
+      (bark:error "query failed" :err c)
+      (let ((line (first (funcall get-logs))))
+        (5am:is-true (search "err=\"simple-error: db down\"" line))))))
+
+(5am:test test-integration-custom-condition
+  "Custom condition class serializes with correct type name."
+  (bark:with-captured-logs (get-logs #'json-formatter)
+    (eval '(define-condition bark-tests::test-condition (cl:error)
+             ((detail :initarg :detail :reader bark-tests::test-condition-detail))
+             (:report (lambda (c s) (format s "detail: ~a" (bark-tests::test-condition-detail c))))))
+    (let ((c (make-condition 'bark-tests::test-condition :detail "oops")))
+      (bark:error "custom" :err c)
+      (let* ((parsed (yason:parse (first (funcall get-logs))))
+             (err (gethash "err" parsed)))
+        (5am:is (string= "test-condition" (gethash "type" err)))
+        (5am:is (string= "detail: oops" (gethash "msg" err)))))))
