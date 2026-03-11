@@ -11,12 +11,10 @@
    #:logger-output #:logger-chindings #:logger-raw-bindings #:logger-sampler
    #:logger-trace-fn #:logger-debug-fn #:logger-info-fn
    #:logger-warn-fn #:logger-error-fn #:logger-fatal-fn
-   ;; JSON/serialization internals (new names)
+   ;; JSON/serialization internals
    #:emit-json-value #:emit-json-fields #:emit-json-key
    #:emit-logfmt-value #:emit-logfmt-key
    #:*max-emit-depth* #:*max-emit-length*
-   ;; JSON/serialization internals (old names, until migrated)
-   #:emit-value #:emit-fields #:emit-key
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
@@ -89,29 +87,29 @@
                   (write-json-escaped-string (format nil "col1~ccol2" #\Tab) s))))
     (5am:is-true (search "\\t" result))))
 
-(5am:test test-emit-value-types
-  "Test emit-value for string, integer, float, boolean, null, symbol, vector."
-  (let ((r (with-output-to-string (s) (emit-value s "hello"))))
+(5am:test test-emit-json-value-types
+  "Test emit-json-value for string, integer, float, boolean, null, symbol, vector."
+  (let ((r (with-output-to-string (s) (emit-json-value s "hello"))))
     (5am:is (string= "\"hello\"" r)))
-  (let ((r (with-output-to-string (s) (emit-value s 42))))
+  (let ((r (with-output-to-string (s) (emit-json-value s 42))))
     (5am:is (string= "42" r)))
-  (let ((r (with-output-to-string (s) (emit-value s 3.14))))
+  (let ((r (with-output-to-string (s) (emit-json-value s 3.14))))
     (5am:is-true (search "3.14" r)))
-  (let ((r (with-output-to-string (s) (emit-value s t))))
+  (let ((r (with-output-to-string (s) (emit-json-value s t))))
     (5am:is (string= "true" r)))
-  (let ((r (with-output-to-string (s) (emit-value s nil))))
+  (let ((r (with-output-to-string (s) (emit-json-value s nil))))
     (5am:is (string= "null" r)))
-  (let ((r (with-output-to-string (s) (emit-value s :foo))))
+  (let ((r (with-output-to-string (s) (emit-json-value s :foo))))
     (5am:is-true (search "foo" (string-downcase r))))
-  (let ((r (with-output-to-string (s) (emit-value s #(1 2 3)))))
+  (let ((r (with-output-to-string (s) (emit-json-value s #(1 2 3)))))
     (5am:is-true (search "1" r))
     (5am:is-true (search "2" r))
     (5am:is-true (search "3" r))))
 
-(5am:test test-emit-fields-plist
-  "Test emit-fields with a plist."
+(5am:test test-emit-json-fields-plist
+  "Test emit-json-fields with a plist."
   (let ((r (with-output-to-string (s)
-             (emit-fields s (list :name "foo" :count 42)))))
+             (emit-json-fields s (list :name "foo" :count 42)))))
     (5am:is-true (search "name" r))
     (5am:is-true (search "foo" r))
     (5am:is-true (search "count" r))
@@ -196,10 +194,6 @@
 
 (5am:test test-emit-json-value-clos-placeholder
   "CLOS objects produce <class-name> placeholder."
-  (let ((r (with-output-to-string (s) (emit-json-value s (make-hash-table)))))
-    ;; hash-table is supported, so test with a condition object instead
-    (5am:is-true (hash-table-p (yason:parse r))))
-  ;; Use a condition object as the CLOS test
   (let ((r (with-output-to-string (s)
              (emit-json-value s (make-condition 'simple-error
                                   :format-control "test"
@@ -517,20 +511,9 @@
       (let ((logs (funcall results-fn)))
         (5am:is (= 5 (length logs)))))))
 
-;;; --- Async Output ---
+;;; --- Utilities ---
 
-(fiveam:test test-async-output-basic
-  "Create an async-output to a string stream, send messages, stop, verify stream contents."
-  (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 64)))
-    (bark::ring-buffer-push (bark::async-output-ring ao) "hello")
-    (bark::ring-buffer-push (bark::async-output-ring ao) "world")
-    (bt:signal-semaphore (bark::async-output-notify ao))
-    (bark::flush-async-output ao)
-    (bark::stop-async-output ao)
-    (let ((result (get-output-stream-string out)))
-      (fiveam:is (search "hello" result))
-      (fiveam:is (search "world" result)))))(5am:test test-list-collector
+(5am:test test-list-collector
   "Test make-list-collector, push items, get-results."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (funcall collector "first")
@@ -542,7 +525,22 @@
       (5am:is (string= "second" (second results)))
       (5am:is (string= "third" (third results))))))
 
-(fiveam:test test-flush-async-output
+;;; --- Async Output ---
+
+(5am:test test-async-output-basic
+  "Create an async-output to a string stream, send messages, stop, verify stream contents."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 64)))
+    (bark::ring-buffer-push (bark::async-output-ring ao) "hello")
+    (bark::ring-buffer-push (bark::async-output-ring ao) "world")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (bark::flush-async-output ao)
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (5am:is (search "hello" result))
+      (5am:is (search "world" result)))))
+
+(5am:test test-flush-async-output
   "Verify flush-async-output blocks until queue is drained."
   (let* ((out (make-string-output-stream))
          (ao (bark::make-async-output out :capacity 64)))
@@ -551,8 +549,10 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::flush-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (fiveam:is (= 5 (count #\Newline result))))
-    (bark::stop-async-output ao)));;; --- Helpers ---
+      (5am:is (= 5 (count #\Newline result))))
+    (bark::stop-async-output ao)))
+
+;;; --- Helpers ---
 
 (defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
@@ -682,14 +682,15 @@
 
 ;;; --- Async Output Integration ---
 
-(fiveam:test test-async-output-integration
+(5am:test test-async-output-integration
   "START creates an async-backed logger; STOP flushes all pending messages."
   (let ((out (make-string-output-stream)))
     (bark:start :stream out :level :info :capacity 64)
     (bark:info "integration-test-msg")
     (bark:stop)
     (let ((result (get-output-stream-string out)))
-      (fiveam:is (search "integration-test-msg" result)))))
+      (5am:is (search "integration-test-msg" result)))))
+
 ;;; --- JSON String Escaping ---
 
 (5am:test test-json-string-escaping-roundtrip
@@ -769,27 +770,31 @@
       (5am:is (= 100 full-rate))
       (5am:is-true (<= 50 throttled 150)))))
 
-(fiveam:test (test-with-captured-logs-formatter :compile-at :definition-time)
+;;; --- Captured Logs Formatter ---
+
+(5am:test test-with-captured-logs-formatter
   "WITH-CAPTURED-LOGS accepts an optional formatter argument."
   ;; Default still uses json
   (bark:with-captured-logs (logs)
     (bark:info "hi")
     (let ((line (first (funcall logs))))
-      (fiveam:is (search "\"level\"" line))))
+      (5am:is (search "\"level\"" line))))
   ;; Explicit logfmt
   (bark:with-captured-logs (logs #'bark:logfmt-formatter)
     (bark:info "hi")
     (let ((line (first (funcall logs))))
-      (fiveam:is (search "level=info" line))))
+      (5am:is (search "level=info" line))))
   ;; Explicit pretty
   (bark:with-captured-logs (logs #'bark:pretty-formatter)
     (bark:info "hi")
     (let ((line (first (funcall logs))))
-      (fiveam:is (search "INFO" line))
+      (5am:is (search "INFO" line))
       ;; pretty formatter should NOT have JSON structure
-      (fiveam:is (not (search "\"level\"" line))))))
+      (5am:is (not (search "\"level\"" line))))))
 
-(fiveam:test (test-convenience-macros :compile-at :definition-time)
+;;; --- Convenience Macros ---
+
+(5am:test test-convenience-macros
   "BARK:TRACE through BARK:FATAL expand to the correct level funcalls."
   (bark:with-captured-logs (logs)
     (bark:trace "t")
@@ -799,52 +804,54 @@
     (bark:error "e")
     (bark:fatal "f")
     (let ((lines (funcall logs)))
-      (fiveam:is (= 6 (length lines)))
+      (5am:is (= 6 (length lines)))
       ;; Verify each level number in order
-      (fiveam:is (search "\"level\":10" (nth 0 lines)))
-      (fiveam:is (search "\"level\":20" (nth 1 lines)))
-      (fiveam:is (search "\"level\":30" (nth 2 lines)))
-      (fiveam:is (search "\"level\":40" (nth 3 lines)))
-      (fiveam:is (search "\"level\":50" (nth 4 lines)))
-      (fiveam:is (search "\"level\":60" (nth 5 lines))))))
+      (5am:is (search "\"level\":10" (nth 0 lines)))
+      (5am:is (search "\"level\":20" (nth 1 lines)))
+      (5am:is (search "\"level\":30" (nth 2 lines)))
+      (5am:is (search "\"level\":40" (nth 3 lines)))
+      (5am:is (search "\"level\":50" (nth 4 lines)))
+      (5am:is (search "\"level\":60" (nth 5 lines))))))
 
-(fiveam:test (test-macros-with-fields :compile-at :definition-time)
+(5am:test test-macros-with-fields
   "Convenience macros pass per-call fields through to the formatter."
   (bark:with-captured-logs (logs)
     (bark:info "request" :method "GET" :path "/api")
     (let ((line (first (funcall logs))))
-      (fiveam:is (search "\"method\":\"GET\"" line))
-      (fiveam:is (search "\"path\":\"/api\"" line)))))
+      (5am:is (search "\"method\":\"GET\"" line))
+      (5am:is (search "\"path\":\"/api\"" line)))))
 
-(fiveam:test test-ring-buffer-basic
+;;; --- Ring Buffer ---
+
+(5am:test test-ring-buffer-basic
   "Push and pop values from a ring buffer."
   (let ((rb (bark::make-ring-buffer 16)))
-    (fiveam:is (bark::ring-buffer-push rb "a"))
-    (fiveam:is (bark::ring-buffer-push rb "b"))
-    (fiveam:is (string= "a" (bark::ring-buffer-pop rb)))
-    (fiveam:is (string= "b" (bark::ring-buffer-pop rb)))
-    (fiveam:is (null (bark::ring-buffer-pop rb)))))
+    (5am:is (bark::ring-buffer-push rb "a"))
+    (5am:is (bark::ring-buffer-push rb "b"))
+    (5am:is (string= "a" (bark::ring-buffer-pop rb)))
+    (5am:is (string= "b" (bark::ring-buffer-pop rb)))
+    (5am:is (null (bark::ring-buffer-pop rb)))))
 
-(fiveam:test test-ring-buffer-drop-on-full
+(5am:test test-ring-buffer-drop-on-full
   "Ring buffer drops messages and increments counter when full."
   (let ((rb (bark::make-ring-buffer 16)))
     (dotimes (i 16) (bark::ring-buffer-push rb (format nil "msg-~d" i)))
-    (fiveam:is (= 0 (bark::ring-buffer-dropped rb)))
-    (fiveam:is (null (bark::ring-buffer-push rb "overflow")))
-    (fiveam:is (= 1 (bark::ring-buffer-dropped rb)))
+    (5am:is (= 0 (bark::ring-buffer-dropped rb)))
+    (5am:is (null (bark::ring-buffer-push rb "overflow")))
+    (5am:is (= 1 (bark::ring-buffer-dropped rb)))
     (bark::ring-buffer-pop rb)
-    (fiveam:is (bark::ring-buffer-push rb "recovered"))))
+    (5am:is (bark::ring-buffer-push rb "recovered"))))
 
-(fiveam:test test-ring-buffer-drain
+(5am:test test-ring-buffer-drain
   "Drain returns all available values."
   (let ((rb (bark::make-ring-buffer 16)))
     (dotimes (i 5) (bark::ring-buffer-push rb (format nil "~d" i)))
     (let ((items (bark::ring-buffer-drain rb)))
-      (fiveam:is (= 5 (length items)))
-      (fiveam:is (string= "0" (first items)))
-      (fiveam:is (string= "4" (fifth items))))))
+      (5am:is (= 5 (length items)))
+      (5am:is (string= "0" (first items)))
+      (5am:is (string= "4" (fifth items))))))
 
-(fiveam:test test-ring-buffer-mpsc
+(5am:test test-ring-buffer-mpsc
   "Multiple producer threads can push without data loss."
   (let ((rb (bark::make-ring-buffer 1024))
         (threads nil))
@@ -857,10 +864,12 @@
             threads))
     (dolist (th threads) (bt:join-thread th))
     (let ((items (bark::ring-buffer-drain rb)))
-      (fiveam:is (= 400 (length items)))
-      (fiveam:is (= 0 (bark::ring-buffer-dropped rb))))))
+      (5am:is (= 400 (length items)))
+      (5am:is (= 0 (bark::ring-buffer-dropped rb))))))
 
-(fiveam:test test-async-drop-warning
+;;; --- Async Drop Handling ---
+
+(5am:test test-async-drop-warning
   "When the ring buffer overflows, a drop warning appears in the output."
   (let* ((out (make-string-output-stream))
          (ao (bark::make-async-output out :capacity 16)))
@@ -871,8 +880,9 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (fiveam:is (search "dropped 5 log messages" result)))))
-(fiveam:test test-async-custom-on-drop
+      (5am:is (search "dropped 5 log messages" result)))))
+
+(5am:test test-async-custom-on-drop
   "Custom on-drop callback controls the drop warning message."
   (let* ((out (make-string-output-stream))
          (ao (bark::make-async-output out :capacity 16
@@ -884,8 +894,9 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (fiveam:is (search "LOST:3" result)))))
-(fiveam:test test-async-on-drop-nil-suppresses
+      (5am:is (search "LOST:3" result)))))
+
+(5am:test test-async-on-drop-nil-suppresses
   "on-drop returning NIL suppresses the warning line."
   (let* ((out (make-string-output-stream))
          (ao (bark::make-async-output out :capacity 16
@@ -895,4 +906,4 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (fiveam:is (not (search "dropped" result))))))
+      (5am:is (not (search "dropped" result))))))

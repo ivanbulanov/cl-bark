@@ -51,279 +51,6 @@
         (svref *level-names* idx)
         "unknown")))
 
-;;; --- Logger ---
-
-(defstruct (logger (:constructor %make-logger))
-  "A bark logger instance."
-  (name         ""    :type string :read-only t)
-  (level        30    :type fixnum)
-  (chindings    ""    :type string :read-only t)
-  (raw-bindings nil   :type list :read-only t)
-  (formatter    nil   :type (or null function))
-  (output       nil   :type t)
-  (sampler      nil   :type (or null simple-vector))
-  (trace-fn     #'noop :type function)
-  (debug-fn     #'noop :type function)
-  (info-fn      #'noop :type function)
-  (warn-fn      #'noop :type function)
-  (error-fn     #'noop :type function)
-  (fatal-fn     #'noop :type function))
-
-(defvar *logger* nil "The current bark logger.")
-
-(declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
-
-(defun child (parent &rest bindings)
-  "Create a child logger from PARENT with additional BINDINGS pre-serialized."
-  (let* ((new-chindings (concatenate 'string
-                                      (logger-chindings parent)
-                                      (serialize-bindings bindings)))
-         (new-raw-bindings (append (logger-raw-bindings parent) bindings))
-         (child (%make-logger
-                 :name (logger-name parent)
-                 :level (logger-level parent)
-                 :chindings new-chindings
-                 :raw-bindings new-raw-bindings
-                 :formatter (logger-formatter parent)
-                 :output (logger-output parent)
-                 :sampler (logger-sampler parent))))
-    (set-level child (logger-level parent))
-    child))
-
-(declaim (ftype (function (t t) (values function &optional)) make-log-fn))
-
-(defun make-log-fn (logger level-value)
-  "Create a log function for LOGGER at LEVEL-VALUE."
-  (declare (optimize (speed 3) (safety 1)))
-  (let ((level-index (floor level-value 10)))
-    (lambda (lgr message &rest fields)
-      (declare (ignorable lgr) (dynamic-extent fields))
-      (block log-fn
-        (let ((sampler (logger-sampler lgr)))
-          (when (and sampler (aref sampler level-index))
-            (let ((sample-state (aref sampler level-index)))
-              (when (and (consp sample-state)
-                         (not (zerop (mod (incf (cdr sample-state)) (car sample-state)))))
-                (return-from log-fn (values))))))
-        (let* ((formatter (logger-formatter lgr))
-               (line (funcall formatter
-                              level-value
-                              (logger-chindings lgr)
-                              (logger-raw-bindings lgr)
-                              *log-context*
-                              message
-                              fields))
-               (output (logger-output lgr)))
-          (when output
-            (if (async-output-p output)
-                (progn
-                  (ring-buffer-push (async-output-ring output) line)
-                  (bt:signal-semaphore (async-output-notify output)))
-                (etypecase output
-                  (stream (write-string line output) (terpri output) (force-output output))
-                  (function (funcall output line))))))
-        (values)))))
-
-(declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function) (:output t))
- (values logger &optional)) make-logger))
-
-(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output)
-  "Create a new logger."
-  (let* ((chindings (if (string= name "")
-                        ""
-                        (with-output-to-string (s)
-                          (emit-key s "name")
-                          (emit-value s name))))
-         (raw-bindings (if (string= name "")
-                           nil
-                           (list :name name)))
-         (lgr (%make-logger
-               :name name
-               :chindings chindings
-               :raw-bindings raw-bindings
-               :formatter formatter
-               :output output)))
-    (set-level lgr level)
-    lgr))
-
-(defun noop (logger message &rest fields)
-  "No-op log function for disabled levels."
-  (declare (ignore logger message fields))
-  (values))
-
-(declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
-
-(defun set-level (logger level)
-  "Set the minimum log level for LOGGER. Swaps function slots."
-  (let ((level-val (etypecase level
-                     (fixnum level)
-                     (keyword (level-from-keyword level)))))
-    (setf (logger-level logger) level-val)
-    (setf (logger-trace-fn logger) (if (< +trace+ level-val) #'noop (make-log-fn logger +trace+)))
-    (setf (logger-debug-fn logger) (if (< +debug+ level-val) #'noop (make-log-fn logger +debug+)))
-    (setf (logger-info-fn logger)  (if (< +info+  level-val) #'noop (make-log-fn logger +info+)))
-    (setf (logger-warn-fn logger)  (if (< +warn+  level-val) #'noop (make-log-fn logger +warn+)))
-    (setf (logger-error-fn logger) (if (< +error+ level-val) #'noop (make-log-fn logger +error+)))
-    (setf (logger-fatal-fn logger) (if (< +fatal+ level-val) #'noop (make-log-fn logger +fatal+)))
-    (values)))
-
-(declaim (ftype (function (logger (or fixnum keyword) fixnum) (values t &optional)) set-sampling))
-
-(defun set-sampling (logger level rate)
-  "Set sampling for LEVEL to 1-in-RATE on LOGGER."
-  (let ((level-val (etypecase level
-                     (fixnum level)
-                     (keyword (level-from-keyword level))))
-        (sampler (or (logger-sampler logger)
-                     (make-array 7 :initial-element nil))))
-    (setf (aref sampler (floor level-val 10)) (cons rate (1- rate)))
-    (setf (logger-sampler logger) sampler)))
-
-;;; --- Lifecycle ---
-
-(declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function)
-                                (:name string) (:context list))
-                          (values logger &optional)) start))
-
-(defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter)
-                   (name "") (capacity 8192) (on-drop #'default-on-drop) context)
-  "Start the global logger with an async writer thread.
-CONTEXT, when provided, is a plist of static context fields (e.g. :role \"broker\" :pid 123).
-The root logger is automatically wrapped in a child with these fields."
-  (when (and *logger* (logger-output *logger*) (async-output-p (logger-output *logger*)))
-    (stop))
-  (let* ((ao (make-async-output stream :capacity capacity :on-drop on-drop))
-         (chindings (if (string= name "")
-                        ""
-                        (with-output-to-string (s)
-                          (emit-key s "name")
-                          (emit-value s name))))
-         (raw-bindings (if (string= name "")
-                           nil
-                           (list :name name)))
-         (lgr (%make-logger
-               :name name
-               :chindings chindings
-               :raw-bindings raw-bindings
-               :formatter formatter
-               :output ao)))
-    (set-level lgr level)
-    (setf *logger* (if context (apply #'child lgr context) lgr))))
-
-(declaim (ftype (function nil (values null &optional)) stop))
-
-(defun stop ()
-  "Flush and stop the global logger's writer thread."
-  (when *logger*
-    (let ((output (logger-output *logger*)))
-      (when (and output (async-output-p output))
-        (stop-async-output output)))
-    (setf *logger* nil)))
-
-;;; --- Context ---
-
-(defmacro with-context ((&rest pairs) &body body)
-  "Bind dynamic log context fields for the duration of BODY."
-  `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
-                                       collect `(cons ,k ,v))
-                               *log-context*)))
-     ,@body))
-
-(defvar *log-context* nil "Dynamic context bindings for the current log scope.")
-
-(declaim (ftype (function (list) (values simple-string &optional)) serialize-bindings))
-
-(defun serialize-bindings (bindings)
-  "Pre-serialize BINDINGS plist to a JSON fragment string."
-  (with-output-to-string (s)
-    (emit-fields s bindings)))
-
-;;; --- Formatters ---
-
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) json-formatter))
-
-(defun json-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry as a JSON line."
-  (declare (optimize (speed 3) (safety 1)))
-  (declare (ignore raw-bindings))
-  (with-output-to-string (s)
-    (write-string (svref *level-prefixes* (1- (floor level 10))) s)
-    (write-string ",\"ts\":" s)
-    (princ (get-unix-timestamp-ms) s)
-    (write-string chindings s)
-    (emit-context-fields s context)
-    (emit-json-fields s fields)
-    (write-string ",\"msg\":\"" s)
-    (write-json-escaped-string message s)
-    (write-string "\"}" s)))
-
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) logfmt-formatter))
-
-(defun logfmt-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry as logfmt (key=value pairs)."
-  (declare (ignore chindings))
-  (with-output-to-string (s)
-    (write-string "level=" s)
-    (write-string (level-name level) s)
-    (write-string " ts=" s)
-    (princ (get-unix-timestamp-ms) s)
-    ;; Child logger bindings from raw-bindings plist
-    (loop for (k v) on raw-bindings by #'cddr do
-      (write-char #\Space s)
-      (emit-logfmt-key s k)
-      (if (eq v t)
-          nil ; bare key = true in logfmt
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s v))))
-    ;; Dynamic context
-    (dolist (pair context)
-      (write-char #\Space s)
-      (emit-logfmt-key s (car pair))
-      (if (eq (cdr pair) t)
-          nil
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s (cdr pair)))))
-    ;; Per-call fields
-    (loop for (k v) on fields by #'cddr do
-      (write-char #\Space s)
-      (emit-logfmt-key s k)
-      (if (eq v t)
-          nil
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s v))))
-    (write-string " msg=" s)
-    (emit-logfmt-value s message)))
-
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
-
-(defun pretty-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry with ANSI colors for REPL/development use."
-  (declare (ignore chindings))
-  (with-output-to-string (s)
-    (let* ((level-idx (floor level 10))
-           (color (svref *level-colors* level-idx))
-           (name (level-name level)))
-      (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
-      (write-string message s)
-      ;; Child logger bindings
-      (loop for (k v) on raw-bindings by #'cddr do
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
-                #\Esc)
-        (princ v s))
-      ;; Context fields
-      (dolist (pair context)
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase (car pair) (string (car pair)) (symbol (string-downcase (symbol-name (car pair)))))
-                #\Esc)
-        (princ (cdr pair) s))
-      ;; Per-call fields
-      (loop for (k v) on fields by #'cddr do
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
-                #\Esc)
-        (princ v s)))))
-
 ;;; --- Serialization Limits ---
 
 (defvar *max-emit-depth* 4
@@ -464,10 +191,7 @@ The root logger is automatically wrapped in a child with these fields."
     (emit-json-key stream (car pair))
     (emit-json-value stream (cdr pair))))
 
-;; Legacy aliases
-(setf (fdefinition 'emit-value) #'emit-json-value)
-(setf (fdefinition 'emit-key) #'emit-json-key)
-(setf (fdefinition 'emit-fields) #'emit-json-fields)
+(declaim (ftype (function (list) (values simple-string &optional)) serialize-bindings))
 
 (defun serialize-bindings (bindings)
   "Pre-serialize BINDINGS plist to a JSON fragment string."
@@ -504,88 +228,121 @@ The root logger is automatically wrapped in a child with these fields."
          (write-string type-name stream)
          (write-char #\> stream)))))
 
-;; Legacy aliases
-(setf (fdefinition 'logfmt-write-key) #'emit-logfmt-key)
-(setf (fdefinition 'logfmt-write-value) #'emit-logfmt-value)
+;;; --- Timestamps ---
 
-;;; --- Async Output ---
+(declaim (ftype (function nil (values integer &optional)) get-unix-timestamp-ms))
 
-(defstruct (async-output (:constructor %make-async-output))
-  "Writer thread + ring buffer for async log delivery."
-  (ring      nil :type (or null ring-buffer))
-  (thread    nil :type (or null bt:thread))
-  (stream    nil :type (or null stream))
-  (running   nil :type boolean)
-  (on-drop   nil :type (or null function))
-  (notify    nil :type t)
-  (flush-ack nil :type t))
+(defun get-unix-timestamp-ms ()
+  "Return current Unix timestamp in milliseconds."
+  #+sbcl
+  (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
+    (+ (* sec 1000) (floor usec 1000)))
+  #-sbcl
+  (let ((now (local-time:now)))
+    (+ (* (local-time:timestamp-to-unix now) 1000)
+       (floor (local-time:nsec-of now) 1000000))))
 
-;;; --- Logger ---
+;;; --- Formatters ---
 
-(defmethod print-object ((ao async-output) stream)
-  "Print async-output without descending into stream/thread slots."
-  (print-unreadable-object (ao stream :type t :identity t)
-    (let ((ring (async-output-ring ao)))
-      (format stream "~:[stopped~;running~] ~D pending ~D dropped"
-              (async-output-running ao)
-              (if ring (- (ring-buffer-head ring) (ring-buffer-tail ring)) 0)
-              (if ring (ring-buffer-dropped ring) 0)))))
+(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) json-formatter))
 
-(defmethod print-object ((lgr logger) stream)
-  "Print logger showing name and level."
-  (print-unreadable-object (lgr stream :type t :identity t)
-    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
+(defun json-formatter (level chindings raw-bindings context message fields)
+  "Format a log entry as a JSON line."
+  (declare (optimize (speed 3) (safety 1)))
+  (declare (ignore raw-bindings))
+  (with-output-to-string (s)
+    (write-string (svref *level-prefixes* (1- (floor level 10))) s)
+    (write-string ",\"ts\":" s)
+    (princ (get-unix-timestamp-ms) s)
+    (write-string chindings s)
+    (emit-context-fields s context)
+    (emit-json-fields s fields)
+    (write-string ",\"msg\":\"" s)
+    (write-json-escaped-string message s)
+    (write-string "\"}" s)))
 
-;;; --- Async Output ---
+(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) logfmt-formatter))
+
+(defun logfmt-formatter (level chindings raw-bindings context message fields)
+  "Format a log entry as logfmt (key=value pairs)."
+  (declare (ignore chindings))
+  (with-output-to-string (s)
+    (write-string "level=" s)
+    (write-string (level-name level) s)
+    (write-string " ts=" s)
+    (princ (get-unix-timestamp-ms) s)
+    ;; Child logger bindings from raw-bindings plist
+    (loop for (k v) on raw-bindings by #'cddr do
+      (write-char #\Space s)
+      (emit-logfmt-key s k)
+      (if (eq v t)
+          nil ; bare key = true in logfmt
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s v))))
+    ;; Dynamic context
+    (dolist (pair context)
+      (write-char #\Space s)
+      (emit-logfmt-key s (car pair))
+      (if (eq (cdr pair) t)
+          nil
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s (cdr pair)))))
+    ;; Per-call fields
+    (loop for (k v) on fields by #'cddr do
+      (write-char #\Space s)
+      (emit-logfmt-key s k)
+      (if (eq v t)
+          nil
+          (progn (write-char #\= s)
+                 (emit-logfmt-value s v))))
+    (write-string " msg=" s)
+    (emit-logfmt-value s message)))
+
+(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
+
+(defun pretty-formatter (level chindings raw-bindings context message fields)
+  "Format a log entry with ANSI colors for REPL/development use."
+  (declare (ignore chindings))
+  (with-output-to-string (s)
+    (let* ((level-idx (floor level 10))
+           (color (svref *level-colors* level-idx))
+           (name (level-name level)))
+      (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
+      (write-string message s)
+      ;; Child logger bindings
+      (loop for (k v) on raw-bindings by #'cddr do
+        (format s " ~c[2m~a~c[0m=" #\Esc
+                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
+                #\Esc)
+        (princ v s))
+      ;; Context fields
+      (dolist (pair context)
+        (format s " ~c[2m~a~c[0m=" #\Esc
+                (typecase (car pair) (string (car pair)) (symbol (string-downcase (symbol-name (car pair)))))
+                #\Esc)
+        (princ (cdr pair) s))
+      ;; Per-call fields
+      (loop for (k v) on fields by #'cddr do
+        (format s " ~c[2m~a~c[0m=" #\Esc
+                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
+                #\Esc)
+        (princ v s)))))
+
+;;; --- Ring Buffer ---
 
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
   "Lock-free MPSC ring buffer with drop-on-full semantics."
   (slots    #()  :type simple-vector)
-  (mask     0    :type (unsigned-byte 64))
+  (mask     0    :type fixnum)
   (head     0    :type (unsigned-byte 64))
   (tail     0    :type (unsigned-byte 64))
   (dropped  0    :type (unsigned-byte 64)))
-
-(defun default-on-drop (count)
-  "Default drop handler. Returns a JSON warning line."
-  (format nil "{\"level\":40,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" count))
-
-(declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
-
-(defun flush-async-output (async-output)
-  "Flush the async writer. Blocks until current queue is drained."
-  (when (and async-output (async-output-running async-output))
-    (let ((ack (bt:make-semaphore :name "bark-flush-ack")))
-      (setf (async-output-flush-ack async-output) ack)
-      (bt:signal-semaphore (async-output-notify async-output))
-      (bt:wait-on-semaphore ack :timeout 5.0)))
-  nil)
-
-(declaim (ftype (function (t) (values async-output &optional)) make-async-output))
-
-(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop))
-  "Create an async output that writes to STREAM via a background thread."
-  (let* ((notify (bt:make-semaphore :name "bark-notify"))
-         (ao (%make-async-output
-              :ring (make-ring-buffer capacity)
-              :stream stream
-              :running t
-              :on-drop on-drop
-              :notify notify)))
-    (setf (async-output-thread ao)
-          (bt:make-thread (lambda () (writer-loop ao))
-                          :name "bark-writer"))
-    ao))
 
 (defun make-ring-buffer (capacity)
   "Create a ring buffer with CAPACITY rounded up to the next power of two."
   (let* ((actual (max 16 (expt 2 (ceiling (log capacity 2)))))
          (slots (make-array actual :initial-element nil)))
     (%make-ring-buffer :slots slots :mask (1- actual))))
-
-(defun ring-buffer-drain (rb)
-  "Drain all available values from the ring buffer into a list. Single-consumer only."
-  (loop for val = (ring-buffer-pop rb) while val collect val))
 
 (defun ring-buffer-pop (rb)
   "Pop the next value from the ring buffer. Returns NIL if empty. Single-consumer only."
@@ -608,13 +365,60 @@ The root logger is automatically wrapped in a child with these fields."
   (loop
     (let* ((head (ring-buffer-head rb))
            (tail (ring-buffer-tail rb))
-           (size (- head tail)))
+           (size (the fixnum (- head tail))))
       (when (>= size (1+ (ring-buffer-mask rb)))
         (atomics:atomic-incf (ring-buffer-dropped rb))
         (return nil))
       (when (atomics:cas (ring-buffer-head rb) head (1+ head))
         (setf (svref (ring-buffer-slots rb) (logand head (ring-buffer-mask rb))) value)
         (return t)))))
+
+(defun ring-buffer-drain (rb)
+  "Drain all available values from the ring buffer into a list. Single-consumer only."
+  (loop for val = (ring-buffer-pop rb) while val collect val))
+
+;;; --- Async Output ---
+
+(defun default-on-drop (count)
+  "Default drop handler. Returns a JSON warning line."
+  (format nil "{\"level\":40,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" count))
+
+(defstruct (async-output (:constructor %make-async-output))
+  "Writer thread + ring buffer for async log delivery."
+  (ring      nil :type (or null ring-buffer))
+  (thread    nil :type (or null bt:thread))
+  (stream    nil :type (or null stream))
+  (running   nil :type boolean)
+  (on-drop   nil :type (or null function))
+  (notify    nil :type t)
+  (flush-ack nil :type t))
+
+(declaim (ftype (function (t &key (:capacity fixnum) (:on-drop function)) (values async-output &optional)) make-async-output))
+
+(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop))
+  "Create an async output that writes to STREAM via a background thread."
+  (let* ((notify (bt:make-semaphore :name "bark-notify"))
+         (ao (%make-async-output
+              :ring (make-ring-buffer capacity)
+              :stream stream
+              :running t
+              :on-drop on-drop
+              :notify notify)))
+    (setf (async-output-thread ao)
+          (bt:make-thread (lambda () (writer-loop ao))
+                          :name "bark-writer"))
+    ao))
+
+(declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
+
+(defun flush-async-output (async-output)
+  "Flush the async writer. Blocks until current queue is drained."
+  (when (and async-output (async-output-running async-output))
+    (let ((ack (bt:make-semaphore :name "bark-flush-ack")))
+      (setf (async-output-flush-ack async-output) ack)
+      (bt:signal-semaphore (async-output-notify async-output))
+      (bt:wait-on-semaphore ack :timeout 5.0)))
+  nil)
 
 (declaim (ftype (function (t) (values null &optional)) stop-async-output))
 
@@ -666,6 +470,203 @@ The root logger is automatically wrapped in a child with these fields."
         (format *error-output* "bark writer-loop error: ~a~%" e)
         (force-output *error-output*)))))
 
+;;; --- Logger ---
+
+(defun noop (logger message &rest fields)
+  "No-op log function for disabled levels."
+  (declare (ignore logger message fields))
+  (values))
+
+(defstruct (logger (:constructor %make-logger))
+  "A bark logger instance."
+  (name         ""    :type string :read-only t)
+  (level        30    :type fixnum)
+  (chindings    ""    :type string :read-only t)
+  (raw-bindings nil   :type list :read-only t)
+  (formatter    nil   :type (or null function))
+  (output       nil   :type t)
+  (sampler      nil   :type (or null simple-vector))
+  (trace-fn     #'noop :type function)
+  (debug-fn     #'noop :type function)
+  (info-fn      #'noop :type function)
+  (warn-fn      #'noop :type function)
+  (error-fn     #'noop :type function)
+  (fatal-fn     #'noop :type function))
+
+(defvar *logger* nil "The current bark logger.")
+
+(defvar *log-context* nil "Dynamic context bindings for the current log scope.")
+
+(declaim (ftype (function (fixnum) (values function &optional)) make-log-fn))
+
+(defun make-log-fn (level-value)
+  "Create a log function for LEVEL-VALUE."
+  (declare (optimize (speed 3) (safety 1))
+           (type fixnum level-value))
+  (let ((level-index (floor level-value 10)))
+    (lambda (lgr message &rest fields)
+      (declare (ignorable lgr) (dynamic-extent fields))
+      (block log-fn
+        (let ((sampler (logger-sampler lgr)))
+          (when (and sampler (aref sampler level-index))
+            (let ((sample-state (aref sampler level-index)))
+              (when (consp sample-state)
+                (let ((count (the fixnum (incf (the fixnum (cdr sample-state)))))
+                      (rate (the fixnum (car sample-state))))
+                  (unless (zerop (the fixnum (mod count rate)))
+                    (return-from log-fn (values))))))))
+        (let* ((formatter (the function (logger-formatter lgr)))
+               (line (funcall formatter
+                              level-value
+                              (logger-chindings lgr)
+                              (logger-raw-bindings lgr)
+                              *log-context*
+                              message
+                              fields))
+               (output (logger-output lgr)))
+          (when output
+            (if (async-output-p output)
+                (progn
+                  (ring-buffer-push (async-output-ring output) line)
+                  (bt:signal-semaphore (async-output-notify output)))
+                (etypecase output
+                  (stream (write-string line output) (terpri output) (force-output output))
+                  (function (funcall output line))))))
+        (values)))))
+
+(declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function) (:output t))
+ (values logger &optional)) make-logger))
+
+(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output)
+  "Create a new logger."
+  (let* ((chindings (if (string= name "")
+                        ""
+                        (with-output-to-string (s)
+                          (emit-json-key s "name")
+                          (emit-json-value s name))))
+         (raw-bindings (if (string= name "")
+                           nil
+                           (list :name name)))
+         (lgr (%make-logger
+               :name name
+               :chindings chindings
+               :raw-bindings raw-bindings
+               :formatter formatter
+               :output output)))
+    (set-level lgr level)
+    lgr))
+
+(declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
+
+(defun set-level (logger level)
+  "Set the minimum log level for LOGGER. Swaps function slots."
+  (let ((level-val (etypecase level
+                     (fixnum level)
+                     (keyword (level-from-keyword level)))))
+    (setf (logger-level logger) level-val)
+    (setf (logger-trace-fn logger) (if (< +trace+ level-val) #'noop (make-log-fn +trace+)))
+    (setf (logger-debug-fn logger) (if (< +debug+ level-val) #'noop (make-log-fn +debug+)))
+    (setf (logger-info-fn logger)  (if (< +info+  level-val) #'noop (make-log-fn +info+)))
+    (setf (logger-warn-fn logger)  (if (< +warn+  level-val) #'noop (make-log-fn +warn+)))
+    (setf (logger-error-fn logger) (if (< +error+ level-val) #'noop (make-log-fn +error+)))
+    (setf (logger-fatal-fn logger) (if (< +fatal+ level-val) #'noop (make-log-fn +fatal+)))
+    (values)))
+
+(declaim (ftype (function (logger (or fixnum keyword) fixnum) (values t &optional)) set-sampling))
+
+(defun set-sampling (logger level rate)
+  "Set sampling for LEVEL to 1-in-RATE on LOGGER."
+  (let ((level-val (etypecase level
+                     (fixnum level)
+                     (keyword (level-from-keyword level))))
+        (sampler (or (logger-sampler logger)
+                     (make-array 7 :initial-element nil))))
+    (setf (aref sampler (floor level-val 10)) (cons rate (1- rate)))
+    (setf (logger-sampler logger) sampler)))
+
+(declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
+
+(defun child (parent &rest bindings)
+  "Create a child logger from PARENT with additional BINDINGS pre-serialized."
+  (let* ((new-chindings (concatenate 'string
+                                      (logger-chindings parent)
+                                      (serialize-bindings bindings)))
+         (new-raw-bindings (append (logger-raw-bindings parent) bindings))
+         (child (%make-logger
+                 :name (logger-name parent)
+                 :level (logger-level parent)
+                 :chindings new-chindings
+                 :raw-bindings new-raw-bindings
+                 :formatter (logger-formatter parent)
+                 :output (logger-output parent)
+                 :sampler (logger-sampler parent))))
+    (set-level child (logger-level parent))
+    child))
+
+(defmethod print-object ((ao async-output) stream)
+  "Print async-output without descending into stream/thread slots."
+  (print-unreadable-object (ao stream :type t :identity t)
+    (let ((ring (async-output-ring ao)))
+      (format stream "~:[stopped~;running~] ~D pending ~D dropped"
+              (async-output-running ao)
+              (if ring (- (ring-buffer-head ring) (ring-buffer-tail ring)) 0)
+              (if ring (ring-buffer-dropped ring) 0)))))
+
+(defmethod print-object ((lgr logger) stream)
+  "Print logger showing name and level."
+  (print-unreadable-object (lgr stream :type t :identity t)
+    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
+
+;;; --- Lifecycle ---
+
+(declaim (ftype (function (&key (:stream stream) (:level (or fixnum keyword)) (:formatter function)
+                                (:name string) (:capacity fixnum) (:on-drop function) (:context list))
+                          (values logger &optional)) start))
+
+(defun start (&key (stream *error-output*) (level :info) (formatter #'json-formatter)
+                   (name "") (capacity 8192) (on-drop #'default-on-drop) context)
+  "Start the global logger with an async writer thread.
+CONTEXT, when provided, is a plist of static context fields (e.g. :role \"broker\" :pid 123).
+The root logger is automatically wrapped in a child with these fields."
+  (when (and *logger* (logger-output *logger*) (async-output-p (logger-output *logger*)))
+    (stop))
+  (let* ((ao (make-async-output stream :capacity capacity :on-drop on-drop))
+         (chindings (if (string= name "")
+                        ""
+                        (with-output-to-string (s)
+                          (emit-json-key s "name")
+                          (emit-json-value s name))))
+         (raw-bindings (if (string= name "")
+                           nil
+                           (list :name name)))
+         (lgr (%make-logger
+               :name name
+               :chindings chindings
+               :raw-bindings raw-bindings
+               :formatter formatter
+               :output ao)))
+    (set-level lgr level)
+    (setf *logger* (if context (apply #'child lgr context) lgr))))
+
+(declaim (ftype (function nil (values null &optional)) stop))
+
+(defun stop ()
+  "Flush and stop the global logger's writer thread."
+  (when *logger*
+    (let ((output (logger-output *logger*)))
+      (when (and output (async-output-p output))
+        (stop-async-output output)))
+    (setf *logger* nil)))
+
+;;; --- Context ---
+
+(defmacro with-context ((&rest pairs) &body body)
+  "Bind dynamic log context fields for the duration of BODY."
+  `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
+                                       collect `(cons ,k ,v))
+                               *log-context*)))
+     ,@body))
+
 ;;; --- Utilities ---
 
 (defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
@@ -683,18 +684,6 @@ The root logger is automatically wrapped in a child with these fields."
 
 (defvar *compile-time-max-level* 0
   "When positive, log calls for levels below this are eliminated at compile time.")
-
-(declaim (ftype (function nil (values integer &optional)) get-unix-timestamp-ms))
-
-(defun get-unix-timestamp-ms ()
-  "Return current Unix timestamp in milliseconds."
-  #+sbcl
-  (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
-    (+ (* sec 1000) (floor usec 1000)))
-  #-sbcl
-  (let ((now (local-time:now)))
-    (+ (* (local-time:timestamp-to-unix now) 1000)
-       (floor (local-time:nsec-of now) 1000000))))
 
 (declaim (ftype (function nil (values function function &optional)) make-list-collector))
 
