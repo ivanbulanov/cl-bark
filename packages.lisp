@@ -3,11 +3,16 @@
 (defpackage "BARK"
   (:use "COMMON-LISP")
   (:shadow "DEBUG" "ERROR" "TRACE" "WARN")
-  (:export "*COMPILE-TIME-MAX-LEVEL*"
+  (:export "+DEBUG+" "+ERROR+" "+FATAL+" "+INFO+" "+TRACE+" "+WARN+"
+           "+LEVEL-STEP+" "+LEVEL-SLOT-COUNT+"
+           "+MIN-RING-CAPACITY+" "+DEFAULT-BUFFER-CAPACITY+"
+           "*COMPILE-TIME-MAX-LEVEL*"
            "*LOG-CONTEXT*"
            "*LOGGER*"
-           "*MAX-EMIT-DEPTH*"
-           "*MAX-EMIT-LENGTH*"
+           "*MAX-JSON-DEPTH*"
+           "*MAX-JSON-LENGTH*"
+           "*MAX-PRETTY-DEPTH*"
+           "*MAX-PRETTY-LENGTH*"
            ;; Serialization API
            "EMIT-JSON-VALUE" "EMIT-JSON-KEY" "EMIT-JSON-FIELDS"
            "EMIT-LOGFMT-VALUE" "EMIT-LOGFMT-KEY"

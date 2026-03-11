@@ -87,18 +87,45 @@ logfmt is a flat key=value format. cl-bark emits **scalars only** -- no collecti
 
 **Boolean `t` handling:** In logfmt, a bare key with no `=value` means true. The logfmt formatter handles this at the field-writing level: when a field value is `t`, it emits just the key and skips `=value` entirely. `emit-logfmt-value` is never called for `t`.
 
+## Pretty Value Types (`pretty-formatter`)
+
+The pretty formatter uses `princ` (CL's human-readable printer) for all values. There is no type dispatch, no depth/length limiting, and no placeholder fallback — every value is printed via its `print-object` method.
+
+| CL Type | Output | Notes |
+|---------|--------|-------|
+| `string` | bare, unquoted | `princ` omits quotes |
+| `integer` | number | `42` |
+| `float` | number | `3.14` |
+| `symbol` | lowercase | `princ` uses `*print-case*` (default `:downcase`) |
+| `cons` | `(1 2 3)` | Full CL printed representation |
+| `hash-table` | `#<HASH-TABLE ...>` | Implementation-dependent |
+| anything else | `princ` output | Whatever `print-object` produces |
+
+**Keys** are lowercased (same as JSON/logfmt), dimmed with ANSI escape codes, and separated by `=`.
+
+**Limits:** The pretty formatter binds CL's printer variables internally:
+
+| bark variable | CL variable bound | Default | Effect |
+|---------------|-------------------|---------|--------|
+| `*max-pretty-depth*` | `*print-level*` | `4` | Nesting depth; deeper structures print as `#` |
+| `*max-pretty-length*` | `*print-length*` | `20` | Elements per collection; excess prints as `...` |
+
+`*print-circle*` is always bound to `t`, so circular structures are safe.
+
+Set either variable to `nil` to remove the corresponding limit.
+
 ## Serialization Limits
 
 Two special variables bound output size for JSON collections:
 
 ```lisp
-(defvar *max-emit-depth* 4)    ; nesting depth before placeholder
-(defvar *max-emit-length* 20)  ; elements per collection before truncation
+(defvar *max-json-depth* 4)    ; nesting depth before placeholder
+(defvar *max-json-length* 20)  ; elements per collection before truncation
 ```
 
 ### Depth Limit
 
-`emit-json-value` accepts an optional `depth` parameter (default `*max-emit-depth*`). Each recursive descent into a collection decrements depth by 1. At depth 0, collections become `<type>` placeholders instead of being traversed.
+`emit-json-value` accepts an optional `depth` parameter (default `*max-json-depth*`). Each recursive descent into a collection decrements depth by 1. At depth 0, collections become `<type>` placeholders instead of being traversed.
 
 ```lisp
 ;; Default depth (4): deeply nested structures eventually hit placeholders
@@ -111,14 +138,14 @@ In practice, depth 0 is only reached through deep nesting (4 levels with the def
 
 ### Length Limit
 
-Each collection (list, vector, hash-table) emits at most `*max-emit-length*` elements. If truncated, a `"..."` sentinel is appended.
+Each collection (list, vector, hash-table) emits at most `*max-json-length*` elements. If truncated, a `"..."` sentinel is appended.
 
 ```lisp
-(let ((*max-emit-length* 3))
+(let ((*max-json-length* 3))
   (emit-json-value stream '(1 2 3 4 5)))
 ;; => [1,2,3,"..."]
 
-(let ((*max-emit-length* 2))
+(let ((*max-json-length* 2))
   (emit-json-value stream #(10 20 30 40)))
 ;; => [10,20,"..."]
 ```
@@ -145,8 +172,10 @@ Both limits can be overridden per-call with `let` bindings.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `*max-emit-depth*` | `4` | Max nesting depth for JSON collections |
-| `*max-emit-length*` | `20` | Max elements per collection before truncation |
+| `*max-json-depth*` | `4` | Max nesting depth for JSON collections |
+| `*max-json-length*` | `20` | Max elements per JSON collection before truncation |
+| `*max-pretty-depth*` | `4` | Nesting depth for pretty-formatter (binds `*print-level*`) |
+| `*max-pretty-length*` | `20` | Elements per collection for pretty-formatter (binds `*print-length*`) |
 
 ### Legacy Names
 

@@ -179,6 +179,55 @@ Log output includes fields from three sources, merged in this order:
 ;; Output merges all three: component, request-id, user-id
 ```
 
+#### When to Use Each
+
+**Child loggers** bind context at creation time — structural identity that lives for the logger's lifetime:
+
+```lisp
+;; Fixed for this component — every log carries :component automatically
+(defvar *db-log* (bark:child bark:*logger* :component "database" :pool-size 10))
+(bark:info *db-log* "connection acquired")
+```
+
+**Dynamic context** binds context to a code path — scoped to the call stack:
+
+```lisp
+;; Scoped to this request — all code within sees these fields
+(bark:with-context (:request-id (generate-id) :user-id 42)
+  (handle-auth)
+  (run-query)
+  (send-response))
+```
+
+**Dynamic context wins for cross-cutting concerns.** A request ID needs to appear in logs from every component, but each component has its own child logger:
+
+```lisp
+(bark:with-context (:request-id "req-123")
+  (bark:info *auth-log* "checking token")   ; → component=auth, request-id=req-123
+  (bark:info *db-log* "running query")      ; → component=database, request-id=req-123
+  (bark:info *cache-log* "cache miss"))     ; → component=cache, request-id=req-123
+```
+
+With child loggers alone, you'd need to create a new child of each logger per request, thread them through every function, and discard them after.
+
+**Child loggers win for permanent identity.** A worker's ID is fixed for its lifetime:
+
+```lisp
+(dotimes (i pool-size)
+  (let ((log (bark:child bark:*logger* :worker-id i)))
+    (spawn-worker log)))
+```
+
+Dynamic context would require wrapping the entire worker body in `with-context`, and the binding wouldn't survive callbacks into shared code that re-establishes context.
+
+**The combination is the intended usage:** child loggers carry *who* (component identity), dynamic context carries *when/why* (request trace, correlation ID):
+
+```
+child logger:     component=database, pool-size=10    (structural, permanent)
+dynamic context:  request-id=req-123, tenant=acme     (per-request, transient)
+per-call fields:  query="SELECT ...", duration-ms=42   (this specific event)
+```
+
 ### Formatters
 
 A formatter is a function with signature:
@@ -450,6 +499,20 @@ These are **intentionally** not supported and won't be added:
 | **Named logger registry** | Global mutable registries add implicit coupling. CL already has `defvar` and `defparameter`. | Manage logger variables yourself: `(defvar *audit-logger* (bark:make-logger ...))`. |
 | **Structured data in ring buffer** | Formatting in the caller thread keeps the writer thread trivial (just `write-string` + `force-output`). Deferring formatting to the writer would serialize all format work on a single thread. | This is a deliberate architectural choice for throughput. |
 | **Output as a user-visible object** | The tee's internal representation (`tee-output`, `destination`, `formatter-group`) is an implementation detail. | Use `make-tee`/`tee` to create outputs. Inspect via the logger's output slot if needed for debugging. |
+
+## Conditions
+
+All conditions are signaled at configuration time. Logging macros never signal — a disabled level is a `noop` call, and writer errors are handled internally.
+
+| Source | Condition | When |
+|--------|-----------|------|
+| `level-from-keyword` | `type-error` | Unknown level keyword (from `ecase`) |
+| `set-level` | `type-error` | Level is neither `fixnum` nor keyword (from `etypecase`) |
+| `make-tee` | `simple-error` | Both `:filter` and `:level` on the same destination |
+| `tee` | `simple-error` | Same, at macro expansion time |
+| `start` | `simple-error` | `:output` is not a stream, `tee-output`, or `nil` |
+
+Writer thread stream errors (`file-error`, `stream-error`, etc.) are caught internally. When `:on-error` is provided, it receives the original condition — see [Error Recovery](#error-recovery). Otherwise the error is logged to `*error-output*` and the writer exits.
 
 ## Architecture
 

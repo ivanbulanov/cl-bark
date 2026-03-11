@@ -3,6 +3,23 @@
 
 ;;; --- Levels ---
 
+(defconstant +trace+ 10 "Trace log level.")
+
+(defconstant +debug+ 20 "Debug log level.")
+
+(defconstant +info+ 30 "Info log level.")
+
+(defconstant +warn+ 40 "Warning log level.")
+
+(defconstant +error+ 50 "Error log level.")
+
+(defconstant +fatal+ 60 "Fatal log level.")
+
+(defconstant +level-step+ 10 "Spacing between consecutive log levels.")
+
+(defconstant +level-slot-count+ (1+ (/ +fatal+ +level-step+))
+  "Number of level index slots (0 through fatal).")
+
 (defparameter *level-colors*
   #(nil
     "36"    ; trace = cyan
@@ -11,23 +28,15 @@
     "33"    ; warn  = yellow
     "31"    ; error = red
     "35")   ; fatal = magenta
-  "ANSI color codes indexed by (/ level 10).")
+  "ANSI color codes indexed by (/ level +level-step+).")
 
-(defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level 10).")
+(defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level +level-step+).")
 
-(defparameter *level-prefixes* #("{\"level\":10" "{\"level\":20" "{\"level\":30" "{\"level\":40" "{\"level\":50" "{\"level\":60") "Pre-computed JSON level prefixes indexed by (1- (/ level 10)).")
-
-(defconstant +debug+ 20 "Debug log level.")
-
-(defconstant +error+ 50 "Error log level.")
-
-(defconstant +fatal+ 60 "Fatal log level.")
-
-(defconstant +info+ 30 "Info log level.")
-
-(defconstant +trace+ 10 "Trace log level.")
-
-(defconstant +warn+ 40 "Warning log level.")
+(defparameter *level-prefixes*
+  (coerce (loop for i from +trace+ to +fatal+ by +level-step+
+                collect (format nil "{\"level\":~d" i))
+          'simple-vector)
+  "Pre-computed JSON level prefixes indexed by (1- (/ level +level-step+)).")
 
 (declaim (ftype (function (keyword) (values fixnum &optional)) level-from-keyword))
 
@@ -46,20 +55,28 @@
 (defun level-name (level)
   "Convert a numeric level to its name string."
   (declare (type fixnum level))
-  (let ((idx (truncate level 10)))
-    (if (and (>= idx 1) (<= idx 6))
+  (let ((idx (truncate level +level-step+)))
+    (if (and (>= idx (/ +trace+ +level-step+)) (<= idx (/ +fatal+ +level-step+)))
         (svref *level-names* idx)
         "unknown")))
 
 ;;; --- Serialization Limits ---
 
-(defvar *max-emit-depth* 4
+(defvar *max-json-depth* 4
   "Maximum nesting depth for collections in emit-json-value.
    At depth 0, collections become <type> placeholders.")
 
-(defvar *max-emit-length* 20
+(defvar *max-json-length* 20
   "Maximum number of elements emitted per collection.
    Excess elements are replaced by a single \"...\" sentinel.")
+
+(defvar *max-pretty-depth* 4
+  "Bound as CL:*PRINT-LEVEL* inside pretty-formatter.
+   Controls nesting depth for value output. NIL means unlimited.")
+
+(defvar *max-pretty-length* 20
+  "Bound as CL:*PRINT-LENGTH* inside pretty-formatter.
+   Controls max elements per collection. NIL means unlimited.")
 
 ;;; --- JSON Output ---
 
@@ -105,7 +122,7 @@
     (pathname (namestring k))
     (t (string-downcase (princ-to-string (type-of k))))))
 
-(defun emit-json-value (stream value &optional (depth *max-emit-depth*))
+(defun emit-json-value (stream value &optional (depth *max-json-depth*))
   "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
   (typecase value
     (string
@@ -137,7 +154,7 @@
            (loop for cell on value
                  for i from 0
                  for first = t then nil
-                 when (>= i *max-emit-length*)
+                 when (>= i *max-json-length*)
                    do (write-string ",\"...\"" stream)
                       (loop-finish)
                  unless first do (write-char #\, stream)
@@ -153,7 +170,7 @@
          (let ((len (length value)))
            (write-char #\[ stream)
            (loop for i from 0 below len
-                 when (>= i *max-emit-length*)
+                 when (>= i *max-json-length*)
                    do (write-string ",\"...\"" stream)
                       (loop-finish)
                  when (plusp i) do (write-char #\, stream)
@@ -166,7 +183,7 @@
                (count 0))
            (write-char #\{ stream)
            (maphash (lambda (k v)
-                      (when (>= count *max-emit-length*)
+                      (when (>= count *max-json-length*)
                         (write-string ",\"...\":\"...\"" stream)
                         (return-from emit-json-value))
                       (if first (setf first nil) (write-char #\, stream))
@@ -251,7 +268,7 @@
   (declare (optimize (speed 3) (safety 1)))
   (declare (ignore raw-bindings))
   (with-output-to-string (s)
-    (write-string (svref *level-prefixes* (1- (floor level 10))) s)
+    (write-string (svref *level-prefixes* (1- (floor level +level-step+))) s)
     (write-string ",\"ts\":" s)
     (princ (get-unix-timestamp-ms) s)
     (write-string chindings s)
@@ -301,10 +318,15 @@
 (declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
 
 (defun pretty-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry with ANSI colors for REPL/development use."
+  "Format a log entry with ANSI colors for REPL/development use.
+   Binds *print-level* and *print-length* from *max-pretty-depth* and
+   *max-pretty-length* to bound value output. Binds *print-circle* to T."
   (declare (ignore chindings))
   (with-output-to-string (s)
-    (let* ((level-idx (floor level 10))
+    (let* ((*print-level* *max-pretty-depth*)
+           (*print-length* *max-pretty-length*)
+           (*print-circle* t)
+           (level-idx (floor level +level-step+))
            (color (svref *level-colors* level-idx))
            (name (level-name level)))
       (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
@@ -328,6 +350,10 @@
                 #\Esc)
         (princ v s)))))
 
+(defconstant +min-ring-capacity+ 16 "Minimum ring buffer capacity in log lines. Power of two.")
+
+(defconstant +default-buffer-capacity+ 8192 "Default ring buffer capacity in log lines for async output. Power of two.")
+
 ;;; --- Ring Buffer ---
 
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
@@ -340,7 +366,7 @@
 
 (defun make-ring-buffer (capacity)
   "Create a ring buffer with CAPACITY rounded up to the next power of two."
-  (let* ((actual (max 16 (expt 2 (ceiling (log capacity 2)))))
+  (let* ((actual (max +min-ring-capacity+ (expt 2 (ceiling (log capacity 2)))))
          (slots (make-array actual :initial-element nil)))
     (%make-ring-buffer :slots slots :mask (1- actual))))
 
@@ -381,7 +407,7 @@
 
 (defun default-on-drop (count)
   "Default drop handler. Returns a JSON warning line."
-  (format nil "{\"level\":40,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" count))
+  (format nil "{\"level\":~d,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" +warn+ count))
 
 (defstruct (async-output (:constructor %make-async-output))
   "Writer thread + ring buffer for async log delivery."
@@ -397,7 +423,7 @@
 (declaim (ftype (function (t &key (:capacity fixnum) (:on-drop (or null function)) (:on-error (or null function)))
                           (values async-output &optional)) make-async-output))
 
-(defun make-async-output (stream &key (capacity 8192) (on-drop #'default-on-drop) on-error)
+(defun make-async-output (stream &key (capacity +default-buffer-capacity+) (on-drop #'default-on-drop) on-error)
   "Create an async output that writes to STREAM via a background thread."
   (let* ((notify (bt:make-semaphore :name "bark-notify"))
          (ao (%make-async-output
@@ -527,7 +553,7 @@ Specifying both :level and :filter is an error."
                    (formatter (or (getf spec :formatter) #'json-formatter))
                    (filter-fn (getf spec :filter))
                    (level-kw  (getf spec :level))
-                   (capacity  (or (getf spec :capacity) 8192))
+                   (capacity  (or (getf spec :capacity) +default-buffer-capacity+))
                    (on-drop   (or (getf spec :on-drop) #'default-on-drop))
                    (on-error  (getf spec :on-error)))
                (when (and filter-fn level-kw)
@@ -607,7 +633,7 @@ Specifying both :level and :filter is an error."
 (defstruct (logger (:constructor %make-logger))
   "A bark logger instance."
   (name         ""    :type string :read-only t)
-  (level        30    :type fixnum)
+  (level        +info+ :type fixnum)
   (chindings    ""    :type string :read-only t)
   (raw-bindings nil   :type list :read-only t)
   (formatter    nil   :type (or null function))
@@ -630,7 +656,7 @@ Specifying both :level and :filter is an error."
   "Create a log function for LEVEL-VALUE."
   (declare (optimize (speed 3) (safety 1))
            (type fixnum level-value))
-  (let ((level-index (floor level-value 10)))
+  (let ((level-index (floor level-value +level-step+)))
     (lambda (lgr message &rest fields)
       (declare (ignorable lgr) (dynamic-extent fields))
       (block log-fn
@@ -710,8 +736,8 @@ Specifying both :level and :filter is an error."
                      (fixnum level)
                      (keyword (level-from-keyword level))))
         (sampler (or (logger-sampler logger)
-                     (make-array 7 :initial-element nil))))
-    (setf (aref sampler (floor level-val 10)) (cons rate (1- rate)))
+                     (make-array +level-slot-count+ :initial-element nil))))
+    (setf (aref sampler (floor level-val +level-step+)) (cons rate (1- rate)))
     (setf (logger-sampler logger) sampler)))
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
@@ -755,7 +781,7 @@ Specifying both :level and :filter is an error."
                           (values logger &optional)) start))
 
 (defun start (&key output (level :info) (formatter #'json-formatter)
-                   (name "") (capacity 8192) (on-drop #'default-on-drop) context)
+                   (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop) context)
   "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
 When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
 When OUTPUT is a tee-output, the async-outputs are already created.

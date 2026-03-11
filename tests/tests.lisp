@@ -14,7 +14,8 @@
    ;; JSON/serialization internals
    #:emit-json-value #:emit-json-fields #:emit-json-key
    #:emit-logfmt-value #:emit-logfmt-key
-   #:*max-emit-depth* #:*max-emit-length*
+   #:*max-json-depth* #:*max-json-length*
+   #:*max-pretty-depth* #:*max-pretty-length*
    #:write-json-escaped-string #:serialize-bindings
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
@@ -220,20 +221,20 @@
     (5am:is-true (search "<cons>" r))))
 
 (5am:test test-emit-json-value-length-limit-cons
-  "Lists longer than *max-emit-length* are truncated with ellipsis."
-  (let ((bark:*max-emit-length* 3))
+  "Lists longer than *max-json-length* are truncated with ellipsis."
+  (let ((bark:*max-json-length* 3))
     (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 3 4 5)))))
       (5am:is (string= "[1,2,3,\"...\"]" r)))))
 
 (5am:test test-emit-json-value-length-limit-vector
-  "Vectors longer than *max-emit-length* are truncated with ellipsis."
-  (let ((bark:*max-emit-length* 2))
+  "Vectors longer than *max-json-length* are truncated with ellipsis."
+  (let ((bark:*max-json-length* 2))
     (let ((r (with-output-to-string (s) (emit-json-value s #(10 20 30 40)))))
       (5am:is (string= "[10,20,\"...\"]" r)))))
 
 (5am:test test-emit-json-value-length-limit-hash-table
-  "Hash-tables larger than *max-emit-length* are truncated."
-  (let ((bark:*max-emit-length* 1)
+  "Hash-tables larger than *max-json-length* are truncated."
+  (let ((bark:*max-json-length* 1)
         (h (make-hash-table :test 'equal)))
     (setf (gethash "a" h) 1 (gethash "b" h) 2 (gethash "c" h) 3)
     (let ((r (with-output-to-string (s) (emit-json-value s h))))
@@ -241,7 +242,7 @@
 
 (5am:test test-emit-json-value-depth-and-length
   "Depth and length limits compose correctly."
-  (let ((bark:*max-emit-length* 2))
+  (let ((bark:*max-json-length* 2))
     ;; depth=2: top list OK, nested list OK, doubly-nested → placeholder
     (let ((r (with-output-to-string (s) (emit-json-value s '((1 2) (3 4) (5 6)) 2))))
       ;; Length limit truncates to 2 elements + ellipsis
@@ -427,6 +428,46 @@
     (5am:is-true (stringp output))
     (5am:is-true (search (string #\Esc) output))
     (5am:is-true (search "pretty test" output))))
+
+(5am:test test-pretty-formatter-print-length
+  "Pretty-formatter truncates long lists via *max-pretty-length*."
+  (let* ((*max-pretty-length* 3)
+         (output (pretty-formatter +info+ "" nil nil "msg"
+                                   (list :data '(1 2 3 4 5)))))
+    (5am:is-true (search "1" output))
+    (5am:is-true (search "3" output))
+    ;; CL printer uses "..." for truncation
+    (5am:is-true (search "..." output))
+    ;; Element beyond the limit should not appear
+    (5am:is-false (search "5" output))))
+
+(5am:test test-pretty-formatter-print-level
+  "Pretty-formatter truncates deep nesting via *max-pretty-depth*."
+  (let* ((*max-pretty-depth* 1)
+         (output (pretty-formatter +info+ "" nil nil "msg"
+                                   (list :data '((nested))))))
+    ;; CL printer uses "#" for depth truncation
+    (5am:is-true (search "#" output))))
+
+(5am:test test-pretty-formatter-print-circle
+  "Pretty-formatter handles circular structures without looping."
+  (let* ((circ (list 1 2 3)))
+    (setf (cdr (last circ)) circ)
+    ;; Should complete without hanging — *print-circle* is bound to T
+    (let ((output (pretty-formatter +info+ "" nil nil "msg"
+                                    (list :data circ))))
+      (5am:is-true (stringp output))
+      (5am:is-true (search "#" output)))))
+
+(5am:test test-pretty-formatter-nil-limits
+  "Pretty-formatter with NIL limits produces unlimited output."
+  (let* ((*max-pretty-length* nil)
+         (*max-pretty-depth* nil)
+         (output (pretty-formatter +info+ "" nil nil "msg"
+                                   (list :data '(1 2 3 4 5 6 7 8 9 10)))))
+    ;; All elements should appear
+    (5am:is-true (search "10" output))
+    (5am:is-false (search "..." output))))
 
 ;;; --- Context & Integration ---
 
