@@ -206,9 +206,7 @@
 (5am:test test-emit-json-value-clos-placeholder
   "CLOS objects produce <class-name> placeholder."
   (let ((r (with-output-to-string (s)
-             (emit-json-value s (make-condition 'simple-error
-                                  :format-control "test"
-                                  :format-arguments nil)))))
+             (emit-json-value s *standard-output*))))
     (5am:is-true (search "<" r))))
 
 ;;; --- JSON Serialization Limits ---
