@@ -35,6 +35,12 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 ## Features
 
 - **Async I/O** — lock-free MPSC ring buffer with batch drain; bounded memory, caller never blocks
+- **Multi-output (tee)** — fan-out to multiple destinations, each with its own formatter, filter, and async writer
+- **Per-destination filters** — route events by level or custom predicate per destination
+- **Per-destination formatters** — different formats per destination (JSON to file, pretty to console)
+- **Shared formatter optimization** — when destinations share an `eq` formatter, the message is formatted once
+- **Explicit logger selection** — pass a logger as first argument to any logging macro to bypass `*logger*`
+- **Error recovery** — per-destination `:on-error` handler can swap streams on failure
 - **Function pointer swap** — `set-level` swaps slots to `#'noop`; disabled levels cost one indirect call
 - **Static context** — child logger fields serialized once at creation, zero per-call cost
 - **Dynamic context** — `with-context` uses CL special variables for automatic scoping and thread isolation
@@ -42,7 +48,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Compile-time elimination** — set `*compile-time-max-level*` before compiling to strip calls entirely
 - **Pluggable formatters** — JSON Lines (production), logfmt (compact), pretty (ANSI-colored REPL)
 - **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
-- **Bounded async buffer** — configurable ring buffer capacity with drop-on-full; dropped messages are reported inline
+- **Bounded async buffer** — configurable ring buffer capacity with drop-on-full per destination
 - **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
 
 ## Log Levels
@@ -60,18 +66,16 @@ Levels are integer-encoded, spaced by 10 for user-defined intermediate levels.
 
 ## API Reference
 
-### Logging
+### Logging Macros
 
 ```lisp
-(bark:trace message &rest fields)
-(bark:debug message &rest fields)
-(bark:info  message &rest fields)
-(bark:warn  message &rest fields)
-(bark:error message &rest fields)
-(bark:fatal message &rest fields)
+(bark:info message &rest fields)           ; uses *logger*
+(bark:info some-logger message &rest fields) ; uses some-logger explicitly
 ```
 
-Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is a no-op, otherwise it dispatches to `(logger-<level>-fn *logger*)`. When the level is disabled, the function slot is `#'noop`.
+All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an optional logger as the first argument. When the first argument is a `logger` struct, it is used directly. Otherwise, it is treated as the message and `*logger*` is used.
+
+Dispatch via `logger-p` on the first argument at runtime (struct type tag check, negligible cost). When `*logger*` is nil, the call is a no-op.
 
 ### Logger Management
 
@@ -84,23 +88,76 @@ Each macro expands to a nil-guarded funcall: when `*logger*` is nil the call is 
 
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
+
+;; Set sampling rate (1-in-N)
+(bark:set-sampling logger level rate)
 ```
 
 ### Lifecycle
 
 ```lisp
 ;; Start global async logger
-(bark:start &key (stream *error-output*) (level :info) (formatter #'json-formatter)
+(bark:start &key output (level :info) (formatter #'json-formatter)
                  (name "") (capacity 8192) (on-drop #'bark::default-on-drop)
                  context)
 
-;; Start with static context (avoids manual bark:child + setf dance)
-(bark:start :name "myapp" :level :info
-            :context '(:component "auth" :region "us-east-1"))
-
-;; Stop and flush
+;; Stop and flush all writer threads
 (bark:stop)
 ```
+
+`:output` accepts a stream, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL (defaults to `*error-output*`). When `:output` is a plain stream, `start` wraps it in an async-output. When `:output` is a tee-output, the async-outputs are already created.
+
+`:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields.
+
+### Multi-Output
+
+#### `make-tee` (function)
+
+```lisp
+(bark:make-tee destinations) -> tee-output
+```
+
+`destinations` is a list of plists, each with the keys:
+
+- `:stream` (required) — an output stream
+- `:formatter` — a formatter function (defaults to `#'bark:json-formatter`)
+- `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip
+- `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
+- `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
+- `:on-drop` — drop handler for this destination (defaults to `#'bark::default-on-drop`)
+- `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. The condition is the original condition signaled by the stream (`file-error`, `stream-error`, etc.) — bark does not wrap or translate it. Return a stream to swap and continue, or nil to exit. When omitted, the writer logs the condition to `*error-output*` and exits.
+
+The filter receives the log level (integer) and the per-call fields (the `&rest` plist passed to `bark:info` etc.). It does **not** see static context or dynamic context — those are part of formatting, not routing.
+
+`bark:stop` tears down all writer threads. Streams are not closed — the caller who opened them is responsible for closing them.
+
+#### `tee` (macro)
+
+```lisp
+(bark:tee &rest destination-specs) -> tee-output
+```
+
+Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error)`:
+
+```lisp
+(bark:tee
+  ;; Fast local console — small buffer
+  (*error-output*                       :formatter #'bark:pretty-formatter
+                                        :capacity 1024)
+  ;; Slow remote sink — large buffer, custom drop message
+  ((open "/var/log/app.jsonl"
+         :direction :output
+         :if-exists :append)            :formatter #'bark:json-formatter
+                                        :capacity 65536
+                                        :on-drop (lambda (n) (format nil "LOST ~d" n)))
+  ;; Errors only
+  ((open "/var/log/errors.jsonl"
+         :direction :output
+         :if-exists :append)            :formatter #'bark:json-formatter
+                                        :level :error))
+```
+
+Specifying both `:level` and `:filter` in the same destination spec is a compile-time error.
 
 ### Context
 
@@ -134,23 +191,24 @@ Built-in formatters:
 - `bark:logfmt-formatter` — `key=value` pairs
 - `bark:pretty-formatter` — ANSI-colored for REPL
 
-Swap at runtime:
-```lisp
-(setf (bark::logger-formatter bark:*logger*) #'bark:pretty-formatter)
-```
+**Supported field value types:**
 
-### Value Serialization
+| Type | JSON | logfmt | pretty |
+|------|------|--------|--------|
+| `string` | `"escaped"` | `bare` or `"quoted"` | as-is |
+| `integer` | `123` | `123` | as-is |
+| `float` | `3.14` | `3.14` | as-is |
+| `ratio` | `0.333` | `0.333` | as-is |
+| `t` | `true` | `true` | as-is |
+| `nil` | `null` | `null` | as-is |
+| `symbol` | `"lowercase"` | `lowercase` | as-is |
+| `list` | `["a","b"]` | `"(a b)"` | as-is |
+| `vector` | `[1,2,3]` | `"#(1 2 3)"` | as-is |
+| `hash-table` | `{"k":"v"}` | `"#<HASH-TABLE ...>"` | as-is |
+| `pathname` | `"/var/log/app.jsonl"` | `/var/log/app.jsonl` | as-is |
+| everything else | `"princ-to-string"` | `"princ-to-string"` | as-is |
 
-Field values are serialized to JSON and logfmt without signaling errors on any input type. Strings, numbers (including ratios), booleans, symbols, pathnames, and characters serialize natively. Lists, vectors, and hash-tables serialize as JSON arrays/objects with configurable depth and length limits. Unsupported types (CLOS objects, functions, streams, etc.) produce a `<type-name>` placeholder.
-
-```lisp
-(bark:info "event" :user "alice" :count 42 :ratio 1/3 :path #P"/tmp/log" :tags '(:a :b))
-;; => {"level":30,...,"user":"alice","count":42,"ratio":0.333...,"path":"/tmp/log","tags":["a","b"],...}
-```
-
-Control collection output with `*max-emit-depth*` (default 4) and `*max-emit-length*` (default 20).
-
-See [Value Serialization](docs/value-serialization.md) for the full type tables, key coercion rules, and API reference.
+All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and complex types are quoted via `princ-to-string`. The fallback for all other types is `princ-to-string` — specialize `print-object` on your classes to control their log representation.
 
 ### Sampling
 
@@ -161,23 +219,24 @@ See [Value Serialization](docs/value-serialization.md) for the full type tables,
 
 ### Backpressure
 
-The async writer uses a bounded ring buffer. When the buffer is full (output stream too slow), messages are dropped and a warning is emitted inline:
+The async writer uses a bounded ring buffer per destination. When the buffer is full, messages are dropped and a warning is emitted inline:
 
 ```json
 {"level":40,"msg":"bark: dropped 153 log messages (output too slow)"}
 ```
 
-Control the buffer size and drop behavior:
+Control per destination:
 
 ```lisp
-;; Larger buffer (default 8192, rounded up to next power of two)
-(bark:start :capacity 65536)
+(bark:tee
+  (*error-output* :capacity 65536)  ; larger buffer (messages, not bytes)
+  (log-file       :on-drop (lambda (n) (format nil "DROPPED ~d" n))))  ; custom handler
+```
 
-;; Custom drop handler (receives count, returns a string or NIL to suppress)
-(bark:start :on-drop (lambda (n) (format nil "DROPPED ~d" n)))
+Or globally when using a single output:
 
-;; Suppress drop warnings entirely
-(bark:start :on-drop (lambda (n) (declare (ignore n)) nil))
+```lisp
+(bark:start :capacity 65536 :on-drop (lambda (n) (format nil "DROPPED ~d" n)))
 ```
 
 ### Compile-Time Elimination
@@ -189,44 +248,255 @@ Control the buffer size and drop behavior:
 
 ### Testing
 
-All logging macros are safe to call when `bark:*logger*` is nil — they silently no-op. This means test code that exercises logging call sites can run without initializing a logger:
+All logging macros are safe to call when `bark:*logger*` is nil — they silently no-op.
+
+To capture and assert on log output:
 
 ```lisp
-;; No logger setup needed — log calls are silently ignored
-(defun my-function ()
-  (bark:info "processing" :step 1)
-  (do-work)
-  (bark:debug "done"))
-
-(test my-function-works
-  ;; bark:*logger* is nil here — log calls are harmless no-ops
-  (is (expected-result-p (my-function))))
-```
-
-To capture and assert on log output, use `with-captured-logs` which binds a temporary logger:
-
-```lisp
-;; Captures log output as a list of strings (default: json-formatter)
 (bark:with-captured-logs (get-logs)
   (bark:info "test message" :key "value")
   (let ((lines (funcall get-logs)))
     (assert (= 1 (length lines)))))
 
-;; Use a different formatter for test assertions
+;; Use a different formatter
 (bark:with-captured-logs (get-logs #'bark:logfmt-formatter)
   (bark:info "hello")
   (assert (search "level=info" (first (funcall get-logs)))))
 ```
+
+## Usage Examples
+
+### Mirror: Console + File
+
+Same events, different formats. The most common multi-output scenario.
+
+```lisp
+(defvar *log-file* (open "/var/log/app.jsonl"
+                         :direction :output :if-exists :append
+                         :if-does-not-exist :create))
+
+(bark:start :name "myapp" :level :info
+            :output (bark:tee
+                     (*error-output* :formatter #'bark:pretty-formatter)
+                     (*log-file*     :formatter #'bark:json-formatter)))
+
+(bark:info "request handled" :status 200)
+;; => pretty-printed to stderr
+;; => JSON line to log file
+```
+
+### Level-Based Routing
+
+All events to console, errors only to a separate file.
+
+```lisp
+(bark:start :name "myapp" :level :info
+            :output (bark:tee
+                     (*error-output* :formatter #'bark:pretty-formatter)
+                     (*error-file*   :formatter #'bark:json-formatter
+                                     :level :error)))
+
+(bark:info "all good")           ; console only
+(bark:error "disk full" :vol 3)  ; console + error file
+```
+
+### Content-Based Routing
+
+Audit events to a dedicated stream based on a per-call field.
+
+```lisp
+(bark:start :name "myapp" :level :info
+            :output (bark:tee
+                     (*error-output* :formatter #'bark:json-formatter)
+                     (*audit-file*   :formatter #'bark:json-formatter
+                                     :filter (lambda (level fields)
+                                               (declare (ignore level))
+                                               (getf fields :audit)))))
+
+(bark:info "page loaded" :path "/home")                     ; console only
+(bark:info "user login" :audit t :user-id 42 :method "sso") ; console + audit file
+```
+
+### Two Independent Loggers
+
+Explicit logger arg bypasses `*logger*`. Each logger has its own output pipeline.
+
+```lisp
+(bark:start :name "app" :level :info)
+
+(defvar *audit-logger*
+  (bark:make-logger :name "audit" :level :info
+                    :output (open "/var/log/audit.jsonl"
+                                  :direction :output :if-exists :append)))
+
+(bark:info "request handled" :status 200)              ; app logger via *logger*
+(bark:info *audit-logger* "user login" :user-id 42)    ; audit logger (explicit)
+```
+
+### Error Recovery
+
+The `:on-error` handler receives the original stream condition (`file-error`, `stream-error`, etc.) — bark passes it through without wrapping. The handler runs on the destination's writer thread, not the caller thread — a slow handler stalls the drain, causing the ring buffer to fill and drop messages (callers are never blocked). Return a new stream to swap and continue, or nil to let the writer exit.
+
+Reopen a log file on any error:
+
+```lisp
+(bark:tee
+  (*error-output* :formatter #'bark:pretty-formatter)
+  ((open "/var/log/app.jsonl" :direction :output :if-exists :append)
+   :formatter #'bark:json-formatter
+   :on-error (lambda (condition)
+               (declare (ignore condition))
+               (open "/var/log/app.jsonl"
+                     :direction :output :if-exists :append
+                     :if-does-not-exist :create))))
+```
+
+Dispatch on condition type for different recovery strategies:
+
+```lisp
+:on-error (lambda (condition)
+            (typecase condition
+              (file-error (reopen-log-file))    ; disk full, file deleted
+              (stream-error (fallback-stream))  ; broken pipe
+              (t nil)))                         ; unknown — give up
+```
+
+## Configuration Diagrams
+
+### Single Output
+
+```
+ bark:info ──> *logger* ──> json-formatter ──> [ring buffer] ──> writer ──> stderr
+```
+
+### Tee: Mirror with Different Formatters
+
+```
+                                 ┌─> pretty-formatter ──> [ring 1] ──> writer 1 ──> stderr
+ bark:info ──> *logger* ──> tee─┤
+                                 └─> json-formatter ──> [ring 2] ──> writer 2 ──> app.jsonl
+```
+
+### Tee: Level-Based Routing
+
+```
+                                 ┌─> pretty-formatter ──> [ring 1] ──> writer 1 ──> stderr
+ bark:info ──> *logger* ──> tee─┤
+                                 └─> filter(>=error) ─?─> json-formatter ──> [ring 2] ──> writer 2 ──> errors.jsonl
+                                         │
+                                    skip if below
+```
+
+### Tee: Shared Formatter Optimization
+
+Two destinations with the same formatter — formatted once, emitted to both.
+
+```
+                                 ┌──────────────────────> [ring 1] ──> writer 1 ──> app.jsonl
+ bark:info ──> *logger* ──> tee─┤
+                                 │  json-formatter
+                                 │  (called once)
+                                 └─> filter(>=error) ─?─> [ring 2] ──> writer 2 ──> errors.jsonl
+```
+
+### Two Independent Loggers
+
+```
+ bark:info "msg"          ──> *logger* ──> pretty-formatter ──> [ring 1] ──> writer 1 ──> stderr
+
+ bark:info *audit* "msg"  ──> *audit* ──> json-formatter ──> [ring 2] ──> writer 2 ──> audit.jsonl
+```
+
+### Child Logger Inherits Tee
+
+```
+                               static context: component:"auth"
+                                        │
+ bark:info ──> child-logger ────────────┤
+                                        │
+                                    tee (inherited)
+                                 ┌──────┴──────┐
+                                 ▼              ▼
+                          pretty-formatter  json-formatter
+                                 │              │
+                            [ring 1]       [ring 2]
+                                 │              │
+                            writer 1       writer 2
+                                 │              │
+                              stderr        app.jsonl
+```
+
+### Combined: Tee + Explicit Logger + Dynamic Context
+
+```
+ bark:with-context (:request-id "req-123")
+   │
+   ├─> bark:info "request" ──> *logger* ──> tee─┬─> pretty ──> stderr
+   │                                             └─> json ──> app.jsonl
+   │                           (context: request-id)
+   │
+   └─> bark:info *audit* "login" ──> *audit* ──> json ──> audit.jsonl
+                                      (context: request-id)
+```
+
+## Non-Goals
+
+These are **intentionally** not supported and won't be added:
+
+| Non-goal | Rationale | Recourse |
+|----------|-----------|----------|
+| **Filters on static/dynamic context** | Static context is known at logger creation time — the routing decision can be made then, not deferred to filter time. Dynamic context is scoped, not routed. | Use separate loggers or the explicit logger argument for routing based on static context. |
+| **Output override on `child`** | `child` is for adding static context, not rerouting. Mixing these concerns complicates the mental model. | Use a separate logger with its own output for different routing. |
+| **Named logger registry** | Global mutable registries add implicit coupling. CL already has `defvar` and `defparameter`. | Manage logger variables yourself: `(defvar *audit-logger* (bark:make-logger ...))`. |
+| **Structured data in ring buffer** | Formatting in the caller thread keeps the writer thread trivial (just `write-string` + `force-output`). Deferring formatting to the writer would serialize all format work on a single thread. | This is a deliberate architectural choice for throughput. |
+| **Output as a user-visible object** | The tee's internal representation (`tee-output`, `destination`, `formatter-group`) is an implementation detail. | Use `make-tee`/`tee` to create outputs. Inspect via the logger's output slot if needed for debugging. |
+
+## Architecture
+
+### Thread-Per-Destination Model
+
+Each destination gets its own writer thread and ring buffer. N destinations = N writer threads.
+
+- **Isolation** — a slow destination (network sink with high latency) cannot block fast ones (local file, stderr)
+- **Simplicity** — no thread pool, no multiplexing, no shared-writer coordination
+- **Low cost** — idle writer threads are blocked on a semaphore (OS futex). They consume one kernel thread and minimal RSS
+
+### Ring Buffer
+
+Lock-free MPSC (multi-producer, single-consumer):
+
+```
+Producer threads              Writer thread
+     │                              │
+     ├─ format message              │
+     ├─ CAS claim slot in ring ──>  │
+     ├─ write string to slot        ├─ pop slots in batch
+     └─ signal semaphore            ├─ write-string to stream
+                                    ├─ force-output
+                                    ├─ check drop counter
+                                    └─ wait on semaphore
+```
+
+### Performance Characteristics
+
+| Operation | Cost |
+|-----------|------|
+| Log call (level disabled) | ~2ns (indirect call to `noop`) |
+| Log call (level enabled, async) | ~500ns-2us (formatting) + ~30ns (CAS + semaphore signal) |
+| Log call (level enabled, tee, N dest) | ~500ns-2us per unique formatter + ~30ns x N (push + signal) |
+| Log call (buffer full, drop) | ~20ns (atomic-incf dropped) — formatting skipped |
+| Writer drain (per message) | ~50ns (pop + write-string) |
+| Explicit logger dispatch | ~1ns (struct type tag check on first argument) |
+
+Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is <5% of total log call time. The shared formatter optimization reduces tee overhead when destinations share a formatter.
 
 ## Globals
 
 | Variable | Purpose |
 |----------|---------|
 | `bark:*logger*` | Current logger (bind per-thread or globally) |
-| `bark:*log-context*` | Dynamic context plist (managed by `with-context`) |
+| `bark:*log-context*` | Dynamic context (managed by `with-context`) |
 | `bark:*compile-time-max-level*` | When positive, compiler macros eliminate calls below this level |
-| `bark:*max-emit-depth*` | Max nesting depth for JSON collections (default 4) |
-| `bark:*max-emit-length*` | Max elements per JSON collection before truncation (default 20) |
 
 ## Dependencies
 
@@ -234,63 +504,17 @@ To capture and assert on log output, use `with-captured-logs` which binds a temp
 |-----------|---------|
 | `bordeaux-threads` | Portable thread creation and semaphores |
 | `atomics` | Portable CAS and atomic increment for the lock-free ring buffer |
-| `local-time` | Portable Unix millisecond timestamps |
+| `local-time` | Portable Unix millisecond timestamps (non-SBCL fallback) |
 
 Compatible with any implementation supported by [atomics](https://github.com/Shinmera/atomics): SBCL, CCL, ECL, Allegro, LispWorks, CMUCL.
 
 ## Note on Symbol Shadowing
 
-The convenience macros `bark:trace`, `bark:debug`, `bark:warn`, and `bark:error` shadow `cl:trace`, `cl:debug`, `cl:warn`, and `cl:error`. This only matters if your package `(:use :bark)`. In that case, either shadow-import the ones you need:
-```lisp
-(:shadowing-import-from :bark #:error #:warn #:trace #:debug)
-```
-Or — the recommended approach — don't `(:use :bark)` and call everything with the `bark:` prefix.
-
-## Async Architecture
-
-### Ring Buffer
-
-The async output path uses a lock-free MPSC (multi-producer, single-consumer) ring buffer:
-
-```
-Producer threads              Writer thread
-     │                              │
-     ├─ format message              │
-     ├─ CAS claim slot in ring ──►  │
-     ├─ write string to slot        ├─ pop slots in batch
-     └─ signal semaphore            ├─ write-string to stream
-                                    ├─ force-output
-                                    ├─ check drop counter
-                                    └─ sleep/wait on semaphore
-```
-
-**Ring buffer internals:**
-- Pre-allocated `simple-vector` of size 2^N (minimum 16)
-- `head` (write cursor) and `tail` (read cursor) are `(unsigned-byte 64)` slots; producers use `atomics:cas` to claim a slot and `atomics:atomic-incf` to record drops
-- Producers CAS-loop on `head` to claim a slot, then write the formatted string. If `head - tail >= capacity`, the message is dropped and `dropped` is atomically incremented
-- The consumer (single writer thread) reads sequentially from `tail`, spinning briefly if a producer has claimed a slot but hasn't written yet (uses `sb-ext:spin-loop-hint` on SBCL)
-- `mask` = capacity - 1 enables `logand` instead of `mod` for index calculation
-
-**Flush protocol:** `flush-async-output` creates a fresh `bt:semaphore`, stores it in the `flush-ack` slot, signals the writer's `notify` semaphore, then blocks on the ack. The writer checks `flush-ack` at the end of each drain cycle and signals it after processing.
-
-**Drop reporting:** After each drain cycle, the writer atomically reads and resets the `dropped` counter. If non-zero, it calls the `on-drop` function (default: `default-on-drop`) which returns a warning string written inline to the output stream. This ensures drop notifications appear in the same log pipeline the user is consuming.
-
-**Shutdown:** `stop-async-output` flushes first (guaranteeing all queued messages and any drop warning are written), sets `running` to nil, signals the writer, joins the thread, then does a final drain of any messages that arrived between flush and shutdown.
-
-### Performance Characteristics
-
-| Operation | Cost |
-|-----------|------|
-| Log call (level disabled) | ~2ns (indirect call to `noop`) |
-| Log call (level enabled, async) | ~500ns–2μs (formatting) + ~30ns (CAS + semaphore signal) |
-| Log call (buffer full, drop) | ~500ns–2μs (formatting) + ~20ns (atomic-incf dropped) |
-| Writer drain (per message) | ~50ns (pop + write-string) |
-
-Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is <5% of total log call time.
+The macros `bark:trace`, `bark:debug`, `bark:warn`, and `bark:error` shadow `cl:trace`, `cl:debug`, `cl:warn`, and `cl:error`. This only matters if your package `(:use :bark)`. The recommended approach: don't `(:use :bark)` and call everything with the `bark:` prefix.
 
 ## Design Document
 
-See [cl-bark-design.md](../funhouse-mcp/docs/plans/2026-02-26-cl-bark-design.md) for the full design rationale, architecture diagrams, and v1.1 roadmap.
+See [multi-output-design.md](docs/multi-output-design.md) for the full design rationale, architecture decisions, and interaction matrix.
 
 ## License
 
