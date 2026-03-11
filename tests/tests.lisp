@@ -1506,3 +1506,60 @@
          (json-str (with-output-to-string (s) (emit-json-value s c)))
          (parsed (yason:parse json-str)))
     (5am:is (string= "" (gethash "msg" parsed)))))
+
+(5am:test test-json-captured-error-structure
+  "emit-json-value on captured-error has type, msg, stack keys."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c))
+         (json-str (with-output-to-string (s) (emit-json-value s ce)))
+         (parsed (yason:parse json-str)))
+    (5am:is (string= "simple-error" (gethash "type" parsed)))
+    (5am:is (string= "boom" (gethash "msg" parsed)))
+    (5am:is (listp (gethash "stack" parsed)))
+    ;; Each frame has at least a "call" key
+    (dolist (frame (gethash "stack" parsed))
+      (5am:is (stringp (gethash "call" frame))))))
+
+(5am:test test-json-stack-frame-limit
+  "Stack frames respect *max-json-stack-frames* and append sentinel."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c))
+         (json-str (let ((*max-json-stack-frames* 2))
+                     (with-output-to-string (s) (emit-json-value s ce))))
+         (parsed (yason:parse json-str))
+         (stack (gethash "stack" parsed)))
+    ;; Should have at most 3 entries: 2 real + 1 sentinel
+    (5am:is (<= (length stack) 3))
+    ;; Last entry is the sentinel
+    (when (> (length stack) 2)
+      (5am:is (string= "..." (gethash "call" (car (last stack))))))))
+
+(5am:test test-json-stack-frame-limit-nil
+  "*max-json-stack-frames* NIL means unlimited."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c))
+         (json-str (let ((*max-json-stack-frames* nil))
+                     (with-output-to-string (s) (emit-json-value s ce))))
+         (parsed (yason:parse json-str))
+         (stack (gethash "stack" parsed)))
+    ;; Should have more than 2 frames (no truncation)
+    (5am:is (> (length stack) 2))))
+
+(5am:test test-json-stack-frame-limit-zero
+  "*max-json-stack-frames* 0 produces sentinel only."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c))
+         (json-str (let ((*max-json-stack-frames* 0))
+                     (with-output-to-string (s) (emit-json-value s ce))))
+         (parsed (yason:parse json-str))
+         (stack (gethash "stack" parsed)))
+    (5am:is (= 1 (length stack)))
+    (5am:is (string= "..." (gethash "call" (first stack))))))
+
+(5am:test test-json-captured-error-empty-stack
+  "Captured error with empty stack produces empty array."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark::%make-captured-error :condition c :stack nil))
+         (json-str (with-output-to-string (s) (emit-json-value s ce)))
+         (parsed (yason:parse json-str)))
+    (5am:is (equal '() (gethash "stack" parsed)))))
