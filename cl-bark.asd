@@ -5,7 +5,7 @@
   :license "MIT"
   :homepage "https://github.com/ivanbulanov/cl-bark"
   :depends-on ("atomics" "bordeaux-threads" "local-time")
-  :version "1.1.0"
+  :version "2.0.0"
   :serial t
   :components
   ((:file "packages")
