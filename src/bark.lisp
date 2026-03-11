@@ -836,32 +836,18 @@ CONTEXT, when provided, is a plist of static context fields."
 
 ;;; --- Convenience API ---
 
-(defmacro debug (message &rest fields)
-  "Log MESSAGE at debug level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-debug-fn *logger*) *logger* ,message ,@fields)))
-
-(defmacro error (message &rest fields)
-  "Log MESSAGE at error level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-error-fn *logger*) *logger* ,message ,@fields)))
-
-(defmacro fatal (message &rest fields)
-  "Log MESSAGE at fatal level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-fatal-fn *logger*) *logger* ,message ,@fields)))
-
-(defmacro info (message &rest fields)
-  "Log MESSAGE at info level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-info-fn *logger*) *logger* ,message ,@fields)))
-
-(defmacro trace (message &rest fields)
-  "Log MESSAGE at trace level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-trace-fn *logger*) *logger* ,message ,@fields)))
-
-(defmacro warn (message &rest fields)
-  "Log MESSAGE at warn level to *LOGGER*. No-op when *LOGGER* is nil."
-  `(when *logger*
-     (funcall (logger-warn-fn *logger*) *logger* ,message ,@fields)))
+(macrolet ((define-log-macro (name accessor)
+             `(defmacro ,name (first &rest rest)
+                "Log at the appropriate level. FIRST can be a logger (explicit target) or a message string."
+                (let ((g (gensym "FIRST")))
+                  `(let ((,g ,first))
+                     (if (logger-p ,g)
+                         (funcall (,',accessor ,g) ,g ,@rest)
+                         (when *logger*
+                           (funcall (,',accessor *logger*) *logger* ,g ,@rest))))))))
+  (define-log-macro trace logger-trace-fn)
+  (define-log-macro debug logger-debug-fn)
+  (define-log-macro info  logger-info-fn)
+  (define-log-macro warn  logger-warn-fn)
+  (define-log-macro error logger-error-fn)
+  (define-log-macro fatal logger-fatal-fn))

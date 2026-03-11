@@ -1341,3 +1341,78 @@
     (5am:is-true (search "bark writer-loop error" (get-output-stream-string err-out)))
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
+
+;;; --- Explicit Logger Argument ---
+
+(5am:test test-explicit-logger-basic
+  "Passing a logger as first arg routes to that logger, not *logger*."
+  (multiple-value-bind (c1 r1) (make-list-collector)
+    (multiple-value-bind (c2 r2) (make-list-collector)
+      (let ((*logger* (make-logger :name "global" :level :info :output c1))
+            (other   (make-logger :name "other"  :level :info :output c2)))
+        (bark:info "goes to global")
+        (bark:info other "goes to other")
+        (let ((global-logs (funcall r1))
+              (other-logs (funcall r2)))
+          (5am:is (= 1 (length global-logs)))
+          (5am:is (= 1 (length other-logs)))
+          (5am:is-true (search "goes to global" (first global-logs)))
+          (5am:is-true (search "goes to other" (first other-logs))))))))
+
+(5am:test test-explicit-logger-all-levels
+  "All six macros accept an explicit logger as first argument."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "explicit" :level :trace :output collector)))
+      (bark:trace lgr "t")
+      (bark:debug lgr "d")
+      (bark:info  lgr "i")
+      (bark:warn  lgr "w")
+      (bark:error lgr "e")
+      (bark:fatal lgr "f")
+      (let ((logs (funcall results-fn)))
+        (5am:is (= 6 (length logs)))
+        (5am:is-true (search "\"level\":10" (nth 0 logs)))
+        (5am:is-true (search "\"level\":60" (nth 5 logs)))))))
+
+(5am:test test-explicit-logger-with-fields
+  "Explicit logger receives per-call fields."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "fields" :level :info :output collector)))
+      (bark:info lgr "request" :method "GET" :path "/api")
+      (let* ((logs (funcall results-fn))
+             (line (first logs)))
+        (5am:is-true (search "method" line))
+        (5am:is-true (search "GET" line))
+        (5am:is-true (search "path" line))))))
+
+(5am:test test-explicit-logger-with-context
+  "Dynamic context applies to explicit logger too."
+  (multiple-value-bind (c1 r1) (make-list-collector)
+    (multiple-value-bind (c2 r2) (make-list-collector)
+      (let ((*logger* (make-logger :name "global" :level :info :output c1))
+            (other   (make-logger :name "other"  :level :info :output c2)))
+        (bark:with-context (:req "123")
+          (bark:info "global msg")
+          (bark:info other "other msg"))
+        (let ((g-line (first (funcall r1)))
+              (o-line (first (funcall r2))))
+          ;; Both loggers see the dynamic context
+          (5am:is-true (search "req" g-line))
+          (5am:is-true (search "123" g-line))
+          (5am:is-true (search "req" o-line))
+          (5am:is-true (search "123" o-line)))))))
+
+(5am:test test-explicit-logger-nil-logger-is-message
+  "When *logger* is nil and first arg is a string, it's a no-op (not crash)."
+  (let ((*logger* nil))
+    ;; Should not error — nil *logger* means no-op
+    (bark:info "this is fine")
+    (5am:is-true t)))
+
+(5am:test test-explicit-logger-string-first-arg
+  "When first arg is a string (not a logger), it's treated as the message."
+  (with-captured-logs (get-logs)
+    (bark:info "hello world" :key "val")
+    (let ((line (first (funcall get-logs))))
+      (5am:is-true (search "hello world" line))
+      (5am:is-true (search "key" line)))))
