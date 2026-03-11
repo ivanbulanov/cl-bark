@@ -4,7 +4,7 @@
   :author "Ivan Bulanov <https://github.com/ivanbulanov>"
   :license "MIT"
   :homepage "https://github.com/ivanbulanov/cl-bark"
-  :depends-on ("atomics" "bordeaux-threads" "local-time")
+  :depends-on ("atomics" "bordeaux-threads" "dissect" "local-time")
   :version "2.0.0"
   :serial t
   :components
