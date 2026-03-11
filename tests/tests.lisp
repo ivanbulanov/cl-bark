@@ -1657,3 +1657,51 @@
              (err (gethash "err" parsed)))
         (5am:is (string= "test-condition" (gethash "type" err)))
         (5am:is (string= "detail: oops" (gethash "msg" err)))))))
+
+;;; --- Context Path Tests: Condition in Child/Dynamic Context ---
+
+(5am:test test-condition-in-child-bindings-json
+  "Condition in child logger static bindings serializes correctly in JSON.
+   Child bindings are pre-serialized into chindings at child creation time."
+  (bark:with-captured-logs (get-logs #'json-formatter)
+    (let* ((c (make-condition 'simple-error :format-control "startup err"))
+           (child-logger (bark:child bark:*logger* :boot-err c)))
+      (let ((bark:*logger* child-logger))
+        (bark:info "started")
+        (let* ((parsed (yason:parse (first (funcall get-logs))))
+               (err (gethash "boot-err" parsed)))
+          (5am:is (hash-table-p err))
+          (5am:is (string= "simple-error" (gethash "type" err))))))))
+
+(5am:test test-condition-in-child-bindings-logfmt
+  "Condition in child logger raw-bindings serializes correctly in logfmt.
+   raw-bindings carry the live condition object, serialized at log time."
+  (bark:with-captured-logs (get-logs #'logfmt-formatter)
+    (let* ((c (make-condition 'simple-error :format-control "startup err"))
+           (child-logger (bark:child bark:*logger* :boot-err c)))
+      (let ((bark:*logger* child-logger))
+        (bark:info "started")
+        (let ((line (first (funcall get-logs))))
+          (5am:is-true (search "boot-err=\"simple-error: startup err\"" line)))))))
+
+(5am:test test-condition-in-child-bindings-pretty
+  "Condition in child logger raw-bindings serializes correctly in pretty.
+   raw-bindings carry the live condition object, serialized at log time."
+  (bark:with-captured-logs (get-logs #'pretty-formatter)
+    (let* ((c (make-condition 'simple-error :format-control "startup err"))
+           (child-logger (bark:child bark:*logger* :boot-err c)))
+      (let ((bark:*logger* child-logger))
+        (bark:info "started")
+        (let ((line (first (funcall get-logs))))
+          (5am:is-true (search "simple-error: startup err" line)))))))
+
+(5am:test test-condition-in-dynamic-context
+  "Condition in with-context serializes correctly."
+  (bark:with-captured-logs (get-logs #'json-formatter)
+    (let ((c (make-condition 'simple-error :format-control "ctx err")))
+      (bark:with-context (:last-err c)
+        (bark:info "status check")
+        (let* ((parsed (yason:parse (first (funcall get-logs))))
+               (err (gethash "last-err" parsed)))
+          (5am:is (hash-table-p err))
+          (5am:is (string= "simple-error" (gethash "type" err))))))))
