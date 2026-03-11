@@ -26,6 +26,9 @@
    #:formatter-group-formatter #:formatter-group-destinations
    #:tee-output-p #:tee-output-groups
    #:make-tee
+   ;; Condition serialization
+   #:capture #:captured-error-p #:captured-error-condition #:captured-error-stack
+   #:*max-json-stack-frames* #:*max-pretty-stack-frames*
    ;; Utilities
    #:noop #:make-list-collector
    ;; Public API (non-conflicting)
@@ -1457,3 +1460,26 @@
     (let ((line (first (funcall get-logs))))
       (5am:is-true (search "hello world" line))
       (5am:is-true (search "key" line)))))
+
+;;; --- Condition Serialization ---
+
+(5am:test test-captured-error-struct
+  "Verify captured-error struct and its accessors."
+  (let* ((c (make-condition 'simple-error :format-control "boom"))
+         (ce (bark:capture c)))
+    (5am:is (captured-error-p ce))
+    (5am:is (eq c (captured-error-condition ce)))
+    (5am:is (listp (captured-error-stack ce)))))
+
+(5am:test test-capture-strips-internal-frames
+  "Verify capture does not include bark/dissect internal frames."
+  (let* ((c (make-condition 'simple-error :format-control "test"))
+         (ce (bark:capture c)))
+    ;; No frame should have BARK or DISSECT in its call
+    (dolist (frame (captured-error-stack ce))
+      (let ((call (dissect:call frame)))
+        (when (symbolp call)
+          (let ((pkg (symbol-package call)))
+            (when pkg
+              (5am:is-false (member (package-name pkg) '("BARK" "DISSECT") :test #'string=)
+                            "Frame ~a should not be from BARK or DISSECT" call))))))))
