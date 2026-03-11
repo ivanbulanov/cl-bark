@@ -427,12 +427,55 @@
     (write-string " msg=" s)
     (emit-logfmt-value s message)))
 
+(defun emit-pretty-condition-value (stream condition)
+  "Write CONDITION as type: message for pretty formatter."
+  (write-string (format-condition-type condition) stream)
+  (write-string ": " stream)
+  (write-string (princ-to-string condition) stream))
+
+(defun format-frame-call (frame)
+  "Format a stack frame's call as an uppercase string."
+  (let ((call (dissect:call frame)))
+    (if (symbolp call)
+        (symbol-name call)
+        (string-upcase (princ-to-string call)))))
+
+(defun emit-pretty-stack (stream stacks)
+  "Write accumulated stack traces. STACKS is a list of (key . captured-error) pairs."
+  (let ((single-p (= 1 (length stacks))))
+    (dolist (entry stacks)
+      (let* ((key (car entry))
+             (ce (cdr entry))
+             (frames (captured-error-stack ce))
+             (limit *max-pretty-stack-frames*)
+             (total (length frames)))
+        ;; Label when multiple stacks
+        (unless single-p
+          (format stream "~%  ~c[2m~a~c[0m:" #\Esc
+                  (typecase key (string key) (symbol (string-downcase (symbol-name key))))
+                  #\Esc))
+        (let ((indent (if single-p "  " "    "))
+              (i 0))
+          (dolist (frame frames)
+            (when (and limit (>= i limit))
+              (format stream "~%~a~c[2m... (~d more frames)~c[0m"
+                      indent #\Esc (- total i) #\Esc)
+              (return))
+            (let ((file (dissect:file frame))
+                  (line (dissect:line frame)))
+              (format stream "~%~a~c[1mat ~a~c[0m" indent #\Esc (format-frame-call frame) #\Esc)
+              (when (or file line)
+                (format stream " ~c[2m(~@[~a~]~@[:~d~])~c[0m"
+                        #\Esc
+                        (when file (namestring file))
+                        line
+                        #\Esc)))
+            (incf i)))))))
+
 (declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
 
 (defun pretty-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry with ANSI colors for REPL/development use.
-   Binds *print-level* and *print-length* from *max-pretty-depth* and
-   *max-pretty-length* to bound value output. Binds *print-circle* to T."
+  "Format a log entry with ANSI colors for REPL/development use."
   (declare (ignore chindings))
   (with-output-to-string (s)
     (let* ((*print-level* *max-pretty-depth*)
@@ -440,27 +483,34 @@
            (*print-circle* t)
            (level-idx (floor level +level-step+))
            (color (svref *level-colors* level-idx))
-           (name (level-name level)))
-      (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
-      (write-string message s)
-      ;; Child logger bindings
-      (loop for (k v) on raw-bindings by #'cddr do
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
-                #\Esc)
-        (princ v s))
-      ;; Context fields
-      (dolist (pair context)
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase (car pair) (string (car pair)) (symbol (string-downcase (symbol-name (car pair)))))
-                #\Esc)
-        (princ (cdr pair) s))
-      ;; Per-call fields
-      (loop for (k v) on fields by #'cddr do
-        (format s " ~c[2m~a~c[0m=" #\Esc
-                (typecase k (string k) (symbol (string-downcase (symbol-name k))))
-                #\Esc)
-        (princ v s)))))
+           (name (level-name level))
+           (stacks nil))
+      (flet ((write-key (k)
+               (format s " ~c[2m~a~c[0m=" #\Esc
+                       (typecase k (string k) (symbol (string-downcase (symbol-name k))))
+                       #\Esc))
+             (write-val (k v)
+               (cond
+                 ((captured-error-p v)
+                  (emit-pretty-condition-value s (captured-error-condition v))
+                  (push (cons k v) stacks))
+                 ((typep v 'condition)
+                  (emit-pretty-condition-value s v))
+                 (t (princ v s)))))
+        (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
+        (write-string message s)
+        ;; Child logger bindings
+        (loop for (k v) on raw-bindings by #'cddr do
+          (write-key k) (write-val k v))
+        ;; Context fields
+        (dolist (pair context)
+          (write-key (car pair)) (write-val (car pair) (cdr pair)))
+        ;; Per-call fields
+        (loop for (k v) on fields by #'cddr do
+          (write-key k) (write-val k v))
+        ;; Append stack traces
+        (when stacks
+          (emit-pretty-stack s (nreverse stacks)))))))
 
 (defconstant +min-ring-capacity+ 16 "Minimum ring buffer capacity in log lines. Power of two.")
 

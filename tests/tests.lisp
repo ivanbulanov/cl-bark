@@ -1576,3 +1576,33 @@
          (ce (bark:capture c))
          (result (with-output-to-string (s) (emit-logfmt-value s ce))))
     (5am:is (string= "\"simple-error: boom\"" result))))
+
+(5am:test test-pretty-condition-inline
+  "Pretty formatter shows type: message for plain conditions."
+  (bark:with-captured-logs (get-logs #'pretty-formatter)
+    (let ((c (make-condition 'simple-error :format-control "boom")))
+      (bark:error "failed" :err c)
+      (let ((line (first (funcall get-logs))))
+        (5am:is-true (search "simple-error: boom" line))))))
+
+(5am:test test-pretty-captured-error-stack
+  "Pretty formatter shows inline condition + indented stack trace."
+  (bark:with-captured-logs (get-logs #'pretty-formatter)
+    (let ((c (make-condition 'simple-error :format-control "boom")))
+      (bark:error "failed" :err (bark:capture c))
+      (let ((line (first (funcall get-logs))))
+        ;; Inline condition
+        (5am:is-true (search "simple-error: boom" line))
+        ;; Stack trace lines (ANSI bold "at" with frame call)
+        (5am:is-true (search "at " line))))))
+
+(5am:test test-pretty-stack-frame-limit
+  "Pretty formatter respects *max-pretty-stack-frames*."
+  (bark:with-captured-logs (get-logs #'pretty-formatter)
+    (let ((c (make-condition 'simple-error :format-control "boom"))
+          (*max-pretty-stack-frames* 1))
+      (bark:error "failed" :err (bark:capture c))
+      (let ((line (first (funcall get-logs))))
+        ;; Should have truncation marker
+        (5am:is-true (search "... (" line))
+        (5am:is-true (search "more frames)" line))))))
