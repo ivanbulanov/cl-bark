@@ -542,6 +542,15 @@ Specifying both :level and :filter is an error."
                                                      'simple-vector)))
                 'simple-vector)))))
 
+(defmacro tee (&rest destination-specs)
+  "Syntax sugar over make-tee. Each spec is (stream-expr &key formatter filter level capacity on-drop on-error)."
+  `(make-tee
+    (list ,@(loop for spec in destination-specs
+                  for (stream-expr . keys) = spec
+                  do (when (and (member :level keys) (member :filter keys))
+                       (cl:error "Cannot specify both :level and :filter in tee destination spec"))
+                  collect `(list :stream ,stream-expr ,@keys)))))
+
 ;;; --- Logger ---
 
 (defun noop (logger message &rest fields)

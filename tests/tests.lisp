@@ -1014,3 +1014,25 @@
       (loop for group across (tee-output-groups tee)
             do (loop for dest across (formatter-group-destinations group)
                      do (bark::stop-async-output (destination-async-output dest)))))))
+
+(5am:test test-tee-macro-basic
+  "tee macro creates same structure as equivalent make-tee call."
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:tee
+               (s1 :formatter #'json-formatter)
+               (s2 :formatter #'pretty-formatter :level :error))))
+    (unwind-protect
+         (progn
+           (5am:is-true (tee-output-p tee))
+           (5am:is (= 2 (length (tee-output-groups tee))))
+           ;; Second destination should have a filter (from :level :error)
+           (let* ((pretty-group (find #'pretty-formatter (tee-output-groups tee)
+                                      :key #'formatter-group-formatter))
+                  (dest (aref (formatter-group-destinations pretty-group) 0)))
+             (5am:is-true (not (null (destination-filter dest))))
+             (5am:is-false (funcall (destination-filter dest) +info+ nil))
+             (5am:is-true (funcall (destination-filter dest) +error+ nil))))
+      (loop for group across (tee-output-groups tee)
+            do (loop for dest across (formatter-group-destinations group)
+                     do (bark::stop-async-output (destination-async-output dest)))))))

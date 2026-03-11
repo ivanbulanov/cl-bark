@@ -36,6 +36,7 @@
            "SET-SAMPLING"
            "START"
            "STOP"
+           "TEE"
            "TEE-OUTPUT"
            "TRACE"
            "WARN"
