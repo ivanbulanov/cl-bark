@@ -51,6 +51,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
 - **Bounded async buffer** — configurable ring buffer capacity with drop-on-full per destination
 - **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
+- **Request-scoped buffering** — `with-log-buffer` captures all log calls; on success emit only info+, on failure emit everything including debug — zero-config retroactive log level decisions
 
 ## Log Levels
 
@@ -418,6 +419,56 @@ To capture and assert on log output:
   (assert (search "level=info" (first (funcall get-logs)))))
 ```
 
+### Request-Scoped Buffering
+
+Buffer log calls and decide at scope exit which to emit. The default: on success, emit entries at or above the logger's configured level. On failure (unhandled condition), emit everything — including debug and trace.
+
+```lisp
+;; Zero config — capture at :trace, emit based on exit status
+(bark:with-log-buffer ()
+  (bark:debug "parsing body" :content-type ct)
+  (bark:info "processing" :path path)
+  (process request))
+;; Success: only :info emitted. Error: all entries emitted, then error propagates.
+```
+
+**Parameters:**
+
+- **`level`** — capture threshold (default `:trace`). The logger's level is lowered to this inside the scope.
+- **`on-flush`** — optional `(lambda (entries condition normal-exit-p) ...)`. Returns a sequence of entries to emit.
+
+```lisp
+;; Custom: emit debug logs only for slow requests
+(bark:with-log-buffer
+    (:on-flush (lambda (entries condition normal-exit-p)
+                 (declare (ignore condition normal-exit-p))
+                 (if (> elapsed-ms 500) entries
+                     (remove-if (lambda (e) (< (bark:buffer-entry-level e) bark:+info+))
+                                entries))))
+  ...)
+```
+
+**Semantics:**
+
+- Normal exit: filter to entries >= logger's original level.
+- Abnormal exit (unhandled condition): emit all entries.
+- Non-condition unwind (`return-from`, `throw`): treated as normal exit.
+- Handled errors (caught by `handler-case` inside body): normal exit.
+- Explicit logger args (`(bark:info *audit-logger* "msg")`) bypass the buffer.
+- Nested scopes flush independently to the root (outermost non-buffer) logger.
+
+**Buffer entries** are structs with accessors for `on-flush` callbacks:
+
+- `bark:buffer-entry-level` — numeric level
+- `bark:buffer-entry-message` — log message
+- `bark:buffer-entry-fields` — per-call fields plist
+- `bark:buffer-entry-context` — snapshot of dynamic context
+- `bark:buffer-entry-timestamp` — millisecond timestamp from log time
+
+**Timestamps:** Flushed entries carry their original log-time timestamps. User-defined formatters should call `bark:current-log-timestamp-ms` instead of computing their own to get correct timestamps during replay.
+
+**Compile-time elimination:** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` eliminates debug calls, they cannot be retroactively surfaced.
+
 ## Usage Examples
 
 ### Mirror: Console + File
@@ -686,6 +737,7 @@ Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is
 | `bark:*max-pretty-length*` | `20` | Bound as `*print-length*` in pretty-formatter (nil = unlimited) |
 | `bark:*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output (nil = unlimited) |
 | `bark:*max-pretty-stack-frames*` | `20` | Max stack frames in pretty condition output (nil = unlimited) |
+| `bark:*root-logger*` | `nil` | Root logger for buffer scopes (managed by `with-log-buffer`) |
 
 ## Dependencies
 
