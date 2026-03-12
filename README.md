@@ -602,7 +602,7 @@ These are **intentionally** not supported and won't be added:
 | **Filters on static/dynamic context** | Static context is known at logger creation time — the routing decision can be made then, not deferred to filter time. Dynamic context is scoped, not routed. | Use separate loggers or the explicit logger argument for routing based on static context. |
 | **Output override on `child`** | `child` is for adding static context, not rerouting. Mixing these concerns complicates the mental model. | Use a separate logger with its own output for different routing. |
 | **Named logger registry** | Global mutable registries add implicit coupling. CL already has `defvar` and `defparameter`. | Manage logger variables yourself: `(defvar *audit-logger* (bark:make-logger ...))`. |
-| **Structured data in ring buffer** | Formatting in the caller thread keeps the writer thread trivial (just `write-string` + `force-output`). Deferring formatting to the writer would serialize all format work on a single thread. | This is a deliberate architectural choice for throughput. |
+| **Structured data in ring buffer** | Formatting in the caller thread is a deliberate throughput and efficiency choice. See [Caller-Thread Formatting](#caller-thread-formatting) for full rationale. | — |
 | **Output as a user-visible object** | The tee's internal representation (`tee-output`, `destination`, `formatter-group`) is an implementation detail. | Use `make-tee`/`tee` to create outputs. Inspect via the logger's output slot if needed for debugging. |
 
 ## Conditions
@@ -644,6 +644,20 @@ Producer threads              Writer thread
                                     ├─ check drop counter
                                     └─ wait on semaphore
 ```
+
+### Caller-Thread Formatting
+
+Every log call formats the message to a finished string in the caller's thread, then pushes that string into the ring buffer. The writer thread does nothing but `write-string` + `force-output`. This is a deliberate choice with four supporting reasons:
+
+**1. Callers are the natural parallelism.** N application threads logging = N-way parallel formatting with zero coordination. Deferring formatting to the writer would serialize all format work on one thread per destination. A dedicated formatter thread pool would add coordination overhead (a second queue, a second CAS + semaphore handoff per message) without improving throughput — the pool's parallelism P is typically ≤ N, and the callers were already doing the work for free.
+
+**2. `dynamic-extent` requires caller-thread formatting.** Per-call fields are declared `dynamic-extent` — the `&rest` plist lives on the stack, zero heap allocation. Deferring formatting to another thread would require heap-copying the fields (they won't survive the caller's stack frame), negating this optimization.
+
+**3. Dynamic context is a special variable.** `*log-context*` is thread-local and can be rebound at any point. The formatter must read it in the caller's thread to capture the correct bindings. Deferring would require snapshotting the alist into the ring buffer slot — an extra allocation per log call, plus the writer would need to know about context semantics.
+
+**4. Shared formatter optimization requires formatting before fan-out.** With tee, destinations are grouped by formatter identity (`eq`). The message is formatted once per group, then the same string is pushed to all passing destinations' ring buffers. If formatting were deferred to writer threads, each writer would format independently — duplicating work when destinations share a formatter.
+
+**Trade-off: per-call latency.** The caller pays ~500ns–2μs for formatting. This is bounded by `*max-json-depth*`, `*max-json-length*`, and `*max-json-stack-frames*`. Pre-serialized `chindings` on child loggers eliminate per-call cost for static context. Sampling skips formatting entirely for sampled-out messages.
 
 ### Performance Characteristics
 
