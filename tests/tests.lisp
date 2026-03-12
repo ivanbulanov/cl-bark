@@ -32,6 +32,10 @@
    ;; Utilities
    #:noop #:make-list-collector
    #:current-log-timestamp-ms #:*override-timestamp*
+   ;; Buffer entry
+   #:buffer-entry #:make-buffer-entry
+   #:buffer-entry-level #:buffer-entry-message
+   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -1937,3 +1941,18 @@
     (let* ((line (get-output-stream-string out))
            (json (yason:parse line)))
       (5am:is (= 9999999 (gethash "ts" json))))))
+
+;;; --- Buffer entry ---
+
+(5am:test test-buffer-entry-struct
+  "buffer-entry struct holds all captured fields."
+  (let ((entry (make-buffer-entry :level +info+
+                                  :message "hello"
+                                  :fields '(:key "val")
+                                  :context '((:req-id . "r1"))
+                                  :timestamp 1234567890)))
+    (5am:is (= +info+ (buffer-entry-level entry)))
+    (5am:is (string= "hello" (buffer-entry-message entry)))
+    (5am:is (equal '(:key "val") (buffer-entry-fields entry)))
+    (5am:is (equal '((:req-id . "r1")) (buffer-entry-context entry)))
+    (5am:is (= 1234567890 (buffer-entry-timestamp entry)))))
