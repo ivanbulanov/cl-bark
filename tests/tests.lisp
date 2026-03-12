@@ -2298,3 +2298,53 @@
     (with-log-buffer ()
       (setf ran t))
     (5am:is-true ran)))
+
+;;; --- Nested buffering ---
+
+(5am:test test-nested-buffer-inner-flushes-to-root
+  "Inner buffer flushes directly to root logger output."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (bark:info "outer-1")
+      (with-log-buffer ()
+        (bark:info "inner-1"))
+      (bark:info "outer-2"))
+    ;; All three should appear in output (all are info level, normal exit)
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "outer-1" result))
+      (5am:is-true (search "inner-1" result))
+      (5am:is-true (search "outer-2" result)))))
+
+(5am:test test-nested-buffer-inner-failure-outer-success
+  "Inner failure dumps inner debug; outer still filters normally."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (bark:debug "outer-debug")
+      (bark:info "outer-info")
+      (handler-case
+          (with-log-buffer ()
+            (bark:debug "inner-debug")
+            (cl:error "inner boom"))
+        (cl:error () nil))
+      (bark:info "outer-continues"))
+    (let ((result (get-output-stream-string out)))
+      ;; Inner debug visible (inner scope errored)
+      (5am:is-true (search "inner-debug" result))
+      ;; Outer debug hidden (outer scope succeeded)
+      (5am:is-false (search "outer-debug" result))
+      ;; Both outer infos visible
+      (5am:is-true (search "outer-info" result))
+      (5am:is-true (search "outer-continues" result)))))
+
+(5am:test test-nested-buffer-root-logger-preserved
+  "*root-logger* is set by outermost scope and preserved through nesting."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    ;; Three levels deep — all should flush to same root
+    (with-log-buffer ()
+      (with-log-buffer ()
+        (with-log-buffer ()
+          (bark:info "deep"))))
+    (5am:is-true (search "deep" (get-output-stream-string out)))))
