@@ -36,6 +36,7 @@
    #:buffer-entry #:make-buffer-entry
    #:buffer-entry-level #:buffer-entry-message
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
+   #:make-buffer-logger
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -1956,3 +1957,67 @@
     (5am:is (equal '(:key "val") (buffer-entry-fields entry)))
     (5am:is (equal '((:req-id . "r1")) (buffer-entry-context entry)))
     (5am:is (= 1234567890 (buffer-entry-timestamp entry)))))
+
+;;; --- Buffer logger ---
+
+(5am:test test-make-buffer-logger-level-lowered
+  "Buffer logger has level lowered to the requested capture level."
+  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (5am:is (= +trace+ (logger-level buf-lgr)))))
+
+(5am:test test-make-buffer-logger-slots-cleared
+  "Buffer logger has field-transform and sampler set to nil."
+  (let* ((original (make-logger :name "app" :level :info :output *standard-output*
+                                :field-transform (lambda (k v) (declare (ignore k)) v)))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (5am:is (null (logger-field-transform buf-lgr)))
+    (5am:is (null (logger-sampler buf-lgr)))))
+
+(5am:test test-make-buffer-logger-preserves-identity
+  "Buffer logger preserves name, chindings, raw-bindings from original."
+  (let* ((parent (make-logger :name "app" :level :info :output *standard-output*))
+         (original (child parent :component "auth"))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (5am:is (string= (logger-name original) (logger-name buf-lgr)))
+    (5am:is (string= (logger-chindings original) (logger-chindings buf-lgr)))
+    (5am:is (equal (logger-raw-bindings original) (logger-raw-bindings buf-lgr)))))
+
+(5am:test test-make-buffer-logger-captures-entries
+  "Calling log functions on buffer logger pushes entries to buffer vector."
+  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (funcall (logger-info-fn buf-lgr) buf-lgr "hello" :key "val")
+    (5am:is (= 1 (length buffer)))
+    (let ((entry (aref buffer 0)))
+      (5am:is (= +info+ (buffer-entry-level entry)))
+      (5am:is (string= "hello" (buffer-entry-message entry)))
+      (5am:is (equal '(:key "val") (buffer-entry-fields entry))))))
+
+(5am:test test-make-buffer-logger-captures-context
+  "Buffer logger snapshots *log-context* at log time."
+  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (let ((*log-context* (list (cons :req-id "r1"))))
+      (funcall (logger-info-fn buf-lgr) buf-lgr "hello"))
+    (5am:is (equal '((:req-id . "r1")) (buffer-entry-context (aref buffer 0))))))
+
+(5am:test test-make-buffer-logger-captures-all-levels
+  "Buffer logger captures entries at all enabled levels."
+  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buf-lgr (make-buffer-logger original +trace+ buffer)))
+    (funcall (logger-trace-fn buf-lgr) buf-lgr "t")
+    (funcall (logger-debug-fn buf-lgr) buf-lgr "d")
+    (funcall (logger-info-fn buf-lgr) buf-lgr "i")
+    (funcall (logger-warn-fn buf-lgr) buf-lgr "w")
+    (funcall (logger-error-fn buf-lgr) buf-lgr "e")
+    (funcall (logger-fatal-fn buf-lgr) buf-lgr "f")
+    (5am:is (= 6 (length buffer)))
+    (5am:is (= +trace+ (buffer-entry-level (aref buffer 0))))
+    (5am:is (= +fatal+ (buffer-entry-level (aref buffer 5))))))
