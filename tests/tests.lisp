@@ -2651,3 +2651,56 @@
         (5am:is (= 1 (length lines)))
         (5am:is-true (search "\"level\":\"info\"" line))
         (5am:is-true (search "\"msg\":\"captured\"" line))))))
+
+;;; --- Bug regression tests ---
+
+(5am:test test-logfmt-condition-escapes-quotes
+  "Logfmt condition with double-quotes in message must escape them."
+  (let* ((c (make-condition 'simple-error :format-control "said ~a" :format-arguments '("\"hi\"")))
+         (result (with-output-to-string (s) (bark::emit-logfmt-value s c))))
+    ;; Must be properly quoted — no unescaped double-quotes within the value
+    (5am:is (char= #\" (char result 0)))
+    (5am:is (char= #\" (char result (1- (length result)))))
+    ;; Count quotes: opening + closing + 2 escaped = 4
+    ;; The internal quotes must be escaped with backslash
+    (let ((inner (subseq result 1 (1- (length result)))))
+      ;; No bare unescaped double-quote inside the quoted value
+      (5am:is-false (search "\"hi\"" inner)
+                    "Internal quotes must be escaped, not bare"))))
+
+(5am:test test-logfmt-condition-escapes-newlines
+  "Logfmt condition with newlines in message must not produce multi-line output."
+  (let* ((c (make-condition 'simple-error :format-control "line1~%line2"))
+         (result (with-output-to-string (s) (bark::emit-logfmt-value s c))))
+    ;; Must not contain a literal newline (breaks newline-delimited transport)
+    (5am:is-false (find #\Newline result)
+                  "Logfmt value must be single-line")))
+
+(5am:test test-logfmt-bare-or-quoted-escapes-newlines
+  "logfmt-write-bare-or-quoted must quote strings containing newlines."
+  (let ((result (with-output-to-string (s)
+                  (bark::logfmt-write-bare-or-quoted s (format nil "line1~%line2")))))
+    ;; Must not contain a literal newline
+    (5am:is-false (find #\Newline result)
+                  "Logfmt value must be single-line")
+    ;; Must be quoted (starts and ends with double-quote)
+    (5am:is (char= #\" (char result 0)))
+    (5am:is (char= #\" (char result (1- (length result)))))))
+
+(5am:test test-logfmt-bare-or-quoted-escapes-backslashes
+  "logfmt-write-bare-or-quoted must handle backslashes."
+  (let ((result (with-output-to-string (s)
+                  (bark::logfmt-write-bare-or-quoted s "back\\slash"))))
+    ;; Backslash should appear in output (exact form depends on whether we escape)
+    (5am:is-true (search "\\" result))))
+
+(5am:test test-logfmt-value-newline-in-string
+  "logfmt values containing newlines are quoted and newlines escaped."
+  (let ((out (make-string-output-stream)))
+    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
+      (funcall (bark::logger-info-fn l) l "msg" :data (format nil "line1~%line2")))
+    (let ((s (get-output-stream-string out)))
+      ;; Must not contain a literal newline in the value portion
+      ;; (the trailing newline from terpri is OK, but there must not be a mid-line break)
+      (let ((lines (remove "" (uiop:split-string s :separator '(#\Newline)) :test #'string=)))
+        (5am:is (= 1 (length lines)) "logfmt output must be a single line")))))

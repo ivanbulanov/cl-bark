@@ -342,27 +342,35 @@
   (write-string (key-string key) stream))
 
 (defun logfmt-write-bare-or-quoted (stream string)
-  "Write STRING to STREAM, quoting if it contains space, quote, or equals."
+  "Write STRING to STREAM, quoting if it contains space, quote, equals, backslash,
+   or control characters. Escapes quotes, backslashes, newlines, returns, and tabs."
   (declare (optimize (speed 3) (safety 1))
            (type string string))
   (let ((needs-quoting nil))
     (loop for c of-type character across string
-          when (or (char= c #\Space) (char= c #\") (char= c #\=))
+          when (or (char= c #\Space) (char= c #\") (char= c #\=)
+                   (char= c #\\) (< (char-code c) 32))
             do (setf needs-quoting t) (loop-finish))
     (if needs-quoting
         (progn
           (write-char #\" stream)
           (loop for c of-type character across string do
-            (when (char= c #\") (write-char #\\ stream))
-            (write-char c stream))
+            (case c
+              (#\" (write-string "\\\"" stream))
+              (#\\ (write-string "\\\\" stream))
+              (#\Newline (write-string "\\n" stream))
+              (#\Return (write-string "\\r" stream))
+              (#\Tab (write-string "\\t" stream))
+              (t (write-char c stream))))
           (write-char #\" stream))
         (write-string string stream))))
 
 (defun emit-logfmt-condition (stream condition)
-  "Write CONDITION as a quoted logfmt value: \"type: message\"."
-  (write-char #\" stream)
-  (write-condition-summary stream condition)
-  (write-char #\" stream))
+  "Write CONDITION as a quoted logfmt value: \"type: message\".
+   Escapes quotes, backslashes, newlines, returns, and tabs in the message."
+  (logfmt-write-bare-or-quoted
+   stream
+   (with-output-to-string (s) (write-condition-summary s condition))))
 
 (defun emit-logfmt-value (stream value)
   "Write VALUE as a logfmt value to STREAM.  Scalars only."
