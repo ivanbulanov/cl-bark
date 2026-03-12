@@ -1,5 +1,6 @@
-;;; src/bark.lisp — BARK package definitions (auto-generated)
-(in-package "BARK")
+;;; src/bark.lisp — BARK package definitions
+
+(in-package #:bark)
 
 ;;; --- Levels ---
 
@@ -52,7 +53,7 @@
     (:error +error+)
     (:fatal +fatal+)))
 
-(declaim (ftype (function (fixnum) (values simple-string &optional)) level-name))
+(declaim (ftype (function (fixnum) (values string &optional)) level-name))
 
 (defun level-name (level)
   "Convert a numeric level to its name string."
@@ -119,12 +120,12 @@
 
 ;;; --- JSON Output ---
 
-(declaim (ftype (function (simple-string stream) (values null &optional)) write-json-escaped-string))
+(declaim (ftype (function (string stream) (values null &optional)) write-json-escaped-string))
 
 (defun write-json-escaped-string (string stream)
   "Write STRING to STREAM with JSON escaping."
   (declare (optimize (speed 3) (safety 1))
-           (type simple-string string))
+           (type string string))
   (loop for c of-type character across string do
     (case c
       (#\" (write-string "\\\"" stream))
@@ -196,7 +197,7 @@
   (let ((file (dissect:file frame)))
     (when file
       (write-string ",\"file\":\"" stream)
-      (write-json-escaped-string (coerce (namestring file) 'simple-string) stream)
+      (write-json-escaped-string (namestring file) stream)
       (write-char #\" stream)))
   (let ((line (dissect:line frame)))
     (when line
@@ -229,7 +230,7 @@
   (typecase key
     (string (write-json-escaped-string key stream))
     (symbol (write-string (string-downcase (symbol-name key)) stream))
-    (t (write-json-escaped-string (coerce (princ-to-string key) 'simple-string) stream)))
+    (t (write-json-escaped-string (princ-to-string key) stream)))
   (write-string "\":" stream))
 
 (defun coerce-hash-key (k)
@@ -327,7 +328,7 @@
     (emit-json-key stream (car pair))
     (emit-json-value stream (cdr pair))))
 
-(declaim (ftype (function (list) (values simple-string &optional)) serialize-bindings))
+(declaim (ftype (function (list) (values string &optional)) serialize-bindings))
 
 (defun serialize-bindings (bindings)
   "Pre-serialize BINDINGS plist to a JSON fragment string."
@@ -412,7 +413,7 @@
 
 ;;; --- Formatters ---
 
-(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) json-formatter))
+(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) json-formatter))
 
 (defun json-formatter (level chindings raw-bindings context message fields)
   "Format a log entry as a JSON line."
@@ -431,7 +432,7 @@
       (write-string "\"" s))
     (write-string "}" s)))
 
-(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) logfmt-formatter))
+(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) logfmt-formatter))
 
 (defun logfmt-formatter (level chindings raw-bindings context message fields)
   "Format a log entry as logfmt (key=value pairs)."
@@ -485,7 +486,7 @@
                         #\Esc)))
             (incf i)))))))
 
-(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) pretty-formatter))
+(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) pretty-formatter))
 
 (defun pretty-formatter (level chindings raw-bindings context message fields)
   "Format a log entry with ANSI colors for REPL/development use."
@@ -897,7 +898,7 @@ Specifying both :level and :filter is an error."
                        (cl:error "Cannot specify both :level and :filter in tee destination spec"))
                   collect `(list :stream ,stream-expr ,@keys)))))
 
-(declaim (ftype (function (tee-output fixnum simple-string list list (or null string) list) (values &optional)) emit-to-tee))
+(declaim (ftype (function (tee-output fixnum string list list (or null string) list) (values &optional)) emit-to-tee))
 
 (defun emit-to-tee (tee-output level-value chindings raw-bindings context message fields)
   "Emit a log event to all destinations in TEE-OUTPUT, grouped by formatter."

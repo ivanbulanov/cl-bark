@@ -1,4 +1,4 @@
-;;; packages.lisp — Package definitions (auto-generated)
+;;; packages.lisp — Package definitions
 
 (defpackage "BARK"
   (:use "COMMON-LISP")
