@@ -22,7 +22,7 @@
      (make-buffer-entry :level level-value
                         :message message
                         :fields (copy-list fields)
-                        :context (copy-list *log-context*)
+                        :context *log-context*
                         :timestamp (get-unix-timestamp-ms))
      buffer)
     (values)))
@@ -69,20 +69,14 @@
                        ctx
                        (buffer-entry-message entry)
                        flds)
-          (let ((line (funcall (the function (logger-formatter root-logger))
-                               (buffer-entry-level entry)
-                               (logger-chindings root-logger)
-                               (logger-raw-bindings root-logger)
-                               ctx
-                               (buffer-entry-message entry)
-                               flds)))
-            (if (async-output-p output)
-                (progn
-                  (ring-buffer-push (async-output-ring output) line)
-                  (bt:signal-semaphore (async-output-notify output)))
-                (etypecase output
-                  (stream (write-string line output) (terpri output) (force-output output))
-                  (function (funcall output line)))))))))
+          (deliver-line output
+                        (funcall (the function (logger-formatter root-logger))
+                                 (buffer-entry-level entry)
+                                 (logger-chindings root-logger)
+                                 (logger-raw-bindings root-logger)
+                                 ctx
+                                 (buffer-entry-message entry)
+                                 flds))))))
 
 ;;; --- Root logger tracking ---
 

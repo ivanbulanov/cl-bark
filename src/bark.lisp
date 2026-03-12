@@ -33,6 +33,9 @@
 
 (defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level +level-step+).")
 
+(defparameter *level-names-upper* #(nil "TRACE" "DEBUG" "INFO " "WARN " "ERROR" "FATAL")
+  "Pre-computed uppercase padded level names for pretty-formatter.")
+
 (defparameter *level-prefixes*
   (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
     (loop for i from +trace+ to +fatal+ by +level-step+
@@ -188,11 +191,7 @@
   "Write one stack frame as a JSON object {\"call\":...,\"file\":...,\"line\":...}."
   (write-string "{\"call\":\"" stream)
   (let ((call (dissect:call frame)))
-    (write-json-escaped-string
-     (if (symbolp call)
-         (string-downcase (symbol-name call))
-         (string-downcase (princ-to-string call)))
-     stream))
+    (write-json-escaped-string (key-string call) stream))
   (write-char #\" stream)
   (let ((file (dissect:file frame)))
     (when file
@@ -229,7 +228,7 @@
   (write-string ",\"" stream)
   (typecase key
     (string (write-json-escaped-string key stream))
-    (symbol (write-string (string-downcase (symbol-name key)) stream))
+    (symbol (write-string (key-string key) stream))
     (t (write-json-escaped-string (princ-to-string key) stream)))
   (write-string "\":" stream))
 
@@ -237,7 +236,7 @@
   "Coerce hash-table key K to a string for JSON output."
   (typecase k
     (string k)
-    (symbol (string-downcase (symbol-name k)))
+    (symbol (key-string k))
     (pathname (namestring k))
     (t (type-name-string k))))
 
@@ -252,7 +251,7 @@
     (ratio (format stream "~F" (coerce value 'double-float)))
     ((eql t) (write-string "true" stream))
     (null (write-string "null" stream))
-    (symbol    (write-json-string stream (string-downcase (symbol-name value))))
+    (symbol    (write-json-string stream (key-string value)))
     (pathname  (write-json-string stream (namestring value)))
     (cons
      (if (<= depth 0)
@@ -343,15 +342,22 @@
   (write-string (key-string key) stream))
 
 (defun logfmt-write-bare-or-quoted (stream string)
-  "Write STRING to STREAM, quoting if it contains space, quote, or equals."
-  (if (find-if (lambda (c) (or (char= c #\Space) (char= c #\") (char= c #\=))) string)
-      (progn
-        (write-char #\" stream)
-        (loop for c of-type character across string do
-          (when (char= c #\") (write-char #\\ stream))
-          (write-char c stream))
-        (write-char #\" stream))
-      (write-string string stream)))
+  "Write STRING to STREAM, quoting if it contains space, quote, or equals.
+   Single-pass: checks and writes simultaneously."
+  (declare (optimize (speed 3) (safety 1))
+           (type string string))
+  (let ((needs-quoting nil))
+    (loop for c of-type character across string
+          when (or (char= c #\Space) (char= c #\") (char= c #\=))
+            do (setf needs-quoting t) (loop-finish))
+    (if needs-quoting
+        (progn
+          (write-char #\" stream)
+          (loop for c of-type character across string do
+            (when (char= c #\") (write-char #\\ stream))
+            (write-char c stream))
+          (write-char #\" stream))
+        (write-string string stream))))
 
 (defun emit-logfmt-condition (stream condition)
   "Write CONDITION as a quoted logfmt value: \"type: message\"."
@@ -368,7 +374,7 @@
     (float (princ value stream))
     (ratio (format stream "~F" (coerce value 'double-float)))
     (null (write-string "null" stream))
-    (symbol (write-string (string-downcase (symbol-name value)) stream))
+    (symbol (write-string (key-string value) stream))
     (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
     (captured-error (emit-logfmt-condition stream (captured-error-condition value)))
     (condition (emit-logfmt-condition stream value))
@@ -497,7 +503,6 @@
            (*print-circle* t)
            (level-idx (floor level +level-step+))
            (color (svref *level-colors* level-idx))
-           (name (level-name level))
            (stacks nil))
       (flet ((write-key (k)
                (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
@@ -509,7 +514,7 @@
                  ((typep v 'condition)
                   (write-condition-summary s v))
                  (t (princ v s)))))
-        (format s "~c[~am~5a~c[0m" #\Esc color (string-upcase name) #\Esc)
+        (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level-idx) #\Esc)
         (when message
           (write-char #\Space s)
           (write-string message s))
@@ -615,7 +620,6 @@
                (*print-circle* t)
                (level-idx (floor level +level-step+))
                (color (svref *level-colors* level-idx))
-               (name (level-name level))
                (stacks nil))
           (flet ((write-key (k)
                    (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
@@ -627,7 +631,7 @@
                      ((typep v 'condition)
                       (write-condition-summary s v))
                      (t (princ v s)))))
-            (format s "~c[~am~5a~c[0m" #\Esc color (string-upcase name) #\Esc)
+            (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level-idx) #\Esc)
             (when ts-prefix
               (write-string ts-prefix s)
               (emit-timestamp timestamp s))
@@ -920,6 +924,19 @@ Specifying both :level and :filter is an error."
               (bt:signal-semaphore (async-output-notify ao))))))))
   (values))
 
+;;; --- Output Delivery ---
+
+(declaim (inline deliver-line))
+(defun deliver-line (output line)
+  "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
+  (if (async-output-p output)
+      (progn
+        (ring-buffer-push (async-output-ring output) line)
+        (bt:signal-semaphore (async-output-notify output)))
+      (etypecase output
+        (stream (write-string line output) (terpri output) (force-output output))
+        (function (funcall output line)))))
+
 ;;; --- Logger ---
 
 (defun noop (logger message &rest fields)
@@ -1009,20 +1026,12 @@ Specifying both :level and :filter is an error."
                   (emit-to-tee output level-value
                                (logger-chindings lgr) (logger-raw-bindings lgr)
                                ctx message flds)
-                  (let ((line (funcall (the function (logger-formatter lgr))
-                                       level-value
-                                       (logger-chindings lgr)
-                                       (logger-raw-bindings lgr)
-                                       ctx
-                                       message
-                                       flds)))
-                    (if (async-output-p output)
-                        (progn
-                          (ring-buffer-push (async-output-ring output) line)
-                          (bt:signal-semaphore (async-output-notify output)))
-                        (etypecase output
-                          (stream (write-string line output) (terpri output) (force-output output))
-                          (function (funcall output line)))))))))
+                  (deliver-line output
+                               (funcall (the function (logger-formatter lgr))
+                                        level-value
+                                        (logger-chindings lgr)
+                                        (logger-raw-bindings lgr)
+                                        ctx message flds))))))
         (values)))))
 
 (declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function)

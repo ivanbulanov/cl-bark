@@ -1057,9 +1057,7 @@
            (5am:is (= 1 (length (formatter-group-destinations (aref (tee-output-groups tee) 0)))))
            (5am:is (= 1 (length (formatter-group-destinations (aref (tee-output-groups tee) 1))))))
       ;; Cleanup: stop all async outputs
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 (5am:test test-make-tee-shared-formatter-grouping
   "Destinations with eq formatters are grouped together."
@@ -1079,9 +1077,7 @@
                                    :key #'formatter-group-formatter)))
              (5am:is-true (not (null json-group)))
              (5am:is (= 2 (length (formatter-group-destinations json-group))))))
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 (5am:test test-make-tee-level-filter
   "The :level shorthand creates a filter that checks >= threshold."
@@ -1099,9 +1095,7 @@
            ;; At or above error -> passes
            (5am:is-true (funcall filter +error+ nil))
            (5am:is-true (funcall filter +fatal+ nil)))
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 (5am:test test-make-tee-default-formatter
   "Omitting :formatter defaults to #'json-formatter."
@@ -1110,9 +1104,7 @@
     (unwind-protect
          (let ((group (aref (tee-output-groups tee) 0)))
            (5am:is (eq #'json-formatter (formatter-group-formatter group))))
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 (5am:test test-make-tee-level-and-filter-conflict
   "Specifying both :level and :filter signals an error."
@@ -1137,9 +1129,7 @@
            (5am:is (= 1023 (bark::ring-buffer-mask (bark::async-output-ring ao))))
            ;; on-drop should be our custom function
            (5am:is (eq custom-drop (bark::async-output-on-drop ao))))
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 (5am:test test-tee-macro-basic
   "tee macro creates same structure as equivalent make-tee call."
@@ -1159,9 +1149,7 @@
              (5am:is-true (not (null (destination-filter dest))))
              (5am:is-false (funcall (destination-filter dest) +info+ nil))
              (5am:is-true (funcall (destination-filter dest) +error+ nil))))
-      (loop for group across (tee-output-groups tee)
-            do (loop for dest across (formatter-group-destinations group)
-                     do (bark::stop-async-output (destination-async-output dest)))))))
+      (stop-tee tee))))
 
 ;;; --- Multi-Output: Tee Logging ---
 
