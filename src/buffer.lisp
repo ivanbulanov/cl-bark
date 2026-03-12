@@ -46,3 +46,63 @@
     (setf (logger-error-fn lgr) (if (< +error+ buffer-level) #'noop (make-buffer-capture-fn +error+ buffer)))
     (setf (logger-fatal-fn lgr) (if (< +fatal+ buffer-level) #'noop (make-buffer-capture-fn +fatal+ buffer)))
     lgr))
+
+;;; --- Flush ---
+
+(defun emit-entry (root-logger entry)
+  "Replay a single buffer ENTRY through ROOT-LOGGER's output pipeline."
+  (let* ((*override-timestamp* (buffer-entry-timestamp entry))
+         (transform (logger-field-transform root-logger))
+         (ctx (if transform
+                  (apply-field-transform-alist transform (buffer-entry-context entry))
+                  (buffer-entry-context entry)))
+         (flds (if transform
+                   (apply-field-transform-plist transform (buffer-entry-fields entry))
+                   (buffer-entry-fields entry)))
+         (output (logger-output root-logger)))
+    (when output
+      (if (tee-output-p output)
+          (emit-to-tee output
+                       (buffer-entry-level entry)
+                       (logger-chindings root-logger)
+                       (logger-raw-bindings root-logger)
+                       ctx
+                       (buffer-entry-message entry)
+                       flds)
+          (let ((line (funcall (the function (logger-formatter root-logger))
+                               (buffer-entry-level entry)
+                               (logger-chindings root-logger)
+                               (logger-raw-bindings root-logger)
+                               ctx
+                               (buffer-entry-message entry)
+                               flds)))
+            (if (async-output-p output)
+                (progn
+                  (ring-buffer-push (async-output-ring output) line)
+                  (bt:signal-semaphore (async-output-notify output)))
+                (etypecase output
+                  (stream (write-string line output) (terpri output) (force-output output))
+                  (function (funcall output line)))))))))
+
+(defun flush-buffer (buffer root-logger normal-exit-p condition on-flush original-level)
+  "Flush BUFFER entries through ROOT-LOGGER. Selection logic:
+   - on-flush provided: delegate to callback (entries, condition, normal-exit-p).
+   - Abnormal exit with condition: emit all entries.
+   - Otherwise: emit entries >= original-level."
+  (when (zerop (length buffer))
+    (return-from flush-buffer (values)))
+  (let ((entries (if on-flush
+                     (funcall on-flush buffer condition normal-exit-p)
+                     (if (and (not normal-exit-p) condition)
+                         buffer
+                         nil))))
+    (if entries
+        ;; Emit the selected entries
+        (loop for entry across entries
+              do (emit-entry root-logger entry))
+        ;; No on-flush and normal exit (or non-condition NLX): filter by level
+        (unless on-flush
+          (loop for entry across buffer
+                when (>= (buffer-entry-level entry) original-level)
+                  do (emit-entry root-logger entry)))))
+  (values))

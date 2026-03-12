@@ -37,6 +37,7 @@
    #:buffer-entry-level #:buffer-entry-message
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
    #:make-buffer-logger
+   #:flush-buffer
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -2021,3 +2022,127 @@
     (5am:is (= 6 (length buffer)))
     (5am:is (= +trace+ (buffer-entry-level (aref buffer 0))))
     (5am:is (= +fatal+ (buffer-entry-level (aref buffer 5))))))
+
+;;; --- Flush buffer ---
+
+(5am:test test-flush-buffer-normal-exit-filters-by-level
+  "Normal exit: only entries >= original level are emitted."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
+    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
+    (vector-push-extend (make-buffer-entry :level +warn+ :message "wrn" :timestamp 300) buffer)
+    (flush-buffer buffer root t nil nil +info+)
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "dbg" result))
+      (5am:is-true (search "inf" result))
+      (5am:is-true (search "wrn" result)))))
+
+(5am:test test-flush-buffer-abnormal-exit-emits-all
+  "Abnormal exit with condition: all entries emitted."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (cond (make-condition 'simple-error :format-control "boom")))
+    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
+    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
+    (flush-buffer buffer root nil cond nil +info+)
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "dbg" result))
+      (5am:is-true (search "inf" result)))))
+
+(5am:test test-flush-buffer-non-condition-nlx-filters
+  "Non-condition NLX (normal-exit-p=nil, condition=nil): filter like normal exit."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
+    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
+    (flush-buffer buffer root nil nil nil +info+)
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "dbg" result))
+      (5am:is-true (search "inf" result)))))
+
+(5am:test test-flush-buffer-uses-override-timestamp
+  "Flushed entries use their captured timestamp, not wall clock."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (vector-push-extend (make-buffer-entry :level +info+ :message "test" :timestamp 42) buffer)
+    (flush-buffer buffer root t nil nil +info+)
+    (let* ((line (get-output-stream-string out))
+           (json (yason:parse line)))
+      (5am:is (= 42 (gethash "ts" json))))))
+
+(5am:test test-flush-buffer-applies-field-transform
+  "Flush applies root logger's field transform to entry fields."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out
+                            :field-transform (lambda (key value)
+                                              (if (eq key :secret)
+                                                  (values nil nil)
+                                                  value))))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (vector-push-extend (make-buffer-entry :level +info+ :message "test"
+                                           :fields '(:user "alice" :secret "pw")
+                                           :timestamp 100) buffer)
+    (flush-buffer buffer root t nil nil +info+)
+    (let* ((line (get-output-stream-string out))
+           (json (yason:parse line)))
+      (5am:is (string= "alice" (gethash "user" json)))
+      (5am:is (null (gethash "secret" json))))))
+
+(5am:test test-flush-buffer-on-flush-callback
+  "on-flush callback controls which entries are emitted."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         ;; Only emit warn and above
+         (on-flush (lambda (entries condition normal-exit-p)
+                     (declare (ignore condition normal-exit-p))
+                     (remove-if (lambda (e) (< (buffer-entry-level e) +warn+)) entries))))
+    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 100) buffer)
+    (vector-push-extend (make-buffer-entry :level +warn+ :message "wrn" :timestamp 200) buffer)
+    (flush-buffer buffer root t nil on-flush +info+)
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "inf" result))
+      (5am:is-true (search "wrn" result)))))
+
+(5am:test test-flush-buffer-on-flush-receives-all-args
+  "on-flush callback receives entries, condition, and normal-exit-p."
+  (let* ((root (make-logger :name "app" :level :info :formatter #'json-formatter
+                            :output (make-string-output-stream)))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (cond (make-condition 'simple-error :format-control "err"))
+         (captured-args nil)
+         (on-flush (lambda (entries condition normal-exit-p)
+                     (setf captured-args (list entries condition normal-exit-p))
+                     nil)))
+    (vector-push-extend (make-buffer-entry :level +info+ :message "x" :timestamp 1) buffer)
+    (flush-buffer buffer root nil cond on-flush +info+)
+    (5am:is (= 1 (length (first captured-args))))
+    (5am:is (eq cond (second captured-args)))
+    (5am:is (eq nil (third captured-args)))))
+
+(5am:test test-flush-buffer-empty-does-nothing
+  "Flushing an empty buffer produces no output."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (flush-buffer buffer root t nil nil +info+)
+    (5am:is (string= "" (get-output-stream-string out)))))
+
+(5am:test test-flush-buffer-preserves-entry-order
+  "Entries are flushed in the order they were captured."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+    (vector-push-extend (make-buffer-entry :level +info+ :message "first" :timestamp 100) buffer)
+    (vector-push-extend (make-buffer-entry :level +info+ :message "second" :timestamp 200) buffer)
+    (vector-push-extend (make-buffer-entry :level +info+ :message "third" :timestamp 300) buffer)
+    (flush-buffer buffer root t nil nil +info+)
+    (let ((result (get-output-stream-string out)))
+      (5am:is (< (search "first" result)
+                 (search "second" result)
+                 (search "third" result))))))
