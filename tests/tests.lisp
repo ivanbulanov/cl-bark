@@ -44,6 +44,7 @@
    ;; Public API (non-conflicting)
    #:make-logger #:child #:set-level #:set-sampling #:start #:stop
    #:json-formatter #:logfmt-formatter #:pretty-formatter
+   #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
    #:with-captured-logs #:with-context
    #:*logger* #:*log-context*))
 
@@ -2546,3 +2547,119 @@
       (5am:is-false (search "\"msg\"" result))
       (5am:is-true (search "\"event\"" result))
       (5am:is-true (search "buffered" result)))))
+
+;;; --- Formatter Factories ---
+
+(5am:test test-make-json-formatter-custom-keys
+  "make-json-formatter produces output with custom key names."
+  (let ((fmt (bark:make-json-formatter :level-key "severity"
+                                       :timestamp-key "time"
+                                       :message-key "message")))
+    (let* ((*override-timestamp* 1234567890000)
+           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+      (5am:is-true (search "\"severity\":30" result))
+      (5am:is-true (search "\"time\":1234567890000" result))
+      (5am:is-true (search "\"message\":\"hello\"" result))
+      ;; Default keys should NOT appear
+      (5am:is-false (search "\"level\":" result))
+      (5am:is-false (search "\"ts\":" result))
+      (5am:is-false (search "\"msg\":" result)))))
+
+(5am:test test-make-json-formatter-string-level
+  "make-json-formatter with :string level-format emits level name strings."
+  (let ((fmt (bark:make-json-formatter :level-format :string)))
+    (let ((result (funcall fmt +warn+ "" nil nil "oops" nil)))
+      (5am:is-true (search "\"level\":\"warn\"" result)))))
+
+(5am:test test-make-json-formatter-iso8601-timestamp
+  "make-json-formatter with :iso8601 timestamp emits ISO 8601 string."
+  (let ((fmt (bark:make-json-formatter :timestamp :iso8601)))
+    ;; 2025-01-15T12:00:00.000Z = 1736942400000
+    (let* ((*override-timestamp* 1736942400000)
+           (result (funcall fmt +info+ "" nil nil "test" nil)))
+      (5am:is-true (search "\"ts\":\"2025-01-15T12:00:00.000Z\"" result)))))
+
+(5am:test test-make-json-formatter-no-timestamp
+  "make-json-formatter with :timestamp nil omits the timestamp field."
+  (let ((fmt (bark:make-json-formatter :timestamp nil)))
+    (let ((result (funcall fmt +info+ "" nil nil "test" nil)))
+      (5am:is-false (search "\"ts\":" result))
+      (5am:is-true (search "\"level\":30" result))
+      (5am:is-true (search "\"msg\":\"test\"" result)))))
+
+(5am:test test-make-json-formatter-fields
+  "make-json-formatter handles per-call fields and context."
+  (let ((fmt (bark:make-json-formatter :timestamp nil)))
+    (let ((result (funcall fmt +info+ "" nil
+                           (list (cons :req "abc")) "hi"
+                           (list :user 42))))
+      (5am:is-true (search "\"req\":\"abc\"" result))
+      (5am:is-true (search "\"user\":42" result)))))
+
+(5am:test test-make-logfmt-formatter-custom-keys
+  "make-logfmt-formatter produces output with custom key names."
+  (let ((fmt (bark:make-logfmt-formatter :level-key "severity"
+                                         :timestamp-key "time"
+                                         :message-key "message")))
+    (let* ((*override-timestamp* 9999)
+           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+      (5am:is-true (search "severity=info" result))
+      (5am:is-true (search "time=9999" result))
+      (5am:is-true (search "message=hello" result)))))
+
+(5am:test test-make-logfmt-formatter-no-timestamp
+  "make-logfmt-formatter with :timestamp nil omits the timestamp."
+  (let ((fmt (bark:make-logfmt-formatter :timestamp nil)))
+    (let ((result (funcall fmt +info+ "" nil nil "test" nil)))
+      (5am:is-false (search "ts=" result))
+      (5am:is-true (search "level=info" result))
+      (5am:is-true (search "msg=test" result)))))
+
+(5am:test test-make-pretty-formatter-with-timestamp
+  "make-pretty-formatter with :unix-ms timestamp shows timestamp."
+  (let ((fmt (bark:make-pretty-formatter :timestamp :unix-ms)))
+    (let* ((*override-timestamp* 42000)
+           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+      (5am:is-true (search "INFO" result))
+      (5am:is-true (search "42000" result))
+      (5am:is-true (search "hello" result)))))
+
+(5am:test test-make-pretty-formatter-without-timestamp
+  "make-pretty-formatter without timestamp omits it (like standard pretty-formatter)."
+  (let ((fmt (bark:make-pretty-formatter)))
+    (let* ((*override-timestamp* 42000)
+           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+      (5am:is-true (search "INFO" result))
+      (5am:is-true (search "hello" result))
+      (5am:is-false (search "42000" result)))))
+
+(5am:test test-make-pretty-formatter-iso8601
+  "make-pretty-formatter with :iso8601 timestamp emits ISO 8601 string."
+  (let ((fmt (bark:make-pretty-formatter :timestamp :iso8601)))
+    (let* ((*override-timestamp* 1736942400000)
+           (result (funcall fmt +info+ "" nil nil "test" nil)))
+      (5am:is-true (search "2025-01-15T12:00:00.000Z" result)))))
+
+(5am:test test-factory-formatter-with-make-logger
+  "Factory formatter integrates with make-logger."
+  (let* ((out (make-string-output-stream))
+         (fmt (bark:make-json-formatter :timestamp nil :level-format :string
+                                        :message-key "text"))
+         (*logger* (make-logger :name "test" :level :info :output out
+                                :formatter fmt)))
+    (bark:info "works")
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"level\":\"info\"" result))
+      (5am:is-true (search "\"text\":\"works\"" result))
+      (5am:is-false (search "\"ts\":" result)))))
+
+(5am:test test-factory-formatter-with-captured-logs
+  "Factory formatter integrates with with-captured-logs."
+  (let ((fmt (bark:make-json-formatter :timestamp nil :level-format :string)))
+    (bark:with-captured-logs (get-logs fmt)
+      (bark:info "captured")
+      (let* ((lines (funcall get-logs))
+             (line (first lines)))
+        (5am:is (= 1 (length lines)))
+        (5am:is-true (search "\"level\":\"info\"" line))
+        (5am:is-true (search "\"msg\":\"captured\"" line))))))

@@ -37,7 +37,10 @@
            ;; Multi-output
            "MAKE-TEE"
            "TEE"
+           "MAKE-JSON-FORMATTER"
            "MAKE-LOGGER"
+           "MAKE-LOGFMT-FORMATTER"
+           "MAKE-PRETTY-FORMATTER"
            "PRETTY-FORMATTER"
            "SET-LEVEL"
            "SET-SAMPLING"

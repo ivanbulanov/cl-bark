@@ -379,6 +379,70 @@ Built-in formatters:
 
 All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`). Boolean `t` in logfmt emits a bare key with no `=value` (logfmt convention for flags). The JSON fallback for unsupported types is a `"<type>"` placeholder string. Specialize `print-object` on your classes to control the type name shown.
 
+#### Formatter Factories
+
+The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"msg"` keys, Unix millisecond timestamps). Formatter factories return closures with the same signature, but with configurable keys, level formats, and timestamp formats. Everything is pre-computed at factory time — no per-call overhead.
+
+**`make-json-formatter`**
+
+```lisp
+(bark:make-json-formatter &key (timestamp :unix-ms) (level-format :numeric)
+                               (level-key "level") (timestamp-key "ts")
+                               (message-key "msg"))
+```
+
+| Parameter | Values | Default |
+|-----------|--------|---------|
+| `timestamp` | `:unix-ms`, `:iso8601`, `nil` (omit) | `:unix-ms` |
+| `level-format` | `:numeric`, `:string` | `:numeric` |
+| `level-key` | any string | `"level"` |
+| `timestamp-key` | any string | `"ts"` |
+| `message-key` | any string | `"msg"` |
+
+```lisp
+;; GCP Cloud Logging format
+(bark:start :formatter (bark:make-json-formatter
+                         :level-key "severity" :level-format :string
+                         :timestamp-key "timestamp" :timestamp :iso8601
+                         :message-key "message"))
+
+(bark:info "deployed" :version "1.2.3")
+;; => {"severity":"info","timestamp":"2025-01-15T12:00:00.000Z","version":"1.2.3","message":"deployed"}
+
+;; Omit timestamp (external system adds it)
+(bark:start :formatter (bark:make-json-formatter :timestamp nil))
+;; => {"level":30,"version":"1.2.3","msg":"deployed"}
+```
+
+**`make-logfmt-formatter`**
+
+```lisp
+(bark:make-logfmt-formatter &key (timestamp :unix-ms) (level-key "level")
+                                  (timestamp-key "ts") (message-key "msg"))
+```
+
+Level is always a string in logfmt. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`.
+
+```lisp
+(bark:start :formatter (bark:make-logfmt-formatter :level-key "lvl" :message-key "message"))
+(bark:info "ready" :port 8080)
+;; => lvl=info ts=1736942400000 port=8080 message=ready
+```
+
+**`make-pretty-formatter`**
+
+```lisp
+(bark:make-pretty-formatter &key timestamp (timestamp-key "ts"))
+```
+
+The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display.
+
+```lisp
+;; Pretty with ISO 8601 timestamps
+(bark:start :formatter (bark:make-pretty-formatter :timestamp :iso8601))
+;; => INFO  ts="2025-01-15T12:00:00.000Z" ready port=8080
+```
+
 ### Sampling
 
 ```lisp

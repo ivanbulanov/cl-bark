@@ -525,6 +525,123 @@
         (when stacks
           (emit-pretty-stack s (nreverse stacks)))))))
 
+;;; --- Formatter Factories ---
+
+(defun emit-timestamp (format stream)
+  "Emit a timestamp to STREAM in the given FORMAT.
+   :unix-ms emits milliseconds since epoch as an integer.
+   :iso8601 emits a \"YYYY-MM-DDTHH:MM:SS.mmmZ\" string."
+  (ecase format
+    (:unix-ms (princ (get-unix-timestamp-ms) stream))
+    (:iso8601
+     (let ((ms (get-unix-timestamp-ms)))
+       (multiple-value-bind (sec remainder) (floor ms 1000)
+         (multiple-value-bind (s min h day month year)
+             (decode-universal-time (+ sec 2208988800) 0)
+           (format stream "\"~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0d.~3,'0dZ\""
+                   year month day h min s remainder)))))))
+
+(defun build-json-level-prefixes (level-key level-format)
+  "Build a vector of pre-computed JSON level prefix strings.
+   LEVEL-KEY is the JSON key name (e.g. \"level\" or \"severity\").
+   LEVEL-FORMAT is :numeric or :string."
+  (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
+    (loop for i from +trace+ to +fatal+ by +level-step+
+          for idx = (floor i +level-step+)
+          do (setf (aref prefixes idx)
+                   (ecase level-format
+                     (:numeric (format nil "{\"~a\":~d" level-key i))
+                     (:string (format nil "{\"~a\":\"~a\"" level-key (level-name i))))))
+    prefixes))
+
+(defun make-json-formatter (&key (timestamp :unix-ms) (level-format :numeric)
+                                  (level-key "level") (timestamp-key "ts")
+                                  (message-key "msg"))
+  "Return a JSON formatter closure with custom keys and formats.
+   Pre-computes level prefix vector, timestamp key fragment, and message key fragment."
+  (let ((prefixes (build-json-level-prefixes level-key level-format))
+        (ts-fragment (when timestamp (format nil ",\"~a\":" timestamp-key)))
+        (msg-prefix (format nil ",\"~a\":\"" message-key)))
+    (lambda (level chindings raw-bindings context message fields)
+      (declare (optimize (speed 3) (safety 1)))
+      (declare (ignore raw-bindings))
+      (with-output-to-string (s)
+        (write-string (svref prefixes (floor level +level-step+)) s)
+        (when ts-fragment
+          (write-string ts-fragment s)
+          (emit-timestamp timestamp s))
+        (write-string chindings s)
+        (emit-context-fields s context)
+        (emit-json-fields s fields)
+        (when message
+          (write-string msg-prefix s)
+          (write-json-escaped-string message s)
+          (write-string "\"" s))
+        (write-string "}" s)))))
+
+(defun make-logfmt-formatter (&key (timestamp :unix-ms) (level-key "level")
+                                    (timestamp-key "ts") (message-key "msg"))
+  "Return a logfmt formatter closure with custom keys.
+   Level is always string for logfmt. Pre-computes key name strings."
+  (let ((level-prefix (format nil "~a=" level-key))
+        (ts-prefix (when timestamp (format nil " ~a=" timestamp-key)))
+        (msg-prefix (format nil " ~a=" message-key)))
+    (lambda (level chindings raw-bindings context message fields)
+      (declare (ignore chindings))
+      (with-output-to-string (s)
+        (write-string level-prefix s)
+        (write-string (level-name level) s)
+        (when ts-prefix
+          (write-string ts-prefix s)
+          (emit-timestamp timestamp s))
+        (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
+        (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
+        (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
+        (when message
+          (write-string msg-prefix s)
+          (emit-logfmt-value s message))))))
+
+(defun make-pretty-formatter (&key timestamp (timestamp-key "ts"))
+  "Return a pretty formatter closure with optional timestamp display.
+   TIMESTAMP is nil (no timestamp), :iso8601, or :unix-ms.
+   Level is always colored string."
+  (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
+    (lambda (level chindings raw-bindings context message fields)
+      (declare (ignore chindings))
+      (with-output-to-string (s)
+        (let* ((*print-level* *max-pretty-depth*)
+               (*print-length* *max-pretty-length*)
+               (*print-circle* t)
+               (level-idx (floor level +level-step+))
+               (color (svref *level-colors* level-idx))
+               (name (level-name level))
+               (stacks nil))
+          (flet ((write-key (k)
+                   (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
+                 (write-val (k v)
+                   (cond
+                     ((captured-error-p v)
+                      (write-condition-summary s (captured-error-condition v))
+                      (push (cons k v) stacks))
+                     ((typep v 'condition)
+                      (write-condition-summary s v))
+                     (t (princ v s)))))
+            (format s "~c[~am~5a~c[0m" #\Esc color (string-upcase name) #\Esc)
+            (when ts-prefix
+              (write-string ts-prefix s)
+              (emit-timestamp timestamp s))
+            (when message
+              (write-char #\Space s)
+              (write-string message s))
+            (loop for (k v) on raw-bindings by #'cddr do
+              (write-key k) (write-val k v))
+            (dolist (pair context)
+              (write-key (car pair)) (write-val (car pair) (cdr pair)))
+            (loop for (k v) on fields by #'cddr do
+              (write-key k) (write-val k v))
+            (when stacks
+              (emit-pretty-stack s (nreverse stacks)))))))))
+
 (defconstant +min-ring-capacity+ 16 "Minimum ring buffer capacity in log lines. Power of two.")
 
 (defconstant +default-buffer-capacity+ 8192 "Default ring buffer capacity in log lines for async output. Power of two.")
