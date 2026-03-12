@@ -81,7 +81,7 @@ Dispatch via `logger-p` on the first argument at runtime (struct type tag check,
 ### Logger Management
 
 ```lisp
-;; Create a logger (sync or with custom output)
+;; Create a logger (synchronous output — no background thread)
 (bark:make-logger &key (name "") (level :info) (formatter #'json-formatter) output field-transform)
 
 ;; Create child logger with static context (pre-serialized fields)
@@ -93,6 +93,8 @@ Dispatch via `logger-p` on the first argument at runtime (struct type tag check,
 ;; Set sampling rate (1-in-N)
 (bark:set-sampling logger level rate)
 ```
+
+`make-logger` writes synchronously to `:output` (a stream or function) in the caller's thread. It does **not** wrap the output in an async writer. Use `make-logger` for testing, for function-based outputs, or when you manage async I/O yourself. Use `start` for production logging with automatic async wrapping.
 
 ### Lifecycle
 
@@ -322,8 +324,19 @@ The transform applies to **all three field sources**:
 
 A formatter is a function with signature:
 ```
-(level static-context-str static-context-plist dynamic-context message fields) -> string
+(level chindings raw-bindings context message fields) -> string
 ```
+
+| Parameter | Type | Purpose |
+|-----------|------|---------|
+| `level` | fixnum | Numeric log level (10-60) |
+| `chindings` | string | Pre-serialized JSON fragment of static context (for JSON formatters) |
+| `raw-bindings` | plist | Static context as a key-value plist (for non-JSON formatters) |
+| `context` | alist | Dynamic context from `with-context` |
+| `message` | string | The log message |
+| `fields` | plist | Per-call fields from the `&rest` args |
+
+JSON-oriented formatters use `chindings` (pre-serialized, zero per-call cost) and `(declare (ignore raw-bindings))`. Text-oriented formatters use `raw-bindings` and `(declare (ignore chindings))`. Both representations carry the same data.
 
 Built-in formatters:
 - `bark:json-formatter` — JSON Lines (default, production)
@@ -338,18 +351,18 @@ Built-in formatters:
 | `integer` | `123` | `123` | as-is |
 | `float` | `3.14` | `3.14` | as-is |
 | `ratio` | `0.333` | `0.333` | as-is |
-| `t` | `true` | `true` | as-is |
+| `t` | `true` | bare key (no `=value`) | as-is |
 | `nil` | `null` | `null` | as-is |
 | `symbol` | `"lowercase"` | `lowercase` | as-is |
-| `list` | `["a","b"]` | `"(a b)"` | as-is |
-| `vector` | `[1,2,3]` | `"#(1 2 3)"` | as-is |
-| `hash-table` | `{"k":"v"}` | `"#<HASH-TABLE ...>"` | as-is |
+| `list` | `["a","b"]` | `<cons>` | as-is |
+| `vector` | `[1,2,3]` | `<simple-vector>` | as-is |
+| `hash-table` | `{"k":"v"}` | `<hash-table>` | as-is |
 | `pathname` | `"/var/log/app.jsonl"` | `/var/log/app.jsonl` | as-is |
 | `condition` | `{"type":"...","msg":"..."}` | `"type: msg"` | type: msg |
 | `captured-error` | `{"type":"...","msg":"...","stack":[...]}` | `"type: msg"` | type: msg + stack |
-| everything else | `"princ-to-string"` | `"princ-to-string"` | as-is |
+| everything else | `"<type>"` | `<type>` | as-is |
 
-All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and complex types are quoted via `princ-to-string`. The fallback for all other types is `princ-to-string` — specialize `print-object` on your classes to control their log representation.
+All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`). Boolean `t` in logfmt emits a bare key with no `=value` (logfmt convention for flags). The JSON fallback for unsupported types is a `"<type>"` placeholder string. Specialize `print-object` on your classes to control the type name shown.
 
 ### Sampling
 
@@ -648,13 +661,17 @@ Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is
 
 ## Globals
 
-| Variable | Purpose |
-|----------|---------|
-| `bark:*logger*` | Current logger (bind per-thread or globally) |
-| `bark:*log-context*` | Dynamic context (managed by `with-context`) |
-| `bark:*compile-time-max-level*` | When positive, compiler macros eliminate calls below this level |
-| `bark:*max-json-stack-frames*` | Max stack frames in JSON condition output (default 10, nil = unlimited) |
-| `bark:*max-pretty-stack-frames*` | Max stack frames in pretty condition output (default 20, nil = unlimited) |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `bark:*logger*` | `nil` | Current logger (bind per-thread or globally) |
+| `bark:*log-context*` | `nil` | Dynamic context (managed by `with-context`) |
+| `bark:*compile-time-max-level*` | `0` | When positive, compiler macros eliminate calls below this level |
+| `bark:*max-json-depth*` | `4` | Max nesting depth for collections in JSON output |
+| `bark:*max-json-length*` | `20` | Max elements per collection in JSON output |
+| `bark:*max-pretty-depth*` | `4` | Bound as `*print-level*` in pretty-formatter (nil = unlimited) |
+| `bark:*max-pretty-length*` | `20` | Bound as `*print-length*` in pretty-formatter (nil = unlimited) |
+| `bark:*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output (nil = unlimited) |
+| `bark:*max-pretty-stack-frames*` | `20` | Max stack frames in pretty condition output (nil = unlimited) |
 
 ## Dependencies
 

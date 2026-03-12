@@ -33,10 +33,12 @@
 (defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level +level-step+).")
 
 (defparameter *level-prefixes*
-  (coerce (loop for i from +trace+ to +fatal+ by +level-step+
-                collect (format nil "{\"level\":~d" i))
-          'simple-vector)
-  "Pre-computed JSON level prefixes indexed by (1- (/ level +level-step+)).")
+  (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
+    (loop for i from +trace+ to +fatal+ by +level-step+
+          do (setf (aref prefixes (floor i +level-step+))
+                   (format nil "{\"level\":~d" i)))
+    prefixes)
+  "Pre-computed JSON level prefixes indexed by (/ level +level-step+).")
 
 (declaim (ftype (function (keyword) (values fixnum &optional)) level-from-keyword))
 
@@ -134,18 +136,22 @@
              (format stream "\\u~4,'0X" (char-code c))
              (write-char c stream))))))
 
+(declaim (inline type-name-string))
+(defun type-name-string (value)
+  "Return the type of VALUE as a lowercase string."
+  (string-downcase (princ-to-string (type-of value))))
+
 (defun emit-type-placeholder (stream value)
   "Write a \"<type>\" placeholder for VALUE to STREAM as a JSON string."
-  (let ((type-name (string-downcase (princ-to-string (type-of value)))))
-    (write-char #\" stream)
-    (write-char #\< stream)
-    (write-string type-name stream)
-    (write-char #\> stream)
-    (write-char #\" stream)))
+  (write-char #\" stream)
+  (write-char #\< stream)
+  (write-string (type-name-string value) stream)
+  (write-char #\> stream)
+  (write-char #\" stream))
 
 (defun format-condition-type (condition)
   "Return the type name of CONDITION as a lowercase string."
-  (string-downcase (princ-to-string (type-of condition))))
+  (type-name-string condition))
 
 (defun format-condition-message (condition)
   "Return the message text of CONDITION as a simple-string."
@@ -201,10 +207,12 @@
 
 (defun emit-json-key (stream key)
   "Write KEY as a JSON object key to STREAM."
+  (declare (optimize (speed 3) (safety 1)))
   (write-string ",\"" stream)
   (typecase key
     (string (write-json-escaped-string key stream))
-    (symbol (write-string (string-downcase (symbol-name key)) stream)))
+    (symbol (write-string (string-downcase (symbol-name key)) stream))
+    (t (write-json-escaped-string (coerce (princ-to-string key) 'simple-string) stream)))
   (write-string "\":" stream))
 
 (defun coerce-hash-key (k)
@@ -217,6 +225,7 @@
 
 (defun emit-json-value (stream value &optional (depth *max-json-depth*))
   "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
+  (declare (optimize (speed 3) (safety 1)))
   (typecase value
     (string
      (write-char #\" stream)
@@ -275,17 +284,18 @@
          (let ((first t)
                (count 0))
            (write-char #\{ stream)
-           (maphash (lambda (k v)
-                      (when (>= count *max-json-length*)
-                        (write-string ",\"...\":\"...\"" stream)
-                        (return-from emit-json-value))
-                      (if first (setf first nil) (write-char #\, stream))
-                      (write-char #\" stream)
-                      (write-json-escaped-string (coerce-hash-key k) stream)
-                      (write-string "\":" stream)
-                      (emit-json-value stream v (1- depth))
-                      (incf count))
-                    value)
+           (block hash-done
+             (maphash (lambda (k v)
+                        (when (>= count *max-json-length*)
+                          (write-string ",\"...\":\"...\"" stream)
+                          (return-from hash-done))
+                        (if first (setf first nil) (write-char #\, stream))
+                        (write-char #\" stream)
+                        (write-json-escaped-string (coerce-hash-key k) stream)
+                        (write-string "\":" stream)
+                        (emit-json-value stream v (1- depth))
+                        (incf count))
+                      value))
            (write-char #\} stream))))
     (captured-error
      (write-char #\{ stream)
@@ -300,12 +310,14 @@
 
 (defun emit-json-fields (stream fields)
   "Write a plist of FIELDS as JSON key-value pairs to STREAM."
+  (declare (optimize (speed 3) (safety 1)))
   (loop for (k v) on fields by #'cddr do
     (emit-json-key stream k)
     (emit-json-value stream v)))
 
 (defun emit-context-fields (stream context)
   "Write dynamic context fields (alist) as JSON key-value pairs to STREAM."
+  (declare (optimize (speed 3) (safety 1)))
   (dolist (pair context)
     (emit-json-key stream (car pair))
     (emit-json-value stream (cdr pair))))
@@ -321,14 +333,21 @@
 
 (defun emit-logfmt-key (stream key)
   "Write a logfmt key to STREAM."
+  (declare (optimize (speed 3) (safety 1)))
   (typecase key
     (string (write-string key stream))
-    (symbol (write-string (string-downcase (symbol-name key)) stream))))
+    (symbol (write-string (string-downcase (symbol-name key)) stream))
+    (t (write-string (princ-to-string key) stream))))
 
 (defun logfmt-write-bare-or-quoted (stream string)
   "Write STRING to STREAM, quoting if it contains space, quote, or equals."
   (if (find-if (lambda (c) (or (char= c #\Space) (char= c #\") (char= c #\=))) string)
-      (progn (write-char #\" stream) (write-string string stream) (write-char #\" stream))
+      (progn
+        (write-char #\" stream)
+        (loop for c of-type character across string do
+          (when (char= c #\") (write-char #\\ stream))
+          (write-char c stream))
+        (write-char #\" stream))
       (write-string string stream)))
 
 (defun emit-logfmt-condition (stream condition)
@@ -352,10 +371,9 @@
     (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
     (captured-error (emit-logfmt-condition stream (captured-error-condition value)))
     (condition (emit-logfmt-condition stream value))
-    (t (let ((type-name (string-downcase (princ-to-string (type-of value)))))
-         (write-char #\< stream)
-         (write-string type-name stream)
-         (write-char #\> stream)))))
+    (t (write-char #\< stream)
+       (write-string (type-name-string value) stream)
+       (write-char #\> stream))))
 
 ;;; --- Timestamps ---
 
@@ -380,7 +398,7 @@
   (declare (optimize (speed 3) (safety 1)))
   (declare (ignore raw-bindings))
   (with-output-to-string (s)
-    (write-string (svref *level-prefixes* (1- (floor level +level-step+))) s)
+    (write-string (svref *level-prefixes* (floor level +level-step+)) s)
     (write-string ",\"ts\":" s)
     (princ (get-unix-timestamp-ms) s)
     (write-string chindings s)
@@ -431,7 +449,7 @@
   "Write CONDITION as type: message for pretty formatter."
   (write-string (format-condition-type condition) stream)
   (write-string ": " stream)
-  (write-string (princ-to-string condition) stream))
+  (write-string (format-condition-message condition) stream))
 
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
@@ -528,7 +546,7 @@
 
 (defun make-ring-buffer (capacity)
   "Create a ring buffer with CAPACITY rounded up to the next power of two."
-  (let* ((actual (max +min-ring-capacity+ (expt 2 (ceiling (log capacity 2)))))
+  (let* ((actual (max +min-ring-capacity+ (expt 2 (integer-length (1- capacity)))))
          (slots (make-array actual :initial-element nil)))
     (%make-ring-buffer :slots slots :mask (1- actual))))
 
@@ -662,13 +680,15 @@
                      nil)))))
       (loop while (async-output-running async-output) do
         (bt:wait-on-semaphore notify :timeout 0.1)
-        (loop for line = (ring-buffer-pop ring) while line do
-          (handler-case
-              (progn (write-string line stream) (terpri stream))
-            (cl:error (e) (unless (handle-stream-error e) (return)))))
-        (when (async-output-running async-output)
-          (handler-case (force-output stream)
-            (cl:error (e) (handle-stream-error e))))
+        (let ((wrote-p nil))
+          (loop for line = (ring-buffer-pop ring) while line do
+            (setf wrote-p t)
+            (handler-case
+                (progn (write-string line stream) (terpri stream))
+              (cl:error (e) (unless (handle-stream-error e) (return)))))
+          (when (and wrote-p (async-output-running async-output))
+            (handler-case (force-output stream)
+              (cl:error (e) (handle-stream-error e)))))
         (let ((dropped (ring-buffer-dropped ring)))
           (when (plusp dropped)
             (loop for old = (ring-buffer-dropped ring)
@@ -1012,22 +1032,8 @@ that is called on each field before serialization. Return (values nil nil) to dr
                           ((streamp output) (make-async-output output :capacity capacity :on-drop on-drop))
                           ((null output) (make-async-output *error-output* :capacity capacity :on-drop on-drop))
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
-         (chindings (if (string= name "")
-                        ""
-                        (with-output-to-string (s)
-                          (emit-json-key s "name")
-                          (emit-json-value s name))))
-         (raw-bindings (if (string= name "")
-                           nil
-                           (list :name name)))
-         (lgr (%make-logger
-               :name name
-               :chindings chindings
-               :raw-bindings raw-bindings
-               :formatter formatter
-               :output actual-output
-               :field-transform field-transform)))
-    (set-level lgr level)
+         (lgr (make-logger :name name :level level :formatter formatter
+                           :output actual-output :field-transform field-transform)))
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 
 (defun stop ()
@@ -1059,11 +1065,8 @@ that is called on each field before serialization. Return (values nil nil) to dr
    Binds VAR to a function that returns the list of logged strings.
    FORMATTER defaults to #'json-formatter but can be any formatter function."
   `(multiple-value-bind (collector results-fn) (make-list-collector)
-     (let* ((*logger* (%make-logger
-                       :name "test"
-                       :formatter ,formatter
-                       :output collector)))
-       (set-level *logger* :trace)
+     (let* ((*logger* (make-logger :name "test" :level :trace
+                                   :formatter ,formatter :output collector)))
        (let ((,var results-fn))
          ,@body))))
 

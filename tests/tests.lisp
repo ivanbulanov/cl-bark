@@ -128,6 +128,27 @@
     (5am:is-true (search "count" r))
     (5am:is-true (search "42" r))))
 
+(5am:test test-emit-json-key-non-string-non-symbol
+  "emit-json-key handles non-string/non-symbol keys via princ-to-string."
+  ;; Integer key — must produce valid JSON, not empty key
+  (let ((r (with-output-to-string (s) (emit-json-key s 42))))
+    (5am:is-true (search "\"42\":" r)))
+  ;; String key — normal path
+  (let ((r (with-output-to-string (s) (emit-json-key s "foo"))))
+    (5am:is-true (search "\"foo\":" r)))
+  ;; Symbol key — lowercased
+  (let ((r (with-output-to-string (s) (emit-json-key s :bar))))
+    (5am:is-true (search "\"bar\":" r))))
+
+(5am:test test-emit-logfmt-key-non-string-non-symbol
+  "emit-logfmt-key handles non-string/non-symbol keys via princ-to-string."
+  (let ((r (with-output-to-string (s) (emit-logfmt-key s 42))))
+    (5am:is (string= "42" r)))
+  (let ((r (with-output-to-string (s) (emit-logfmt-key s "foo"))))
+    (5am:is (string= "foo" r)))
+  (let ((r (with-output-to-string (s) (emit-logfmt-key s :bar))))
+    (5am:is (string= "bar" r))))
+
 (5am:test test-serialize-bindings
   "Test serialize-bindings produces a correct JSON fragment."
   (let ((r (serialize-bindings (list :service "web" :version 2))))
@@ -242,6 +263,17 @@
     (setf (gethash "a" h) 1 (gethash "b" h) 2 (gethash "c" h) 3)
     (let ((r (with-output-to-string (s) (emit-json-value s h))))
       (5am:is-true (search "\"...\":\"...\"" r)))))
+
+(5am:test test-emit-json-value-hash-table-truncation-valid-json
+  "Truncated hash-tables produce valid JSON with closing brace."
+  (let ((bark:*max-json-length* 1)
+        (h (make-hash-table :test 'equal)))
+    (setf (gethash "a" h) 1 (gethash "b" h) 2)
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      ;; Must end with } — previously the return-from skipped the closing brace
+      (5am:is (char= #\} (char r (1- (length r)))))
+      ;; Must be parseable as JSON
+      (5am:is (hash-table-p (yason:parse r))))))
 
 (5am:test test-emit-json-value-depth-and-length
   "Depth and length limits compose correctly."
@@ -782,6 +814,17 @@
       (5am:is-true (search "num=42"               s))
       (5am:is-true (search "url=\"http://"        s)))))
 
+(5am:test test-logfmt-quoting-escapes-internal-quotes
+  "Logfmt formatter escapes double quotes inside quoted values."
+  (let ((r (with-output-to-string (s)
+             (bark::logfmt-write-bare-or-quoted s "he said \"hello\""))))
+    ;; Must not produce malformed "he said "hello"" — internal quotes escaped
+    (5am:is (char= #\" (char r 0)))
+    (5am:is (char= #\" (char r (1- (length r)))))
+    (5am:is-true (search "\\\"" r))
+    ;; Round-trip: count quotes — opening + closing + 2 escaped = 4 quote chars
+    (5am:is (= 4 (count #\" r)))))
+
 ;;; --- JSON Value Types ---
 
 (5am:test test-json-value-types-roundtrip
@@ -828,6 +871,15 @@
       (5am:is-true (<= 50 throttled 150)))))
 
 ;;; --- Captured Logs Formatter ---
+
+(5am:test test-with-captured-logs-includes-name
+  "WITH-CAPTURED-LOGS produces JSON output that includes the logger name."
+  (bark:with-captured-logs (logs)
+    (bark:info "hello")
+    (let* ((line (first (funcall logs)))
+           (parsed (yason:parse line)))
+      ;; The test logger has name "test" — must appear in JSON output
+      (5am:is (string= "test" (gethash "name" parsed))))))
 
 (5am:test test-with-captured-logs-formatter
   "WITH-CAPTURED-LOGS accepts an optional formatter argument."
@@ -879,6 +931,19 @@
       (5am:is (search "\"path\":\"/api\"" line)))))
 
 ;;; --- Ring Buffer ---
+
+(5am:test test-ring-buffer-power-of-two-rounding
+  "make-ring-buffer rounds capacity to next power of two correctly.
+   Exact powers of two must not be rounded up (regression: float rounding)."
+  ;; Exact power of two — must stay at that size, not round up
+  (let ((rb (bark::make-ring-buffer 256)))
+    (5am:is (= 256 (length (bark::ring-buffer-slots rb)))))
+  ;; Non-power-of-two — rounds up
+  (let ((rb (bark::make-ring-buffer 100)))
+    (5am:is (= 128 (length (bark::ring-buffer-slots rb)))))
+  ;; Minimum capacity enforced
+  (let ((rb (bark::make-ring-buffer 4)))
+    (5am:is (= 16 (length (bark::ring-buffer-slots rb))))))
 
 (5am:test test-ring-buffer-basic
   "Push and pop values from a ring buffer."
