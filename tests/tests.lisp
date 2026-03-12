@@ -2348,3 +2348,76 @@
         (with-log-buffer ()
           (bark:info "deep"))))
     (5am:is-true (search "deep" (get-output-stream-string out)))))
+
+;;; --- Buffer edge cases ---
+
+(5am:test test-with-log-buffer-on-flush-nil-suppresses-all
+  "on-flush returning nil suppresses all output."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+                                  (declare (ignore entries condition normal-exit-p))
+                                  nil))
+      (bark:info "suppressed"))
+    (5am:is (string= "" (get-output-stream-string out)))))
+
+(5am:test test-with-log-buffer-child-logger-chindings
+  "Buffer scope with child logger preserves static context in output."
+  (let* ((out (make-string-output-stream))
+         (parent (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (*logger* (child parent :component "auth")))
+    (with-log-buffer ()
+      (bark:info "login"))
+    (let* ((result (get-output-stream-string out))
+           (json (yason:parse (string-trim '(#\Newline) result))))
+      (5am:is (string= "auth" (gethash "component" json))))))
+
+(5am:test test-with-log-buffer-field-transform-at-flush
+  "Root logger's field transform is applied at flush time, not capture time."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out
+                                :field-transform (lambda (key value)
+                                                  (if (eq key :token) "****" value)))))
+    (with-log-buffer ()
+      (bark:info "login" :token "secret-abc"))
+    (let* ((result (get-output-stream-string out))
+           (json (yason:parse (string-trim '(#\Newline) result))))
+      (5am:is (string= "****" (gethash "token" json))))))
+
+(5am:test test-with-log-buffer-on-flush-sees-handled-condition
+  "handler-case inside body catches first; on-flush sees normal exit."
+  (let* ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+                                :output (make-string-output-stream)))
+         (seen-condition nil)
+         (seen-normal-exit-p nil))
+    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+                                  (declare (ignore entries))
+                                  (setf seen-condition condition
+                                        seen-normal-exit-p normal-exit-p)
+                                  nil))
+      (bark:info "before-error")
+      (handler-case (cl:error "caught-inside")
+        (cl:error () nil)))
+    ;; handler-case is inner to handler-bind so it catches first; condition not seen
+    (5am:is-false seen-condition)
+    ;; Body completed normally (handler-case handled the error)
+    (5am:is-true seen-normal-exit-p)))
+
+(5am:test test-with-log-buffer-logfmt-formatter
+  "Buffer works with logfmt formatter."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'logfmt-formatter :output out)))
+    (with-log-buffer ()
+      (bark:info "hello" :key "val"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "msg=hello" result))
+      (5am:is-true (search "key=val" result)))))
+
+(5am:test test-with-log-buffer-pretty-formatter
+  "Buffer works with pretty formatter."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "test" :level :info :formatter #'pretty-formatter :output out)))
+    (with-log-buffer ()
+      (bark:info "hello"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "hello" result)))))
