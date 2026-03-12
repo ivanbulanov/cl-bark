@@ -152,12 +152,22 @@
   "Return the type of VALUE as a lowercase string."
   (string-downcase (princ-to-string (type-of value))))
 
-(declaim (inline key-string))
+(defvar *key-string-cache* (make-hash-table :test 'eq)
+  "Cache for symbol → downcased string. Bounded by *key-string-cache-limit*.")
+
+(defvar *key-string-cache-limit* 1024
+  "Maximum entries in the key-string cache. New symbols still work but aren't cached past this.")
+
 (defun key-string (key)
-  "Convert a field key to its lowercase string representation."
+  "Convert a field key to its lowercase string representation.
+   Symbol results are memoized in *key-string-cache*."
   (typecase key
     (string key)
-    (symbol (string-downcase (symbol-name key)))
+    (symbol (or (gethash key *key-string-cache*)
+                (let ((s (string-downcase (symbol-name key))))
+                  (when (< (hash-table-count *key-string-cache*) *key-string-cache-limit*)
+                    (setf (gethash key *key-string-cache*) s))
+                  s)))
     (t (princ-to-string key))))
 
 (defun write-angle-type (stream value)
@@ -424,43 +434,7 @@
    User-defined formatters should call this for correct timestamps during buffer replay."
   (get-unix-timestamp-ms))
 
-;;; --- Formatters ---
-
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) json-formatter))
-
-(defun json-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry as a JSON line."
-  (declare (optimize (speed 3) (safety 1)))
-  (declare (ignore raw-bindings))
-  (with-output-to-string (s)
-    (write-string (svref *level-prefixes* (floor level +level-step+)) s)
-    (write-string ",\"ts\":" s)
-    (princ (get-unix-timestamp-ms) s)
-    (write-string chindings s)
-    (emit-context-fields s context)
-    (emit-json-fields s fields)
-    (when message
-      (write-string ",\"msg\":\"" s)
-      (write-json-escaped-string message s)
-      (write-string "\"" s))
-    (write-string "}" s)))
-
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) logfmt-formatter))
-
-(defun logfmt-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry as logfmt (key=value pairs)."
-  (declare (ignore chindings))
-  (with-output-to-string (s)
-    (write-string "level=" s)
-    (write-string (level-name level) s)
-    (write-string " ts=" s)
-    (princ (get-unix-timestamp-ms) s)
-    (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
-    (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
-    (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
-    (when message
-      (write-string " msg=" s)
-      (emit-logfmt-value s message))))
+;;; --- Pretty Formatter Helpers ---
 
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
@@ -498,45 +472,6 @@
                         line
                         #\Esc)))
             (incf i)))))))
-
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional)) pretty-formatter))
-
-(defun pretty-formatter (level chindings raw-bindings context message fields)
-  "Format a log entry with ANSI colors for REPL/development use."
-  (declare (ignore chindings))
-  (with-output-to-string (s)
-    (let* ((*print-level* *max-pretty-depth*)
-           (*print-length* *max-pretty-length*)
-           (*print-circle* t)
-           (level-idx (floor level +level-step+))
-           (color (svref *level-colors* level-idx))
-           (stacks nil))
-      (flet ((write-key (k)
-               (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
-             (write-val (k v)
-               (cond
-                 ((captured-error-p v)
-                  (write-condition-summary s (captured-error-condition v))
-                  (push (cons k v) stacks))
-                 ((typep v 'condition)
-                  (write-condition-summary s v))
-                 (t (princ v s)))))
-        (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level-idx) #\Esc)
-        (when message
-          (write-char #\Space s)
-          (write-string message s))
-        ;; Child logger bindings
-        (loop for (k v) on raw-bindings by #'cddr do
-          (write-key k) (write-val k v))
-        ;; Context fields
-        (dolist (pair context)
-          (write-key (car pair)) (write-val (car pair) (cdr pair)))
-        ;; Per-call fields
-        (loop for (k v) on fields by #'cddr do
-          (write-key k) (write-val k v))
-        ;; Append stack traces
-        (when stacks
-          (emit-pretty-stack s (nreverse stacks)))))))
 
 ;;; --- Formatter Factories ---
 
@@ -653,6 +588,28 @@
               (write-key k) (write-val k v))
             (when stacks
               (emit-pretty-stack s (nreverse stacks)))))))))
+
+;;; --- Standard Formatters ---
+;;; Thin delegates to the factories with default settings.
+;;; The factory closures are created once at load time.
+
+(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional))
+                json-formatter logfmt-formatter pretty-formatter))
+
+(let ((fmt (make-json-formatter)))
+  (defun json-formatter (level chindings raw-bindings context message fields)
+    "Format a log entry as a JSON line. Default keys: level/ts/msg, numeric level, unix-ms."
+    (funcall fmt level chindings raw-bindings context message fields)))
+
+(let ((fmt (make-logfmt-formatter)))
+  (defun logfmt-formatter (level chindings raw-bindings context message fields)
+    "Format a log entry as logfmt (key=value pairs). Default keys: level/ts/msg."
+    (funcall fmt level chindings raw-bindings context message fields)))
+
+(let ((fmt (make-pretty-formatter)))
+  (defun pretty-formatter (level chindings raw-bindings context message fields)
+    "Format a log entry with ANSI colors for REPL/development use."
+    (funcall fmt level chindings raw-bindings context message fields)))
 
 (defconstant +min-ring-capacity+ 16 "Minimum ring buffer capacity in log lines. Power of two.")
 
@@ -943,6 +900,14 @@ Specifying both :level and :filter is an error."
         (stream (write-string line output) (terpri output) (force-output output))
         (function (funcall output line)))))
 
+(defun dispatch-to-output (output formatter level chindings raw-bindings ctx message flds)
+  "Format and deliver a log event. Routes to tee or single output."
+  (if (tee-output-p output)
+      (emit-to-tee output level chindings raw-bindings ctx message flds)
+      (deliver-line output
+                    (funcall (the function formatter)
+                             level chindings raw-bindings ctx message flds))))
+
 ;;; --- Logger ---
 
 (defun noop (logger message &rest fields)
@@ -1028,16 +993,10 @@ Specifying both :level and :filter is an error."
                   (flds (if transform
                             (apply-field-transform-plist transform fields)
                             fields)))
-              (if (tee-output-p output)
-                  (emit-to-tee output level-value
-                               (logger-chindings lgr) (logger-raw-bindings lgr)
-                               ctx message flds)
-                  (deliver-line output
-                               (funcall (the function (logger-formatter lgr))
-                                        level-value
-                                        (logger-chindings lgr)
-                                        (logger-raw-bindings lgr)
-                                        ctx message flds))))))
+              (dispatch-to-output output (logger-formatter lgr)
+                                  level-value
+                                  (logger-chindings lgr) (logger-raw-bindings lgr)
+                                  ctx message flds))))
         (values)))))
 
 (declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function)
@@ -1066,19 +1025,25 @@ Specifying both :level and :filter is an error."
 
 (declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
 
+(defun wire-level-fns (logger threshold make-fn)
+  "Set all six level function slots on LOGGER. Levels at or above THRESHOLD
+   get functions from (funcall MAKE-FN level); levels below get #'noop."
+  (flet ((slot-fn (level) (if (< level threshold) #'noop (funcall make-fn level))))
+    (setf (logger-trace-fn logger) (slot-fn +trace+))
+    (setf (logger-debug-fn logger) (slot-fn +debug+))
+    (setf (logger-info-fn logger)  (slot-fn +info+))
+    (setf (logger-warn-fn logger)  (slot-fn +warn+))
+    (setf (logger-error-fn logger) (slot-fn +error+))
+    (setf (logger-fatal-fn logger) (slot-fn +fatal+)))
+  (values))
+
 (defun set-level (logger level)
   "Set the minimum log level for LOGGER. Swaps function slots."
   (let ((level-val (etypecase level
                      (fixnum level)
                      (keyword (level-from-keyword level)))))
     (setf (logger-level logger) level-val)
-    (setf (logger-trace-fn logger) (if (< +trace+ level-val) #'noop (make-log-fn +trace+)))
-    (setf (logger-debug-fn logger) (if (< +debug+ level-val) #'noop (make-log-fn +debug+)))
-    (setf (logger-info-fn logger)  (if (< +info+  level-val) #'noop (make-log-fn +info+)))
-    (setf (logger-warn-fn logger)  (if (< +warn+  level-val) #'noop (make-log-fn +warn+)))
-    (setf (logger-error-fn logger) (if (< +error+ level-val) #'noop (make-log-fn +error+)))
-    (setf (logger-fatal-fn logger) (if (< +fatal+ level-val) #'noop (make-log-fn +fatal+)))
-    (values)))
+    (wire-level-fns logger level-val #'make-log-fn)))
 
 (declaim (ftype (function (logger (or fixnum keyword) fixnum) (values t &optional)) set-sampling))
 

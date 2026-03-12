@@ -774,6 +774,8 @@ Producer threads              Writer thread
                                     └─ wait on semaphore
 ```
 
+**TSO dependency.** The ring buffer's payload slots are written and read with plain `svref`/`setf` — no memory barriers around the string data. Correctness relies on x86 Total Store Order (TSO): stores from the producer become visible to the consumer in program order, so the payload is always committed before the semaphore signal that wakes the writer. This is safe on x86/x86-64 (SBCL's primary target and all implementations supported by `atomics`). A port to a weakly-ordered architecture (ARM, RISC-V) would need acquire/release barriers on the payload slot accesses.
+
 ### Caller-Thread Formatting
 
 Every log call formats the message to a finished string in the caller's thread, then pushes that string into the ring buffer. The writer thread does nothing but `write-string` + `force-output`. This is a deliberate choice with four supporting reasons:

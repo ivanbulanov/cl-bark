@@ -39,12 +39,8 @@
               :field-transform nil
               :sampler nil)))
     (setf (logger-level lgr) buffer-level)
-    (setf (logger-trace-fn lgr) (if (< +trace+ buffer-level) #'noop (make-buffer-capture-fn +trace+ buffer)))
-    (setf (logger-debug-fn lgr) (if (< +debug+ buffer-level) #'noop (make-buffer-capture-fn +debug+ buffer)))
-    (setf (logger-info-fn lgr)  (if (< +info+  buffer-level) #'noop (make-buffer-capture-fn +info+  buffer)))
-    (setf (logger-warn-fn lgr)  (if (< +warn+  buffer-level) #'noop (make-buffer-capture-fn +warn+  buffer)))
-    (setf (logger-error-fn lgr) (if (< +error+ buffer-level) #'noop (make-buffer-capture-fn +error+ buffer)))
-    (setf (logger-fatal-fn lgr) (if (< +fatal+ buffer-level) #'noop (make-buffer-capture-fn +fatal+ buffer)))
+    (wire-level-fns lgr buffer-level
+                    (lambda (level) (make-buffer-capture-fn level buffer)))
     lgr))
 
 ;;; --- Flush ---
@@ -61,22 +57,13 @@
                    (buffer-entry-fields entry)))
          (output (logger-output root-logger)))
     (when output
-      (if (tee-output-p output)
-          (emit-to-tee output
-                       (buffer-entry-level entry)
-                       (logger-chindings root-logger)
-                       (logger-raw-bindings root-logger)
-                       ctx
-                       (buffer-entry-message entry)
-                       flds)
-          (deliver-line output
-                        (funcall (the function (logger-formatter root-logger))
-                                 (buffer-entry-level entry)
-                                 (logger-chindings root-logger)
-                                 (logger-raw-bindings root-logger)
-                                 ctx
-                                 (buffer-entry-message entry)
-                                 flds))))))
+      (dispatch-to-output output (logger-formatter root-logger)
+                          (buffer-entry-level entry)
+                          (logger-chindings root-logger)
+                          (logger-raw-bindings root-logger)
+                          ctx
+                          (buffer-entry-message entry)
+                          flds))))
 
 ;;; --- Root logger tracking ---
 
