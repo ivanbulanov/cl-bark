@@ -224,15 +224,3 @@ Both limits can be overridden per-call with `let` bindings.
 | `*max-pretty-length*` | `20` | Elements per collection for pretty-formatter (binds `*print-length*`) |
 | `*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output |
 | `*max-pretty-stack-frames*` | `20` | Max stack frames in pretty-formatter condition output |
-
-### Legacy Names
-
-The following names are still exported as aliases for backward compatibility:
-
-| Legacy | Current |
-|--------|---------|
-| `emit-value` | `emit-json-value` |
-| `emit-key` | `emit-json-key` |
-| `emit-fields` | `emit-json-fields` |
-| `logfmt-write-value` | `emit-logfmt-value` |
-| `logfmt-write-key` | `emit-logfmt-key` |

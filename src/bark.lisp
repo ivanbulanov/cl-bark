@@ -136,34 +136,51 @@
              (format stream "\\u~4,'0X" (char-code c))
              (write-char c stream))))))
 
+(declaim (inline write-json-string))
+(defun write-json-string (stream string)
+  "Write STRING as a JSON quoted string to STREAM."
+  (write-char #\" stream)
+  (write-json-escaped-string string stream)
+  (write-char #\" stream))
+
 (declaim (inline type-name-string))
 (defun type-name-string (value)
   "Return the type of VALUE as a lowercase string."
   (string-downcase (princ-to-string (type-of value))))
 
+(declaim (inline key-string))
+(defun key-string (key)
+  "Convert a field key to its lowercase string representation."
+  (typecase key
+    (string key)
+    (symbol (string-downcase (symbol-name key)))
+    (t (princ-to-string key))))
+
+(defun write-angle-type (stream value)
+  "Write <type> for VALUE to STREAM (no quotes)."
+  (write-char #\< stream)
+  (write-string (type-name-string value) stream)
+  (write-char #\> stream))
+
 (defun emit-type-placeholder (stream value)
   "Write a \"<type>\" placeholder for VALUE to STREAM as a JSON string."
   (write-char #\" stream)
-  (write-char #\< stream)
-  (write-string (type-name-string value) stream)
-  (write-char #\> stream)
+  (write-angle-type stream value)
   (write-char #\" stream))
 
-(defun format-condition-type (condition)
-  "Return the type name of CONDITION as a lowercase string."
-  (type-name-string condition))
-
-(defun format-condition-message (condition)
-  "Return the message text of CONDITION as a simple-string."
-  (coerce (princ-to-string condition) 'simple-string))
+(defun write-condition-summary (stream condition)
+  "Write type: message for CONDITION to STREAM."
+  (write-string (type-name-string condition) stream)
+  (write-string ": " stream)
+  (princ condition stream))
 
 (defun emit-json-condition-fields (stream condition)
   "Write \"type\":\"...\",\"msg\":\"...\" for CONDITION to STREAM.
    No enclosing braces — callers provide { and }."
   (write-string "\"type\":\"" stream)
-  (write-json-escaped-string (format-condition-type condition) stream)
+  (write-json-escaped-string (type-name-string condition) stream)
   (write-string "\",\"msg\":\"" stream)
-  (write-json-escaped-string (format-condition-message condition) stream)
+  (write-json-escaped-string (princ-to-string condition) stream)
   (write-char #\" stream))
 
 (defun emit-json-stack-frame (stream frame)
@@ -221,33 +238,21 @@
     (string k)
     (symbol (string-downcase (symbol-name k)))
     (pathname (namestring k))
-    (t (string-downcase (princ-to-string (type-of k))))))
+    (t (type-name-string k))))
 
 (defun emit-json-value (stream value &optional (depth *max-json-depth*))
   "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
   (declare (optimize (speed 3) (safety 1)))
   (typecase value
-    (string
-     (write-char #\" stream)
-     (write-json-escaped-string value stream)
-     (write-char #\" stream))
-    (character
-     (write-char #\" stream)
-     (write-json-escaped-string (string value) stream)
-     (write-char #\" stream))
+    (string    (write-json-string stream value))
+    (character (write-json-string stream (string value)))
     (integer (princ value stream))
     (float (princ value stream))
     (ratio (format stream "~F" (coerce value 'double-float)))
     ((eql t) (write-string "true" stream))
     (null (write-string "null" stream))
-    (symbol
-     (write-char #\" stream)
-     (write-string (string-downcase (symbol-name value)) stream)
-     (write-char #\" stream))
-    (pathname
-     (write-char #\" stream)
-     (write-json-escaped-string (namestring value) stream)
-     (write-char #\" stream))
+    (symbol    (write-json-string stream (string-downcase (symbol-name value))))
+    (pathname  (write-json-string stream (namestring value)))
     (cons
      (if (<= depth 0)
          (emit-type-placeholder stream value)
@@ -334,10 +339,7 @@
 (defun emit-logfmt-key (stream key)
   "Write a logfmt key to STREAM."
   (declare (optimize (speed 3) (safety 1)))
-  (typecase key
-    (string (write-string key stream))
-    (symbol (write-string (string-downcase (symbol-name key)) stream))
-    (t (write-string (princ-to-string key) stream))))
+  (write-string (key-string key) stream))
 
 (defun logfmt-write-bare-or-quoted (stream string)
   "Write STRING to STREAM, quoting if it contains space, quote, or equals."
@@ -353,9 +355,7 @@
 (defun emit-logfmt-condition (stream condition)
   "Write CONDITION as a quoted logfmt value: \"type: message\"."
   (write-char #\" stream)
-  (write-string (format-condition-type condition) stream)
-  (write-string ": " stream)
-  (write-string (format-condition-message condition) stream)
+  (write-condition-summary stream condition)
   (write-char #\" stream))
 
 (defun emit-logfmt-value (stream value)
@@ -371,9 +371,16 @@
     (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
     (captured-error (emit-logfmt-condition stream (captured-error-condition value)))
     (condition (emit-logfmt-condition stream value))
-    (t (write-char #\< stream)
-       (write-string (type-name-string value) stream)
-       (write-char #\> stream))))
+    (t (write-angle-type stream value))))
+
+(defun emit-logfmt-field (stream key value)
+  "Write a logfmt key=value pair to STREAM, preceded by a space.
+   Boolean T emits bare key (logfmt convention for flags)."
+  (write-char #\Space stream)
+  (emit-logfmt-key stream key)
+  (unless (eq value t)
+    (write-char #\= stream)
+    (emit-logfmt-value stream value)))
 
 ;;; --- Timestamps ---
 
@@ -418,38 +425,11 @@
     (write-string (level-name level) s)
     (write-string " ts=" s)
     (princ (get-unix-timestamp-ms) s)
-    ;; Child logger bindings from raw-bindings plist
-    (loop for (k v) on raw-bindings by #'cddr do
-      (write-char #\Space s)
-      (emit-logfmt-key s k)
-      (if (eq v t)
-          nil ; bare key = true in logfmt
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s v))))
-    ;; Dynamic context
-    (dolist (pair context)
-      (write-char #\Space s)
-      (emit-logfmt-key s (car pair))
-      (if (eq (cdr pair) t)
-          nil
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s (cdr pair)))))
-    ;; Per-call fields
-    (loop for (k v) on fields by #'cddr do
-      (write-char #\Space s)
-      (emit-logfmt-key s k)
-      (if (eq v t)
-          nil
-          (progn (write-char #\= s)
-                 (emit-logfmt-value s v))))
+    (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
+    (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
+    (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
     (write-string " msg=" s)
     (emit-logfmt-value s message)))
-
-(defun emit-pretty-condition-value (stream condition)
-  "Write CONDITION as type: message for pretty formatter."
-  (write-string (format-condition-type condition) stream)
-  (write-string ": " stream)
-  (write-string (format-condition-message condition) stream))
 
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
@@ -469,9 +449,7 @@
              (total (length frames)))
         ;; Label when multiple stacks
         (unless single-p
-          (format stream "~%  ~c[2m~a~c[0m:" #\Esc
-                  (typecase key (string key) (symbol (string-downcase (symbol-name key))))
-                  #\Esc))
+          (format stream "~%  ~c[2m~a~c[0m:" #\Esc (key-string key) #\Esc))
         (let ((indent (if single-p "  " "    "))
               (i 0))
           (dolist (frame frames)
@@ -504,16 +482,14 @@
            (name (level-name level))
            (stacks nil))
       (flet ((write-key (k)
-               (format s " ~c[2m~a~c[0m=" #\Esc
-                       (typecase k (string k) (symbol (string-downcase (symbol-name k))))
-                       #\Esc))
+               (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
              (write-val (k v)
                (cond
                  ((captured-error-p v)
-                  (emit-pretty-condition-value s (captured-error-condition v))
+                  (write-condition-summary s (captured-error-condition v))
                   (push (cons k v) stacks))
                  ((typep v 'condition)
-                  (emit-pretty-condition-value s v))
+                  (write-condition-summary s v))
                  (t (princ v s)))))
         (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
         (write-string message s)
@@ -568,16 +544,18 @@
 (defun ring-buffer-push (rb value)
   "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
   (declare (optimize (speed 3) (safety 1)))
-  (loop
-    (let* ((head (ring-buffer-head rb))
-           (tail (ring-buffer-tail rb))
-           (size (the fixnum (- head tail))))
-      (when (>= size (1+ (ring-buffer-mask rb)))
-        (atomics:atomic-incf (ring-buffer-dropped rb))
-        (return nil))
-      (when (atomics:cas (ring-buffer-head rb) head (1+ head))
-        (setf (svref (ring-buffer-slots rb) (logand head (ring-buffer-mask rb))) value)
-        (return t)))))
+  (let ((mask (ring-buffer-mask rb))
+        (slots (ring-buffer-slots rb)))
+    (loop
+      (let* ((head (ring-buffer-head rb))
+             (tail (ring-buffer-tail rb))
+             (size (the fixnum (- head tail))))
+        (when (>= size (1+ mask))
+          (atomics:atomic-incf (ring-buffer-dropped rb))
+          (return nil))
+        (when (atomics:cas (ring-buffer-head rb) head (1+ head))
+          (setf (svref slots (logand head mask)) value)
+          (return t))))))
 
 (defun ring-buffer-drain (rb)
   "Drain all available values from the ring buffer into a list. Single-consumer only."
