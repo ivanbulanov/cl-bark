@@ -2421,3 +2421,128 @@
       (bark:info "hello"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "hello" result)))))
+
+;;; --- Optional message ---
+
+(5am:test test-json-formatter-nil-message
+  "JSON formatter omits msg field when message is nil."
+  (let ((output (json-formatter +info+ "" nil nil nil nil)))
+    (5am:is-true (stringp output))
+    (5am:is-true (search "\"level\"" output))
+    (5am:is-true (search "\"ts\"" output))
+    (5am:is-false (search "\"msg\"" output))))
+
+(5am:test test-json-formatter-nil-message-with-fields
+  "JSON formatter omits msg but includes fields when message is nil."
+  (let ((output (json-formatter +info+ "" nil nil nil (list :event "login" :user-id 42))))
+    (5am:is-false (search "\"msg\"" output))
+    (5am:is-true (search "\"event\"" output))
+    (5am:is-true (search "login" output))
+    (5am:is-true (search "\"user-id\"" output))
+    (5am:is-true (search "42" output))))
+
+(5am:test test-logfmt-formatter-nil-message
+  "Logfmt formatter omits msg= when message is nil."
+  (let ((output (logfmt-formatter +info+ "" nil nil nil nil)))
+    (5am:is-true (search "level=info" output))
+    (5am:is-true (search "ts=" output))
+    (5am:is-false (search "msg=" output))))
+
+(5am:test test-logfmt-formatter-nil-message-with-fields
+  "Logfmt formatter omits msg= but includes fields when message is nil."
+  (let ((output (logfmt-formatter +warn+ "" nil nil nil (list :event "login"))))
+    (5am:is-false (search "msg=" output))
+    (5am:is-true (search "event=" output))))
+
+(5am:test test-pretty-formatter-nil-message
+  "Pretty formatter omits message text when message is nil."
+  (let ((output (pretty-formatter +info+ "" nil nil nil nil)))
+    (5am:is-true (stringp output))
+    (5am:is-true (search (string #\Esc) output))
+    ;; Level label appears but no message text follows
+    (5am:is-true (search "INFO" output))))
+
+(5am:test test-pretty-formatter-nil-message-with-fields
+  "Pretty formatter shows fields without message text when nil."
+  (let ((output (pretty-formatter +info+ "" nil nil nil (list :event "login"))))
+    (5am:is-true (search "event" output))
+    (5am:is-true (search "login" output))
+    ;; Verify no spurious message text — only level + fields
+    (5am:is-false (search "nil" output))))
+
+(5am:test test-macro-keyword-first-fields-only
+  "Logging macro with keyword first arg treats all args as fields plist."
+  (with-captured-logs (get-logs)
+    (bark:info :event "login" :user-id 42)
+    (let* ((logs (funcall get-logs))
+           (line (first logs)))
+      (5am:is (= 1 (length logs)))
+      (5am:is-false (search "\"msg\"" line))
+      (5am:is-true (search "\"event\"" line))
+      (5am:is-true (search "login" line))
+      (5am:is-true (search "\"user-id\"" line))
+      (5am:is-true (search "42" line)))))
+
+(5am:test test-macro-string-first-preserves-message
+  "Logging macro with string first arg still works as before."
+  (with-captured-logs (get-logs)
+    (bark:info "hello world" :key "val")
+    (let* ((logs (funcall get-logs))
+           (line (first logs)))
+      (5am:is (= 1 (length logs)))
+      (5am:is-true (search "\"msg\"" line))
+      (5am:is-true (search "hello world" line))
+      (5am:is-true (search "\"key\"" line)))))
+
+(5am:test test-macro-explicit-logger-keyword-fields
+  "Logging macro with explicit logger and keyword-first fields."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "test" :level :info :output collector)))
+      (bark:info lgr :event "created" :id 7)
+      (let* ((logs (funcall results-fn))
+             (line (first logs)))
+        (5am:is (= 1 (length logs)))
+        (5am:is-false (search "\"msg\"" line))
+        (5am:is-true (search "\"event\"" line))
+        (5am:is-true (search "created" line))))))
+
+(5am:test test-macro-explicit-logger-string-message
+  "Logging macro with explicit logger and string message."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "test" :level :info :output collector)))
+      (bark:info lgr "hello" :k "v")
+      (let* ((logs (funcall results-fn))
+             (line (first logs)))
+        (5am:is (= 1 (length logs)))
+        (5am:is-true (search "\"msg\"" line))
+        (5am:is-true (search "hello" line))))))
+
+(5am:test test-macro-runtime-keyword-detection
+  "Logging macro detects keyword at runtime for variable first arg."
+  (with-captured-logs (get-logs)
+    (let ((key :event))
+      (bark:info key "login"))
+    (let* ((logs (funcall get-logs))
+           (line (first logs)))
+      (5am:is (= 1 (length logs)))
+      ;; key is :event at runtime → treated as fields-only
+      (5am:is-false (search "\"msg\"" line))
+      (5am:is-true (search "\"event\"" line))
+      (5am:is-true (search "login" line)))))
+
+(5am:test test-macro-zero-args-no-output
+  "Logging macro with zero args produces no output."
+  (with-captured-logs (get-logs)
+    (bark:info)
+    (5am:is (= 0 (length (funcall get-logs))))))
+
+(5am:test test-buffer-nil-message-roundtrip
+  "Buffer captures and flushes entries with nil message."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "test" :level :info :output out)))
+    (with-log-buffer ()
+      (bark:info :event "buffered"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "\"msg\"" result))
+      (5am:is-true (search "\"event\"" result))
+      (5am:is-true (search "buffered" result)))))

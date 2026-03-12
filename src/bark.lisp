@@ -412,7 +412,7 @@
 
 ;;; --- Formatters ---
 
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) json-formatter))
+(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) json-formatter))
 
 (defun json-formatter (level chindings raw-bindings context message fields)
   "Format a log entry as a JSON line."
@@ -425,11 +425,13 @@
     (write-string chindings s)
     (emit-context-fields s context)
     (emit-json-fields s fields)
-    (write-string ",\"msg\":\"" s)
-    (write-json-escaped-string message s)
-    (write-string "\"}" s)))
+    (when message
+      (write-string ",\"msg\":\"" s)
+      (write-json-escaped-string message s)
+      (write-string "\"" s))
+    (write-string "}" s)))
 
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) logfmt-formatter))
+(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) logfmt-formatter))
 
 (defun logfmt-formatter (level chindings raw-bindings context message fields)
   "Format a log entry as logfmt (key=value pairs)."
@@ -442,8 +444,9 @@
     (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
     (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
     (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
-    (write-string " msg=" s)
-    (emit-logfmt-value s message)))
+    (when message
+      (write-string " msg=" s)
+      (emit-logfmt-value s message))))
 
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
@@ -482,7 +485,7 @@
                         #\Esc)))
             (incf i)))))))
 
-(declaim (ftype (function (fixnum simple-string list list string list) (values simple-string &optional)) pretty-formatter))
+(declaim (ftype (function (fixnum simple-string list list (or null string) list) (values simple-string &optional)) pretty-formatter))
 
 (defun pretty-formatter (level chindings raw-bindings context message fields)
   "Format a log entry with ANSI colors for REPL/development use."
@@ -505,8 +508,10 @@
                  ((typep v 'condition)
                   (write-condition-summary s v))
                  (t (princ v s)))))
-        (format s "~c[~am~5a~c[0m " #\Esc color (string-upcase name) #\Esc)
-        (write-string message s)
+        (format s "~c[~am~5a~c[0m" #\Esc color (string-upcase name) #\Esc)
+        (when message
+          (write-char #\Space s)
+          (write-string message s))
         ;; Child logger bindings
         (loop for (k v) on raw-bindings by #'cddr do
           (write-key k) (write-val k v))
@@ -775,7 +780,7 @@ Specifying both :level and :filter is an error."
                        (cl:error "Cannot specify both :level and :filter in tee destination spec"))
                   collect `(list :stream ,stream-expr ,@keys)))))
 
-(declaim (ftype (function (tee-output fixnum simple-string list list string list) (values &optional)) emit-to-tee))
+(declaim (ftype (function (tee-output fixnum simple-string list list (or null string) list) (values &optional)) emit-to-tee))
 
 (defun emit-to-tee (tee-output level-value chindings raw-bindings context message fields)
   "Emit a log event to all destinations in TEE-OUTPUT, grouped by formatter."
@@ -1078,14 +1083,39 @@ that is called on each field before serialization. Return (values nil nil) to dr
 ;;; --- Convenience API ---
 
 (macrolet ((define-log-macro (name accessor)
-             `(defmacro ,name (first &rest rest)
-                "Log at the appropriate level. FIRST can be a logger (explicit target) or a message string."
-                (let ((g (gensym "FIRST")))
-                  `(let ((,g ,first))
-                     (if (logger-p ,g)
-                         (funcall (,',accessor ,g) ,g ,@rest)
-                         (when *logger*
-                           (funcall (,',accessor *logger*) *logger* ,g ,@rest))))))))
+             `(defmacro ,name (&rest args)
+                "Log at the appropriate level. First arg can be a logger, a message string,
+                 or a keyword (starting a fields-only plist with no message)."
+                (when args
+                  (if (keywordp (car args))
+                      ;; Compile-time: literal keyword first → fields-only, use *logger*
+                      `(when *logger*
+                         (funcall (,',accessor *logger*) *logger* nil ,@args))
+                      ;; First arg needs runtime dispatch
+                      (let ((g (gensym "FIRST"))
+                            (rest-forms (cdr args)))
+                        ;; Pre-compute the logger branch outside the template
+                        (let ((logger-branch
+                                (cond
+                                  ((null rest-forms)
+                                   `(funcall (,',accessor ,g) ,g nil))
+                                  ((keywordp (car rest-forms))
+                                   `(funcall (,',accessor ,g) ,g nil ,@rest-forms))
+                                  (t
+                                   (let ((g2 (gensym "ARG")))
+                                     `(let ((,g2 ,(car rest-forms)))
+                                        (if (keywordp ,g2)
+                                            (funcall (,',accessor ,g) ,g nil ,g2 ,@(cdr rest-forms))
+                                            (funcall (,',accessor ,g) ,g ,g2 ,@(cdr rest-forms)))))))))
+                          `(let ((,g ,(car args)))
+                             (cond
+                               ((logger-p ,g) ,logger-branch)
+                               ((keywordp ,g)
+                                (when *logger*
+                                  (funcall (,',accessor *logger*) *logger* nil ,g ,@rest-forms)))
+                               (t
+                                (when *logger*
+                                  (funcall (,',accessor *logger*) *logger* ,g ,@rest-forms))))))))))))
   (define-log-macro trace logger-trace-fn)
   (define-log-macro debug logger-debug-fn)
   (define-log-macro info  logger-info-fn)

@@ -71,13 +71,27 @@ Levels are integer-encoded, spaced by 10 for user-defined intermediate levels.
 ### Logging Macros
 
 ```lisp
-(bark:info message &rest fields)           ; uses *logger*
-(bark:info some-logger message &rest fields) ; uses some-logger explicitly
+(bark:info message &rest fields)             ; message + fields, uses *logger*
+(bark:info logger message &rest fields)      ; message + fields, explicit logger
+(bark:info :key value &rest fields)          ; fields only, no message
+(bark:info logger :key value &rest fields)   ; fields only, explicit logger
 ```
 
-All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an optional logger as the first argument. When the first argument is a `logger` struct, it is used directly. Otherwise, it is treated as the message and `*logger*` is used.
+All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an optional logger as the first argument. When the first argument is a `logger` struct, it is used directly. Otherwise, `*logger*` is used.
 
-Dispatch via `logger-p` on the first argument at runtime (struct type tag check, negligible cost). When `*logger*` is nil, the call is a no-op.
+**Optional message:** When the first non-logger argument is a keyword, the entire argument list is treated as a fields-only plist and no message is emitted. The `msg` field is omitted from JSON/logfmt output entirely (zerolog `Send()` semantics). When the first non-logger argument is a string, it is used as the message.
+
+```lisp
+;; With message
+(bark:info "user registered" :user-id 42)
+;; => {"level":30,"ts":...,"user-id":42,"msg":"user registered"}
+
+;; Without message — fields only
+(bark:info :event "registration" :user-id 42)
+;; => {"level":30,"ts":...,"event":"registration","user-id":42}
+```
+
+Detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
 
 ### Logger Management
 
