@@ -31,6 +31,7 @@
    #:*max-json-stack-frames* #:*max-pretty-stack-frames*
    ;; Utilities
    #:noop #:make-list-collector
+   #:current-log-timestamp-ms #:*override-timestamp*
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -1908,3 +1909,31 @@
       (5am:is-true (search "user=alice" result))
       (5am:is-false (search "password" result))
       (5am:is-false (search "secret" result)))))
+
+;;; --- Timestamp override ---
+
+(5am:test test-current-log-timestamp-ms-returns-integer
+  "current-log-timestamp-ms returns a positive integer."
+  (let ((ts (current-log-timestamp-ms)))
+    (5am:is (integerp ts))
+    (5am:is (plusp ts))))
+
+(5am:test test-override-timestamp-used-when-bound
+  "*override-timestamp* overrides current-log-timestamp-ms."
+  (let ((*override-timestamp* 1234567890))
+    (5am:is (= 1234567890 (current-log-timestamp-ms)))))
+
+(5am:test test-override-timestamp-nil-uses-wall-clock
+  "*override-timestamp* nil falls through to wall clock."
+  (let ((*override-timestamp* nil))
+    (5am:is (plusp (current-log-timestamp-ms)))))
+
+(5am:test test-override-timestamp-in-json-output
+  "JSON formatter uses *override-timestamp* when bound."
+  (let* ((out (make-string-output-stream))
+         (l (make-logger :level :info :formatter #'json-formatter :output out)))
+    (let ((bark::*override-timestamp* 9999999))
+      (funcall (logger-info-fn l) l "test"))
+    (let* ((line (get-output-stream-string out))
+           (json (yason:parse line)))
+      (5am:is (= 9999999 (gethash "ts" json))))))

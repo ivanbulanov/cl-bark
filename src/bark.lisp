@@ -384,17 +384,31 @@
 
 ;;; --- Timestamps ---
 
+(defvar *override-timestamp* nil
+  "When non-nil, formatters use this value instead of the wall clock.
+   Internal — used by with-log-buffer for replay.")
+
 (declaim (ftype (function nil (values integer &optional)) get-unix-timestamp-ms))
 
 (defun get-unix-timestamp-ms ()
-  "Return current Unix timestamp in milliseconds."
-  #+sbcl
-  (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
-    (+ (* sec 1000) (floor usec 1000)))
-  #-sbcl
-  (let ((now (local-time:now)))
-    (+ (* (local-time:timestamp-to-unix now) 1000)
-       (floor (local-time:nsec-of now) 1000000))))
+  "Return current Unix timestamp in milliseconds, or *override-timestamp* if bound."
+  (or *override-timestamp*
+      #+sbcl
+      (multiple-value-bind (sec usec) (sb-ext:get-time-of-day)
+        (+ (* sec 1000) (floor usec 1000)))
+      #-sbcl
+      (let ((now (local-time:now)))
+        (+ (* (local-time:timestamp-to-unix now) 1000)
+           (floor (local-time:nsec-of now) 1000000)))))
+
+(declaim (ftype (function nil (values integer &optional)) current-log-timestamp-ms))
+
+(defun current-log-timestamp-ms ()
+  "Return the effective log timestamp in milliseconds.
+   During buffer replay, returns the captured timestamp from the original log call.
+   Otherwise, returns the current wall-clock time.
+   User-defined formatters should call this for correct timestamps during buffer replay."
+  (get-unix-timestamp-ms))
 
 ;;; --- Formatters ---
 
