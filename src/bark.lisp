@@ -342,8 +342,7 @@
   (write-string (key-string key) stream))
 
 (defun logfmt-write-bare-or-quoted (stream string)
-  "Write STRING to STREAM, quoting if it contains space, quote, or equals.
-   Single-pass: checks and writes simultaneously."
+  "Write STRING to STREAM, quoting if it contains space, quote, or equals."
   (declare (optimize (speed 3) (safety 1))
            (type string string))
   (let ((needs-quoting nil))
@@ -926,7 +925,6 @@ Specifying both :level and :filter is an error."
 
 ;;; --- Output Delivery ---
 
-(declaim (inline deliver-line))
 (defun deliver-line (output line)
   "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
   (if (async-output-p output)
