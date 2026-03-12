@@ -38,6 +38,7 @@
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
    #:make-buffer-logger
    #:flush-buffer
+   #:with-log-buffer #:*root-logger*
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -2146,3 +2147,154 @@
       (5am:is (< (search "first" result)
                  (search "second" result)
                  (search "third" result))))))
+
+;;; --- with-log-buffer ---
+
+(5am:test test-with-log-buffer-normal-exit-filters
+  "Normal exit filters to entries >= logger's configured level."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (bark:debug "hidden")
+      (bark:info "visible"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "hidden" result))
+      (5am:is-true (search "visible" result)))))
+
+(5am:test test-with-log-buffer-abnormal-exit-emits-all
+  "Abnormal exit emits all buffered entries."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (ignore-errors
+      (with-log-buffer ()
+        (bark:debug "debug-trail")
+        (bark:info "info-msg")
+        (cl:error "boom")))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "debug-trail" result))
+      (5am:is-true (search "info-msg" result)))))
+
+(5am:test test-with-log-buffer-returns-body-value
+  "with-log-buffer returns the value of the body."
+  (let ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+                               :output (make-string-output-stream))))
+    (5am:is (= 42 (with-log-buffer () 42)))))
+
+(5am:test test-with-log-buffer-returns-multiple-values
+  "with-log-buffer preserves multiple return values."
+  (let ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+                               :output (make-string-output-stream))))
+    (multiple-value-bind (a b) (with-log-buffer () (values 1 2))
+      (5am:is (= 1 a))
+      (5am:is (= 2 b)))))
+
+(5am:test test-with-log-buffer-handled-error-is-normal
+  "Error caught inside body = normal exit, debug discarded."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (bark:debug "pre-error")
+      (handler-case (cl:error "handled")
+        (cl:error () (bark:info "recovered"))))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "pre-error" result))
+      (5am:is-true (search "recovered" result)))))
+
+(5am:test test-with-log-buffer-return-from-is-normal
+  "return-from (non-condition NLX) treated as normal exit."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (block outer
+      (with-log-buffer ()
+        (bark:debug "hidden-debug")
+        (bark:info "shown-info")
+        (return-from outer 99)))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "hidden-debug" result))
+      (5am:is-true (search "shown-info" result)))))
+
+(5am:test test-with-log-buffer-custom-level
+  "Custom capture level limits what gets buffered."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (ignore-errors
+      (with-log-buffer (:level :debug)
+        (bark:trace "trace-hidden")
+        (bark:debug "debug-visible")
+        (cl:error "force flush")))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "trace-hidden" result))
+      (5am:is-true (search "debug-visible" result)))))
+
+(5am:test test-with-log-buffer-on-flush-callback
+  "on-flush callback controls emission."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+                                  (declare (ignore condition normal-exit-p))
+                                  ;; Only emit entries with :audit in fields
+                                  (remove-if-not (lambda (e)
+                                                   (getf (buffer-entry-fields e) :audit))
+                                                 entries)))
+      (bark:info "no-audit" :path "/")
+      (bark:info "has-audit" :audit t :path "/admin"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-false (search "no-audit" result))
+      (5am:is-true (search "has-audit" result)))))
+
+(5am:test test-with-log-buffer-captures-context
+  "Dynamic context is captured at log time, not flush time."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (with-context (:req "r1")
+        (bark:info "inside-ctx"))
+      ;; Context gone here, but entry captured it
+      (bark:info "outside-ctx"))
+    (let* ((result (get-output-stream-string out))
+           (lines (uiop:split-string result :separator '(#\Newline))))
+      ;; First line should have req=r1
+      (5am:is-true (search "r1" (first lines)))
+      ;; Second line should not
+      (5am:is-false (search "r1" (second lines))))))
+
+(5am:test test-with-log-buffer-preserves-timestamps
+  "Each entry retains its own timestamp from log time."
+  (let* ((out (make-string-output-stream))
+         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+    (with-log-buffer ()
+      (bark:info "msg1")
+      (bark:info "msg2"))
+    (let* ((result (get-output-stream-string out))
+           (lines (remove-if (lambda (s) (string= s ""))
+                             (uiop:split-string result :separator '(#\Newline)))))
+      ;; Both lines should have ts fields (positive integers)
+      (5am:is (= 2 (length lines)))
+      (let ((ts1 (gethash "ts" (yason:parse (first lines))))
+            (ts2 (gethash "ts" (yason:parse (second lines)))))
+        (5am:is (plusp ts1))
+        (5am:is (plusp ts2))
+        (5am:is (<= ts1 ts2))))))
+
+(5am:test test-with-log-buffer-explicit-logger-bypasses
+  "Explicit logger arg bypasses the buffer."
+  (let* ((buf-out (make-string-output-stream))
+         (direct-out (make-string-output-stream))
+         (*logger* (make-logger :name "buf" :level :info :formatter #'json-formatter :output buf-out))
+         (direct-lgr (make-logger :name "direct" :level :info :formatter #'json-formatter
+                                  :output direct-out)))
+    (with-log-buffer ()
+      (bark:info "buffered")
+      (bark:info direct-lgr "direct"))
+    ;; "buffered" goes through buffer → buf-out
+    ;; "direct" goes directly to direct-out (bypasses buffer)
+    (5am:is-true (search "buffered" (get-output-stream-string buf-out)))
+    (5am:is-true (search "direct" (get-output-stream-string direct-out)))))
+
+(5am:test test-with-log-buffer-nil-logger-noop
+  "with-log-buffer with *logger* nil is a no-op (body still runs)."
+  (let ((*logger* nil)
+        (ran nil))
+    (with-log-buffer ()
+      (setf ran t))
+    (5am:is-true ran)))

@@ -84,6 +84,49 @@
                   (stream (write-string line output) (terpri output) (force-output output))
                   (function (funcall output line)))))))))
 
+;;; --- Root logger tracking ---
+
+(defvar *root-logger* nil
+  "The non-buffer logger that all buffer scopes flush through.
+   Bound by the outermost with-log-buffer; inner scopes read but don't rebind.")
+
+;;; --- with-log-buffer ---
+
+(defmacro with-log-buffer ((&key (level :trace) on-flush) &body body)
+  "Execute BODY with log calls buffered. At scope exit, decide which entries to emit.
+   LEVEL is the capture threshold (default :trace). ON-FLUSH, if provided, is called
+   as (funcall on-flush entries condition normal-exit-p) to select entries to emit."
+  (let ((buffer (gensym "BUFFER"))
+        (condition (gensym "CONDITION"))
+        (normal-exit-p (gensym "NORMAL-EXIT-P"))
+        (root (gensym "ROOT"))
+        (original-level (gensym "ORIG-LEVEL"))
+        (buf-lgr (gensym "BUF-LGR"))
+        (on-flush-fn (gensym "ON-FLUSH"))
+        (buffer-level (gensym "BUF-LEVEL")))
+    `(if (null *logger*)
+         ;; No logger — just run body
+         (progn ,@body)
+         (let* ((,buffer-level (level-from-keyword ,level))
+                (,original-level (logger-level *logger*))
+                (,buffer (make-array 32 :adjustable t :fill-pointer 0))
+                (,on-flush-fn ,on-flush)
+                (,root (or *root-logger* *logger*))
+                (,buf-lgr (make-buffer-logger *logger* ,buffer-level ,buffer))
+                (,condition nil)
+                (,normal-exit-p nil))
+           (let ((*root-logger* ,root))
+             (unwind-protect
+                 (handler-bind ((serious-condition
+                                  (lambda (c)
+                                    (unless ,condition (setf ,condition c)))))
+                   (multiple-value-prog1
+                       (let ((*logger* ,buf-lgr))
+                         ,@body)
+                     (setf ,normal-exit-p t)))
+               (flush-buffer ,buffer ,root ,normal-exit-p ,condition
+                             ,on-flush-fn ,original-level)))))))
+
 (defun flush-buffer (buffer root-logger normal-exit-p condition on-flush original-level)
   "Flush BUFFER entries through ROOT-LOGGER. Selection logic:
    - on-flush provided: delegate to callback (entries, condition, normal-exit-p).
