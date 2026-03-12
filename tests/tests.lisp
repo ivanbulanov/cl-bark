@@ -31,6 +31,8 @@
    #:*max-json-stack-frames* #:*max-pretty-stack-frames*
    ;; Utilities
    #:noop #:make-list-collector
+   ;; Field transform
+   #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
    #:make-logger #:child #:set-level #:set-sampling #:start #:stop
    #:json-formatter #:logfmt-formatter #:pretty-formatter
@@ -1703,3 +1705,141 @@
                (err (gethash "last-err" parsed)))
           (5am:is (hash-table-p err))
           (5am:is (string= "simple-error" (gethash "type" err))))))))
+
+;;; --- Field Transform: Redaction ---
+
+(5am:test test-field-transform-drop-per-call
+  "Field transform drops per-call fields when returning (values nil nil)."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+                          :field-transform (lambda (key value)
+                                            (if (eq key :secret)
+                                                (values nil nil)
+                                                value)))))
+      (funcall (logger-info-fn l) l "login" :user "alice" :secret "hunter2"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"user\":\"alice\"" result))
+      (5am:is-false (search "secret" result))
+      (5am:is-false (search "hunter2" result)))))
+
+(5am:test test-field-transform-mask-value
+  "Field transform masks a value by returning a replacement."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+                          :field-transform (lambda (key value)
+                                            (if (eq key :token)
+                                                "****"
+                                                value)))))
+      (funcall (logger-info-fn l) l "auth" :token "abc-secret-123" :method "oauth"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"token\":\"****\"" result))
+      (5am:is-false (search "abc-secret-123" result))
+      (5am:is-true (search "\"method\":\"oauth\"" result)))))
+
+(5am:test test-field-transform-passthrough
+  "Field transform returning value unchanged is a no-op."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+                          :field-transform (lambda (key value)
+                                            (declare (ignore key))
+                                            value))))
+      (funcall (logger-info-fn l) l "msg" :a 1 :b "two"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"a\":1" result))
+      (5am:is-true (search "\"b\":\"two\"" result)))))
+
+(5am:test test-field-transform-on-dynamic-context
+  "Field transform applies to dynamic context fields."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+                          :field-transform (lambda (key value)
+                                            (if (eq key :password)
+                                                (values nil nil)
+                                                value)))))
+      (let ((*logger* l)
+            (*log-context* (list (cons :request-id "req-1") (cons :password "secret"))))
+        (funcall (logger-info-fn l) l "request" :path "/api")))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"request-id\":\"req-1\"" result))
+      (5am:is-false (search "password" result))
+      (5am:is-false (search "secret" result))
+      (5am:is-true (search "\"path\":\"/api\"" result)))))
+
+(5am:test test-field-transform-on-child-static-bindings
+  "Field transform applies to child logger static bindings at creation time."
+  (let ((out (make-string-output-stream)))
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+                                :field-transform (lambda (key value)
+                                                   (if (eq key :secret)
+                                                       (values nil nil)
+                                                       value))))
+           (ch (bark:child parent :component "auth" :secret "key-abc")))
+      (funcall (logger-info-fn ch) ch "hello"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"component\":\"auth\"" result))
+      (5am:is-false (search "secret" result))
+      (5am:is-false (search "key-abc" result)))))
+
+(5am:test test-field-transform-nil-means-no-transform
+  "A nil field-transform slot means no transformation (default)."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output out)))
+      (5am:is (null (logger-field-transform l)))
+      (funcall (logger-info-fn l) l "msg" :key "val"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"key\":\"val\"" result)))))
+
+(5am:test test-field-transform-inherited-by-child
+  "Child inherits parent's field-transform."
+  (let ((out (make-string-output-stream)))
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+                                :field-transform (lambda (key value)
+                                                   (if (eq key :secret)
+                                                       (values nil nil)
+                                                       value))))
+           (ch (bark:child parent :component "db")))
+      (funcall (logger-info-fn ch) ch "query" :sql "SELECT 1" :secret "pw"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"sql\":\"SELECT 1\"" result))
+      (5am:is-false (search "secret" result)))))
+
+(5am:test test-field-transform-child-compose
+  "Child can add its own field-transform, composed with parent's."
+  (let ((out (make-string-output-stream)))
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+                                :field-transform (lambda (key value)
+                                                   (if (eq key :secret)
+                                                       (values nil nil)
+                                                       value))))
+           (ch (bark:child parent :component "auth"
+                                  :field-transform (lambda (key value)
+                                                     (if (eq key :token)
+                                                         "****"
+                                                         value)))))
+      (funcall (logger-info-fn ch) ch "login" :user "alice" :secret "pw" :token "xyz"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "\"user\":\"alice\"" result))
+      (5am:is-false (search "secret" result))
+      (5am:is-true (search "\"token\":\"****\"" result))
+      (5am:is-false (search "xyz" result)))))
+
+(5am:test test-compose-field-transforms-nil-cases
+  "compose-field-transforms handles nil inputs correctly."
+  (let ((xform (lambda (k v) (declare (ignore k)) (string-upcase v))))
+    (5am:is (null (compose-field-transforms nil nil)))
+    (5am:is (eq xform (compose-field-transforms xform nil)))
+    (5am:is (eq xform (compose-field-transforms nil xform)))))
+
+(5am:test test-field-transform-with-logfmt
+  "Field transform works with logfmt formatter too."
+  (let ((out (make-string-output-stream)))
+    (let ((l (make-logger :level :info :formatter #'logfmt-formatter :output out
+                          :field-transform (lambda (key value)
+                                            (if (eq key :password)
+                                                (values nil nil)
+                                                value)))))
+      (funcall (logger-info-fn l) l "login" :user "alice" :password "secret"))
+    (let ((result (get-output-stream-string out)))
+      (5am:is-true (search "user=alice" result))
+      (5am:is-false (search "password" result))
+      (5am:is-false (search "secret" result)))))

@@ -25,6 +25,7 @@
            "*MAX-PRETTY-STACK-FRAMES*"
            "ASYNC-OUTPUT"
            "CHILD"
+           "COMPOSE-FIELD-TRANSFORMS"
            "DEBUG"
            "ERROR"
            "FATAL"

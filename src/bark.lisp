@@ -794,23 +794,54 @@ Specifying both :level and :filter is an error."
 
 (defstruct (logger (:constructor %make-logger))
   "A bark logger instance."
-  (name         ""    :type string :read-only t)
-  (level        +info+ :type fixnum)
-  (chindings    ""    :type string :read-only t)
-  (raw-bindings nil   :type list :read-only t)
-  (formatter    nil   :type (or null function))
-  (output       nil   :type t)
-  (sampler      nil   :type (or null simple-vector))
-  (trace-fn     #'noop :type function)
-  (debug-fn     #'noop :type function)
-  (info-fn      #'noop :type function)
-  (warn-fn      #'noop :type function)
-  (error-fn     #'noop :type function)
-  (fatal-fn     #'noop :type function))
+  (name            ""    :type string :read-only t)
+  (level           +info+ :type fixnum)
+  (chindings       ""    :type string :read-only t)
+  (raw-bindings    nil   :type list :read-only t)
+  (formatter       nil   :type (or null function))
+  (output          nil   :type t)
+  (sampler         nil   :type (or null simple-vector))
+  (field-transform nil   :type (or null function))
+  (trace-fn        #'noop :type function)
+  (debug-fn        #'noop :type function)
+  (info-fn         #'noop :type function)
+  (warn-fn         #'noop :type function)
+  (error-fn        #'noop :type function)
+  (fatal-fn        #'noop :type function))
 
 (defvar *logger* nil "The current bark logger.")
 
 (defvar *log-context* nil "Dynamic context bindings for the current log scope.")
+
+(defun apply-field-transform-plist (transform plist)
+  "Apply TRANSFORM to each key-value pair in PLIST. Returns a new plist with
+   transformed values. Pairs where TRANSFORM returns NIL as second value are dropped."
+  (declare (type function transform))
+  (loop for (k v) on plist by #'cddr
+        for keep = (multiple-value-list (funcall transform k v))
+        when (or (null (cdr keep)) (second keep))
+          collect k and collect (first keep)))
+
+(defun apply-field-transform-alist (transform alist)
+  "Apply TRANSFORM to each pair in ALIST (dynamic context). Returns a new alist.
+   Pairs where TRANSFORM returns NIL as second value are dropped."
+  (declare (type function transform))
+  (loop for (k . v) in alist
+        for keep = (multiple-value-list (funcall transform k v))
+        when (or (null (cdr keep)) (second keep))
+          collect (cons k (first keep))))
+
+(defun compose-field-transforms (outer inner)
+  "Compose two field transforms. INNER runs first, then OUTER on the result.
+   If either is NIL, returns the other."
+  (cond
+    ((null outer) inner)
+    ((null inner) outer)
+    (t (lambda (key value)
+         (let ((results (multiple-value-list (funcall inner key value))))
+           (if (and (cdr results) (null (second results)))
+               (values nil nil)
+               (funcall outer key (first results))))))))
 
 (declaim (ftype (function (fixnum) (values function &optional)) make-log-fn))
 
@@ -830,32 +861,40 @@ Specifying both :level and :filter is an error."
                       (rate (the fixnum (car sample-state))))
                   (unless (zerop (the fixnum (mod count rate)))
                     (return-from log-fn (values))))))))
-        (let ((output (logger-output lgr)))
+        (let ((output (logger-output lgr))
+              (transform (logger-field-transform lgr)))
           (when output
-            (if (tee-output-p output)
-                (emit-to-tee output level-value
-                             (logger-chindings lgr) (logger-raw-bindings lgr)
-                             *log-context* message fields)
-                (let ((line (funcall (the function (logger-formatter lgr))
-                                     level-value
-                                     (logger-chindings lgr)
-                                     (logger-raw-bindings lgr)
-                                     *log-context*
-                                     message
-                                     fields)))
-                  (if (async-output-p output)
-                      (progn
-                        (ring-buffer-push (async-output-ring output) line)
-                        (bt:signal-semaphore (async-output-notify output)))
-                      (etypecase output
-                        (stream (write-string line output) (terpri output) (force-output output))
-                        (function (funcall output line)))))))
-        (values))))))
+            (let ((ctx (if transform
+                           (apply-field-transform-alist transform *log-context*)
+                           *log-context*))
+                  (flds (if transform
+                            (apply-field-transform-plist transform fields)
+                            fields)))
+              (if (tee-output-p output)
+                  (emit-to-tee output level-value
+                               (logger-chindings lgr) (logger-raw-bindings lgr)
+                               ctx message flds)
+                  (let ((line (funcall (the function (logger-formatter lgr))
+                                       level-value
+                                       (logger-chindings lgr)
+                                       (logger-raw-bindings lgr)
+                                       ctx
+                                       message
+                                       flds)))
+                    (if (async-output-p output)
+                        (progn
+                          (ring-buffer-push (async-output-ring output) line)
+                          (bt:signal-semaphore (async-output-notify output)))
+                        (etypecase output
+                          (stream (write-string line output) (terpri output) (force-output output))
+                          (function (funcall output line)))))))))
+        (values)))))
 
-(declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function) (:output t))
- (values logger &optional)) make-logger))
+(declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function)
+                                (:output t) (:field-transform (or null function)))
+                          (values logger &optional)) make-logger))
 
-(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output)
+(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output field-transform)
   "Create a new logger."
   (let* ((chindings (if (string= name "")
                         ""
@@ -870,7 +909,8 @@ Specifying both :level and :filter is an error."
                :chindings chindings
                :raw-bindings raw-bindings
                :formatter formatter
-               :output output)))
+               :output output
+               :field-transform field-transform)))
     (set-level lgr level)
     lgr))
 
@@ -905,11 +945,24 @@ Specifying both :level and :filter is an error."
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
 
 (defun child (parent &rest bindings)
-  "Create a child logger from PARENT with additional BINDINGS pre-serialized."
-  (let* ((new-chindings (concatenate 'string
+  "Create a child logger from PARENT with additional BINDINGS pre-serialized.
+   Inherits the parent's field-transform. When BINDINGS include :field-transform,
+   the value is composed with the parent's transform (child runs after parent)."
+  (let* ((child-transform (getf bindings :field-transform))
+         (clean-bindings (if child-transform
+                             (loop for (k v) on bindings by #'cddr
+                                   unless (eq k :field-transform)
+                                     collect k and collect v)
+                             bindings))
+         (parent-transform (logger-field-transform parent))
+         (composed-transform (compose-field-transforms child-transform parent-transform))
+         (effective-bindings (if composed-transform
+                                 (apply-field-transform-plist composed-transform clean-bindings)
+                                 clean-bindings))
+         (new-chindings (concatenate 'string
                                       (logger-chindings parent)
-                                      (serialize-bindings bindings)))
-         (new-raw-bindings (append (logger-raw-bindings parent) bindings))
+                                      (serialize-bindings effective-bindings)))
+         (new-raw-bindings (append (logger-raw-bindings parent) effective-bindings))
          (child (%make-logger
                  :name (logger-name parent)
                  :level (logger-level parent)
@@ -917,7 +970,8 @@ Specifying both :level and :filter is an error."
                  :raw-bindings new-raw-bindings
                  :formatter (logger-formatter parent)
                  :output (logger-output parent)
-                 :sampler (logger-sampler parent))))
+                 :sampler (logger-sampler parent)
+                 :field-transform composed-transform)))
     (set-level child (logger-level parent))
     child))
 
@@ -939,15 +993,18 @@ Specifying both :level and :filter is an error."
 
 (declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
                                 (:name string) (:capacity fixnum) (:on-drop (or null function))
-                                (:context list))
+                                (:context list) (:field-transform (or null function)))
                           (values logger &optional)) start))
 
 (defun start (&key output (level :info) (formatter #'json-formatter)
-                   (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop) context)
+                   (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                   context field-transform)
   "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
 When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
 When OUTPUT is a tee-output, the async-outputs are already created.
-CONTEXT, when provided, is a plist of static context fields."
+CONTEXT, when provided, is a plist of static context fields.
+FIELD-TRANSFORM, when provided, is a function (lambda (key value) -> (values new-value keep-p))
+that is called on each field before serialization. Return (values nil nil) to drop a field."
   (when (and *logger* (logger-output *logger*))
     (stop))
   (let* ((actual-output (cond
@@ -968,7 +1025,8 @@ CONTEXT, when provided, is a plist of static context fields."
                :chindings chindings
                :raw-bindings raw-bindings
                :formatter formatter
-               :output actual-output)))
+               :output actual-output
+               :field-transform field-transform)))
     (set-level lgr level)
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 

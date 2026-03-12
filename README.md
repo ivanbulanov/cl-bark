@@ -48,6 +48,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Compile-time elimination** — set `*compile-time-max-level*` before compiling to strip calls entirely
 - **Pluggable formatters** — JSON Lines (production), logfmt (compact), pretty (ANSI-colored REPL)
 - **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
+- **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
 - **Bounded async buffer** — configurable ring buffer capacity with drop-on-full per destination
 - **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
 
@@ -81,7 +82,7 @@ Dispatch via `logger-p` on the first argument at runtime (struct type tag check,
 
 ```lisp
 ;; Create a logger (sync or with custom output)
-(bark:make-logger &key (name "") (level :info) (formatter #'json-formatter) output)
+(bark:make-logger &key (name "") (level :info) (formatter #'json-formatter) output field-transform)
 
 ;; Create child logger with static context (pre-serialized fields)
 (bark:child parent &rest context)
@@ -99,7 +100,7 @@ Dispatch via `logger-p` on the first argument at runtime (struct type tag check,
 ;; Start global async logger
 (bark:start &key output (level :info) (formatter #'json-formatter)
                  (name "") (capacity 8192) (on-drop #'bark::default-on-drop)
-                 context)
+                 context field-transform)
 
 ;; Stop and flush all writer threads
 (bark:stop)
@@ -108,6 +109,8 @@ Dispatch via `logger-p` on the first argument at runtime (struct type tag check,
 `:output` accepts a stream, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL (defaults to `*error-output*`). When `:output` is a plain stream, `start` wraps it in an async-output. When `:output` is a tee-output, the async-outputs are already created.
 
 `:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields.
+
+`:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
 
 ### Multi-Output
 
@@ -263,6 +266,57 @@ Stack frame limits:
 (setf bark:*max-json-stack-frames* 20)    ; default 10, NIL = unlimited
 (setf bark:*max-pretty-stack-frames* 30)  ; default 20, NIL = unlimited
 ```
+
+### Field Redaction
+
+A `:field-transform` on a logger intercepts every field (key-value pair) before serialization. Use it to drop sensitive fields or mask values.
+
+The transform is a function `(lambda (key value) ...)` returning:
+- The (possibly modified) value to keep the field
+- `(values nil nil)` (two values, second nil) to drop the field entirely
+
+```lisp
+;; Drop :password fields, mask :token values
+(bark:start :name "myapp" :level :info
+            :field-transform (lambda (key value)
+                               (case key
+                                 (:password (values nil nil))
+                                 (:token    "****")
+                                 (t         value))))
+
+(bark:info "login" :user "alice" :password "hunter2" :token "abc-xyz")
+;; => {"level":30,...,"user":"alice","token":"****","msg":"login"}
+;; :password is gone, :token is masked
+```
+
+The transform applies to **all three field sources**:
+
+| Source | When applied |
+|--------|-------------|
+| Per-call fields | At log call time, before formatting |
+| Dynamic context | At log call time, before formatting |
+| Static context (child) | At `child` creation time, before pre-serialization |
+
+**Inheritance.** Children inherit the parent's transform. A child can add its own via `:field-transform` in the bindings — it composes with the parent's (parent runs first, then child):
+
+```lisp
+(let* ((parent (bark:make-logger :name "app" :level :info :output stream
+                                 :field-transform (lambda (key value)
+                                                    (if (eq key :secret)
+                                                        (values nil nil)
+                                                        value))))
+       ;; Child adds token masking on top of parent's secret dropping
+       (child (bark:child parent :component "auth"
+                                 :field-transform (lambda (key value)
+                                                    (if (eq key :token)
+                                                        "****"
+                                                        value)))))
+  (let ((bark:*logger* child))
+    (bark:info "login" :user "alice" :secret "pw" :token "xyz")))
+;; => :secret dropped (parent), :token masked (child)
+```
+
+**Cost.** One `funcall` per field when the slot is non-nil. When nil (the default), zero overhead — the transform check is a null-pointer test in the hot path.
 
 ### Formatters
 
@@ -588,6 +642,7 @@ Producer threads              Writer thread
 | Log call (buffer full, drop) | ~20ns (atomic-incf dropped) — formatting skipped |
 | Writer drain (per message) | ~50ns (pop + write-string) |
 | Explicit logger dispatch | ~1ns (struct type tag check on first argument) |
+| Field transform (per field) | ~10ns (funcall) — only when transform is non-nil |
 
 Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is <5% of total log call time. The shared formatter optimization reduces tee overhead when destinations share a formatter.
 
