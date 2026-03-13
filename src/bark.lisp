@@ -248,7 +248,7 @@
     (string k)
     (symbol (key-string k))
     (pathname (namestring k))
-    (t (type-name-string k))))
+    (t (princ-to-string k))))
 
 (defun emit-json-value (stream value &optional (depth *max-json-depth*))
   "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
@@ -683,8 +683,9 @@
   (running   nil :type boolean)
   (on-drop   nil :type (or null function))
   (on-error  nil :type (or null function))
-  (notify    nil :type t)
-  (flush-ack nil :type t))
+  (notify     nil :type t)
+  (flush-lock nil :type t)
+  (flush-acks nil :type list))
 
 (declaim (ftype (function (t &key (:capacity fixnum) (:on-drop (or null function)) (:on-error (or null function)))
                           (values async-output &optional)) make-async-output))
@@ -698,7 +699,8 @@
               :running t
               :on-drop on-drop
               :on-error on-error
-              :notify notify)))
+              :notify notify
+              :flush-lock (bt:make-lock "bark-flush"))))
     (let ((err-output *error-output*))
       (setf (async-output-thread ao)
             (bt:make-thread (lambda ()
@@ -713,7 +715,8 @@
   "Flush the async writer. Blocks until current queue is drained."
   (when (and async-output (async-output-running async-output))
     (let ((ack (bt:make-semaphore :name "bark-flush-ack")))
-      (setf (async-output-flush-ack async-output) ack)
+      (bt:with-lock-held ((async-output-flush-lock async-output))
+        (push ack (async-output-flush-acks async-output)))
       (bt:signal-semaphore (async-output-notify async-output))
       (bt:wait-on-semaphore ack :timeout 5.0)))
   nil)
@@ -788,9 +791,10 @@
                       (handler-case
                           (progn (write-string warning stream) (terpri stream) (force-output stream))
                         (cl:error () nil)))))))))
-        (let ((ack (async-output-flush-ack async-output)))
-          (when ack
-            (setf (async-output-flush-ack async-output) nil)
+        (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
+                      (prog1 (async-output-flush-acks async-output)
+                        (setf (async-output-flush-acks async-output) nil)))))
+          (dolist (ack acks)
             (bt:signal-semaphore ack)))))))
 
 ;;; --- Multi-Output ---
@@ -945,19 +949,27 @@ Specifying both :level and :filter is an error."
   "Apply TRANSFORM to each key-value pair in PLIST. Returns a new plist with
    transformed values. Pairs where TRANSFORM returns NIL as second value are dropped."
   (declare (type function transform))
-  (loop for (k v) on plist by #'cddr
-        for keep = (multiple-value-list (funcall transform k v))
-        when (or (null (cdr keep)) (second keep))
-          collect k and collect (first keep)))
+  (let (new-val drop-p)
+    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+             (setf new-val val
+                   drop-p (and keep-supplied-p (not keep-p)))))
+      (declare (dynamic-extent #'receive))
+      (loop for (k v) on plist by #'cddr
+            do (multiple-value-call #'receive (funcall transform k v))
+            unless drop-p collect k and collect new-val))))
 
 (defun apply-field-transform-alist (transform alist)
   "Apply TRANSFORM to each pair in ALIST (dynamic context). Returns a new alist.
    Pairs where TRANSFORM returns NIL as second value are dropped."
   (declare (type function transform))
-  (loop for (k . v) in alist
-        for keep = (multiple-value-list (funcall transform k v))
-        when (or (null (cdr keep)) (second keep))
-          collect (cons k (first keep))))
+  (let (new-val drop-p)
+    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+             (setf new-val val
+                   drop-p (and keep-supplied-p (not keep-p)))))
+      (declare (dynamic-extent #'receive))
+      (loop for (k . v) in alist
+            do (multiple-value-call #'receive (funcall transform k v))
+            unless drop-p collect (cons k new-val)))))
 
 (defun compose-field-transforms (outer inner)
   "Compose two field transforms. INNER runs first, then OUTER on the result.
@@ -966,10 +978,15 @@ Specifying both :level and :filter is an error."
     ((null outer) inner)
     ((null inner) outer)
     (t (lambda (key value)
-         (let ((results (multiple-value-list (funcall inner key value))))
-           (if (and (cdr results) (null (second results)))
+         (let (inner-val drop-p)
+           (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+                    (setf inner-val val
+                          drop-p (and keep-supplied-p (not keep-p)))))
+             (declare (dynamic-extent #'receive))
+             (multiple-value-call #'receive (funcall inner key value)))
+           (if drop-p
                (values nil nil)
-               (funcall outer key (first results))))))))
+               (funcall outer key inner-val)))))))
 
 (declaim (ftype (function (fixnum) (values function &optional)) make-log-fn))
 

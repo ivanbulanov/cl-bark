@@ -218,14 +218,25 @@
       (5am:is-true (search "\"/tmp/log\":42" r)))))
 
 (5am:test test-emit-json-value-hash-table-unsupported-keys
-  "Hash-tables with unsupported key types produce type-name keys."
+  "Hash-tables with non-string/symbol/pathname keys use princ-to-string."
   (let ((h (make-hash-table :test 'equal)))
     (setf (gethash 42 h) "the-answer")
     (let ((r (with-output-to-string (s) (emit-json-value s h))))
-      ;; Integer key becomes type placeholder (type-of 42 is implementation-dependent)
-      (5am:is-true (search "\"the-answer\"" r))
-      ;; Key should not be "42" (raw number as string)
-      (5am:is-false (string= "{\"42\":\"the-answer\"}" r)))))
+      (5am:is (string= "{\"42\":\"the-answer\"}" r)))))
+
+(5am:test test-emit-json-value-hash-table-integer-keys-no-collision
+  "Distinct integer hash keys produce distinct JSON keys, not colliding type names."
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash 42 h) "a" (gethash 99 h) "b")
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      ;; Both keys must appear with their actual values
+      (5am:is-true (search "\"42\"" r))
+      (5am:is-true (search "\"99\"" r))
+      ;; Both values must be present (no collision/overwrite)
+      (5am:is-true (search "\"a\"" r))
+      (5am:is-true (search "\"b\"" r))
+      ;; Must be valid JSON
+      (5am:is (hash-table-p (yason:parse r))))))
 
 (5am:test test-emit-json-value-fallback-placeholder
   "Unsupported types produce <type-name> placeholder."
@@ -642,6 +653,30 @@
     (bark::flush-async-output ao)
     (let ((result (get-output-stream-string out)))
       (5am:is (= 5 (count #\Newline result))))
+    (bark::stop-async-output ao)))
+
+(5am:test test-flush-async-output-concurrent
+  "Concurrent flush-async-output calls must all complete without hanging."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 64))
+         (threads nil)
+         (all-flushed (bt:make-semaphore :name "all-flushed")))
+    ;; Launch 4 threads that all flush concurrently
+    (dotimes (i 4)
+      (push (bt:make-thread
+             (lambda ()
+               (bark::ring-buffer-push (bark::async-output-ring ao)
+                                       (format nil "msg-~d" i))
+               (bt:signal-semaphore (bark::async-output-notify ao))
+               (bark::flush-async-output ao)
+               (bt:signal-semaphore all-flushed))
+             :name (format nil "flusher-~d" i))
+            threads))
+    ;; All 4 must complete within 2 seconds (not 5s timeout each)
+    (dotimes (i 4)
+      (5am:is-true (bt:wait-on-semaphore all-flushed :timeout 2.0)
+                   "Flush ~d timed out — flush-ack race" i))
+    (dolist (th threads) (bt:join-thread th))
     (bark::stop-async-output ao)))
 
 ;;; --- Helpers ---
