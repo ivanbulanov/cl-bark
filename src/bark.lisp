@@ -152,7 +152,7 @@
   "Return the type of VALUE as a lowercase string."
   (string-downcase (princ-to-string (type-of value))))
 
-(defvar *key-string-cache* (make-hash-table :test 'eq)
+(defvar *key-string-cache* (make-hash-table :test 'eq #+sbcl :synchronized #+sbcl t)
   "Cache for symbol → downcased string. Bounded by *key-string-cache-limit*.")
 
 (defvar *key-string-cache-limit* 1024
@@ -238,7 +238,7 @@
   (write-string ",\"" stream)
   (typecase key
     (string (write-json-escaped-string key stream))
-    (symbol (write-string (key-string key) stream))
+    (symbol (write-json-escaped-string (key-string key) stream))
     (t (write-json-escaped-string (princ-to-string key) stream)))
   (write-string "\":" stream))
 
@@ -272,7 +272,8 @@
                  for i from 0
                  for first = t then nil
                  when (>= i *max-json-length*)
-                   do (write-string ",\"...\"" stream)
+                   do (unless first (write-char #\, stream))
+                      (write-string "\"...\"" stream)
                       (loop-finish)
                  unless first do (write-char #\, stream)
                  do (emit-json-value stream (car cell) (1- depth))
@@ -288,7 +289,8 @@
            (write-char #\[ stream)
            (loop for i from 0 below len
                  when (>= i *max-json-length*)
-                   do (write-string ",\"...\"" stream)
+                   do (when (plusp i) (write-char #\, stream))
+                      (write-string "\"...\"" stream)
                       (loop-finish)
                  when (plusp i) do (write-char #\, stream)
                  do (emit-json-value stream (aref value i) (1- depth)))
@@ -302,7 +304,8 @@
            (block hash-done
              (maphash (lambda (k v)
                         (when (>= count *max-json-length*)
-                          (write-string ",\"...\":\"...\"" stream)
+                          (unless first (write-char #\, stream))
+                          (write-string "\"...\":\"...\"" stream)
                           (return-from hash-done))
                         (if first (setf first nil) (write-char #\, stream))
                         (write-char #\" stream)
@@ -774,15 +777,17 @@
               (cl:error (e) (handle-stream-error e)))))
         (let ((dropped (ring-buffer-dropped ring)))
           (when (plusp dropped)
-            (loop for old = (ring-buffer-dropped ring)
-                  until (atomics:cas (ring-buffer-dropped ring) old 0))
-            (let ((on-drop (async-output-on-drop async-output)))
-              (when on-drop
-                (let ((warning (funcall on-drop dropped)))
-                  (when warning
-                    (handler-case
-                        (progn (write-string warning stream) (terpri stream) (force-output stream))
-                      (cl:error () nil))))))))
+            (let ((actual-dropped
+                    (loop for old = (ring-buffer-dropped ring)
+                          when (atomics:cas (ring-buffer-dropped ring) old 0)
+                            return old)))
+              (let ((on-drop (async-output-on-drop async-output)))
+                (when on-drop
+                  (let ((warning (funcall on-drop actual-dropped)))
+                    (when warning
+                      (handler-case
+                          (progn (write-string warning stream) (terpri stream) (force-output stream))
+                        (cl:error () nil)))))))))
         (let ((ack (async-output-flush-ack async-output)))
           (when ack
             (setf (async-output-flush-ack async-output) nil)

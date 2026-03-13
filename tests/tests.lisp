@@ -2704,3 +2704,59 @@
       ;; (the trailing newline from terpri is OK, but there must not be a mid-line break)
       (let ((lines (remove "" (uiop:split-string s :separator '(#\Newline)) :test #'string=)))
         (5am:is (= 1 (length lines)) "logfmt output must be a single line")))))
+
+;;; --- Bug fix: JSON truncation with *max-json-length* = 0 ---
+
+(5am:test (test-emit-json-value-length-zero-cons :suite bark-tests)
+  "Cons with *max-json-length*=0 produces valid JSON (no leading comma)."
+  (let ((bark:*max-json-length* 0))
+    (let ((r (with-output-to-string (s) (emit-json-value s '(1 2 3)))))
+      (5am:is (string= "[\"...\"]" r)))))
+
+(5am:test (test-emit-json-value-length-zero-vector :suite bark-tests)
+  "Vector with *max-json-length*=0 produces valid JSON (no leading comma)."
+  (let ((bark:*max-json-length* 0))
+    (let ((r (with-output-to-string (s) (emit-json-value s #(10 20 30)))))
+      (5am:is (string= "[\"...\"]" r)))))
+
+(5am:test (test-emit-json-value-length-zero-hash-table :suite bark-tests)
+  "*max-json-length*=0 hash-table produces valid JSON (no leading comma)."
+  (let ((bark:*max-json-length* 0)
+        (h (make-hash-table :test 'equal)))
+    (setf (gethash "a" h) 1)
+    (let ((r (with-output-to-string (s) (emit-json-value s h))))
+      ;; Must start with { and end with }, no leading comma after {
+      (5am:is (char= #\{ (char r 0)))
+      (5am:is (char= #\} (char r (1- (length r)))))
+      (5am:is-false (char= #\, (char r 1))
+                    "No leading comma after opening brace")
+      ;; Must be parseable as JSON
+      (5am:is (hash-table-p (yason:parse r))))))
+
+(5am:test (test-emit-json-value-length-zero-roundtrip :suite bark-tests)
+  "*max-json-length*=0 output is valid JSON for all collection types."
+  (let ((bark:*max-json-length* 0))
+    ;; Cons → parseable JSON array
+    (let ((r (with-output-to-string (s) (emit-json-value s '(1 2)))))
+      (5am:is (listp (yason:parse r))))
+    ;; Vector → parseable JSON array
+    (let ((r (with-output-to-string (s) (emit-json-value s #(1 2)))))
+      (5am:is (listp (yason:parse r))))
+    ;; Hash-table → parseable JSON object
+    (let* ((h (make-hash-table :test 'equal))
+           (_ (setf (gethash "k" h) "v"))
+           (r (with-output-to-string (s) (emit-json-value s h))))
+      (declare (ignore _))
+      (5am:is (hash-table-p (yason:parse r))))))
+
+;;; --- Bug fix: Symbol keys with special characters ---
+
+(5am:test (test-emit-json-key-symbol-with-special-chars :suite bark-tests)
+  "emit-json-key escapes special characters in symbol names."
+  ;; Symbol with a double-quote in its name
+  (let* ((sym (intern "KEY\"QUOTE" :keyword))
+         (r (with-output-to-string (s) (emit-json-key s sym))))
+    ;; Must contain escaped quote, not raw quote breaking the JSON
+    (5am:is-true (search "\\\"" r))
+    ;; The key should be properly delimited
+    (5am:is-true (search "\":" r))))
