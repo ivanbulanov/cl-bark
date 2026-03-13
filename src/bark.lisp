@@ -636,7 +636,7 @@
   (thereafter   100 :type fixnum :read-only t)
   (window-ticks 0   :type fixnum :read-only t)
   (count        0   :type (unsigned-byte 64))
-  (window-start 0   :type (unsigned-byte 64)))
+  (window-start 0   :type fixnum))
 
 (defstruct (consistent-sampler (:constructor %make-consistent-sampler))
   "Deterministic hash-based sampling. Same key always produces same decision."
@@ -658,11 +658,11 @@
   (zerop (mod (mix-hash (sxhash key)) rate)))
 
 (defun windowed-allow-p (count wc)
-  "Check if COUNT (old value from atomic-incf) passes the windowed counter thresholds."
+  "Check if COUNT (post-increment value from atomic-incf) passes the windowed counter thresholds."
   (declare (type (unsigned-byte 64) count))
   (let ((initial (windowed-counter-initial wc))
         (thereafter (windowed-counter-thereafter wc)))
-    (or (< count initial)
+    (or (<= count initial)
         (and (plusp thereafter)
              (zerop (mod count thereafter))))))
 
