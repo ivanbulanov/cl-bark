@@ -601,8 +601,8 @@
     (set-sampling lgr :debug 5)
     (5am:is-true (not (null (logger-sampler lgr))))
     (let ((entry (aref (logger-sampler lgr) 2)))
-      (5am:is-true (consp entry))
-      (5am:is (= 5 (car entry))))))
+      (5am:is-true (bark::sampling-state-p entry))
+      (5am:is (= 5 (bark::sampling-state-rate entry))))))
 
 (5am:test test-sampling-filters
   "Set sampling rate=2 on debug, log 10 debug messages, verify every other one passes."
@@ -2795,3 +2795,157 @@
     (5am:is-true (search "\\\"" r))
     ;; The key should be properly delimited
     (5am:is-true (search "\":" r))))
+
+;;; --- Bug fix: Double-float JSON serialization ---
+
+(5am:test (test-json-double-float-no-d-marker :suite bark-tests)
+  "Double-float values must not contain SBCL's d0 exponent marker in JSON output."
+  (let ((r (with-output-to-string (s) (emit-json-value s 0.042d0))))
+    (5am:is-false (search "d" r) "Double-float JSON should not contain 'd' marker: ~a" r)
+    (5am:is-false (search "D" r))
+    ;; Must be parseable as a number
+    (5am:is-true (search "0.042" r))))
+
+(5am:test (test-json-double-float-large :suite bark-tests)
+  "Large double-floats serialize as valid JSON numbers."
+  (let ((r (with-output-to-string (s) (emit-json-value s 1.0d10))))
+    (5am:is-false (search "d" r))
+    (5am:is-false (search "D" r))))
+
+(5am:test (test-json-double-float-small :suite bark-tests)
+  "Small double-floats serialize as valid JSON numbers."
+  (let ((r (with-output-to-string (s) (emit-json-value s 1.0d-10))))
+    (5am:is-false (search "d" r))
+    (5am:is-false (search "D" r))))
+
+(5am:test (test-json-double-float-pi :suite bark-tests)
+  "Pi serializes as a valid JSON number."
+  (let ((r (with-output-to-string (s) (emit-json-value s pi))))
+    (5am:is-false (search "d" r))
+    (5am:is-false (search "D" r))
+    (5am:is-true (search "3.14159" r))))
+
+(5am:test (test-json-double-float-roundtrip :suite bark-tests)
+  "Double-float in full pipeline produces valid parseable JSON."
+  (bark:with-captured-logs (logs)
+    (bark:info "elapsed" :dur 0.042d0)
+    (let* ((line (first (funcall logs)))
+           (parsed (yason:parse line)))
+      (5am:is (floatp (gethash "dur" parsed))))))
+
+;;; --- Bug fix: IEEE 754 special values ---
+
+(5am:test (test-json-float-nan :suite bark-tests)
+  "NaN float serializes as JSON null, not CL printer output."
+  (let* ((nan (sb-kernel:make-single-float #x7FC00000))
+         (r (with-output-to-string (s) (emit-json-value s nan))))
+    (5am:is (string= "null" r))))
+
+(5am:test (test-json-float-positive-infinity :suite bark-tests)
+  "Positive infinity serializes as JSON null."
+  (let* ((inf sb-ext:single-float-positive-infinity)
+         (r (with-output-to-string (s) (emit-json-value s inf))))
+    (5am:is (string= "null" r))))
+
+(5am:test (test-json-float-negative-infinity :suite bark-tests)
+  "Negative infinity serializes as JSON null."
+  (let* ((inf sb-ext:single-float-negative-infinity)
+         (r (with-output-to-string (s) (emit-json-value s inf))))
+    (5am:is (string= "null" r))))
+
+(5am:test (test-json-double-float-infinity :suite bark-tests)
+  "Double-float infinity serializes as JSON null."
+  (let* ((inf sb-ext:double-float-positive-infinity)
+         (r (with-output-to-string (s) (emit-json-value s inf))))
+    (5am:is (string= "null" r))))
+
+;;; --- Bug fix: logfmt float serialization ---
+
+(5am:test (test-logfmt-double-float-no-d-marker :suite bark-tests)
+  "Double-float values in logfmt must not contain SBCL's d0 exponent marker."
+  (let ((r (with-output-to-string (s) (emit-logfmt-value s 0.042d0))))
+    (5am:is-false (search "d" r))
+    (5am:is-false (search "D" r))
+    (5am:is-true (search "0.042" r))))
+
+(5am:test (test-logfmt-float-nan :suite bark-tests)
+  "NaN float in logfmt serializes as null."
+  (let* ((nan (sb-kernel:make-single-float #x7FC00000))
+         (r (with-output-to-string (s) (emit-logfmt-value s nan))))
+    (5am:is (string= "null" r))))
+
+(5am:test (test-logfmt-float-infinity :suite bark-tests)
+  "Infinity in logfmt serializes as null."
+  (let* ((inf sb-ext:single-float-positive-infinity)
+         (r (with-output-to-string (s) (emit-logfmt-value s inf))))
+    (5am:is (string= "null" r))))
+
+;;; --- Bug fix: stop-async-output drain error handling ---
+
+(5am:test (test-stop-async-output-closed-stream :suite bark-tests)
+  "stop-async-output does not crash when the stream is already closed."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 16)))
+    ;; Close the stream to simulate a failed output
+    (close (bark::async-output-stream ao))
+    ;; Push a message that the writer won't be able to write
+    (bark::ring-buffer-push (bark::async-output-ring ao) "msg")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (sleep 0.2)
+    ;; stop should not crash despite the closed stream
+    (5am:finishes (bark::stop-async-output ao))))
+
+;;; --- Bug fix: Writer-loop orphaned flush-acks ---
+
+(5am:test (test-flush-after-writer-exit-no-stall :suite bark-tests)
+  "flush-async-output returns quickly when writer thread has exited."
+  (let* ((ao (bark::make-async-output
+              (make-string-output-stream)
+              :capacity 16
+              :on-error (lambda (e) (declare (ignore e)) nil))))
+    ;; Force writer to exit by closing the stream
+    (close (bark::async-output-stream ao))
+    (bark::ring-buffer-push (bark::async-output-ring ao) "trigger-error")
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (sleep 0.3)
+    ;; Writer should have exited by now
+    (5am:is-false (bark::async-output-running ao))
+    ;; flush-async-output must return quickly (not stall for 5s)
+    (let ((start (get-internal-real-time)))
+      (bark::flush-async-output ao)
+      (let ((elapsed-ms (* 1000.0
+                           (/ (- (get-internal-real-time) start)
+                              internal-time-units-per-second))))
+        (5am:is-true (< elapsed-ms 1000)
+                     "flush-async-output stalled for ~Fms (should be < 1s)" elapsed-ms)))
+    ;; Clean up
+    (when (bark::async-output-thread ao)
+      (bt:join-thread (bark::async-output-thread ao)))))
+
+;;; --- Bug fix: Atomic sampling counter ---
+
+(5am:test (test-sampling-concurrent :suite bark-tests)
+  "Sampling counter is thread-safe under concurrent log calls."
+  (let* ((collected (make-array 0 :adjustable t :fill-pointer 0))
+         (lock (bt:make-lock "collect"))
+         (collector (lambda (line)
+                      (bt:with-lock-held (lock)
+                        (vector-push-extend line collected))))
+         (lgr (make-logger :name "conc" :level :debug
+                           :formatter #'json-formatter :output collector)))
+    (set-sampling lgr :debug 10)
+    (let ((threads nil))
+      (dotimes (tid 4)
+        (push (bt:make-thread
+               (lambda ()
+                 (let ((fn (logger-debug-fn lgr)))
+                   (dotimes (i 250)
+                     (funcall fn lgr (format nil "t~d-~d" tid i)))))
+               :name (format nil "sampler-~d" tid))
+              threads))
+      (dolist (th threads) (bt:join-thread th)))
+    ;; 4 threads * 250 messages = 1000 total at 1-in-10 rate
+    ;; Expect ~100, tolerance 40-160 (wide due to concurrency)
+    (let ((count (length collected)))
+      (5am:is-true (<= 40 count 160)
+                   "Expected ~100 sampled messages, got ~d" count))))

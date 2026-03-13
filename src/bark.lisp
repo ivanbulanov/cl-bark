@@ -257,7 +257,10 @@
     (string    (write-json-string stream value))
     (character (write-json-string stream (string value)))
     (integer (princ value stream))
-    (float (princ value stream))
+    (float (cond
+             ((or (sb-ext:float-nan-p value) (sb-ext:float-infinity-p value))
+              (write-string "null" stream))
+             (t (format stream "~F" value))))
     (ratio (format stream "~F" (coerce value 'double-float)))
     ((eql t) (write-string "true" stream))
     (null (write-string "null" stream))
@@ -391,7 +394,10 @@
     (string (logfmt-write-bare-or-quoted stream value))
     (character (write-string (string value) stream))
     (integer (princ value stream))
-    (float (princ value stream))
+    (float (cond
+             ((or (sb-ext:float-nan-p value) (sb-ext:float-infinity-p value))
+              (write-string "null" stream))
+             (t (format stream "~F" value))))
     (ratio (format stream "~F" (coerce value 'double-float)))
     (null (write-string "null" stream))
     (symbol (write-string (key-string value) stream))
@@ -618,6 +624,13 @@
 
 (defconstant +default-buffer-capacity+ 8192 "Default ring buffer capacity in log lines for async output. Power of two.")
 
+;;; --- Sampling State ---
+
+(defstruct sampling-state
+  "Thread-safe sampling counter for rate-limited log levels."
+  (rate    1 :type fixnum :read-only t)
+  (counter 0 :type (unsigned-byte 64)))
+
 ;;; --- Ring Buffer ---
 
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
@@ -733,10 +746,13 @@
       (bt:join-thread (async-output-thread async-output)))
     (let ((ring (async-output-ring async-output))
           (stream (async-output-stream async-output)))
-      (loop for line = (ring-buffer-pop ring) while line do
-        (write-string line stream)
-        (terpri stream))
-      (force-output stream))))
+      (handler-case
+          (progn
+            (loop for line = (ring-buffer-pop ring) while line do
+              (write-string line stream)
+              (terpri stream))
+            (force-output stream))
+        (cl:error () nil)))))
 
 (declaim (ftype (function (async-output) (values null &optional)) writer-loop))
 
@@ -795,7 +811,13 @@
                       (prog1 (async-output-flush-acks async-output)
                         (setf (async-output-flush-acks async-output) nil)))))
           (dolist (ack acks)
-            (bt:signal-semaphore ack)))))))
+            (bt:signal-semaphore ack)))))
+    ;; Drain any orphaned flush-acks so callers don't stall for the 5s timeout
+    (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
+                  (prog1 (async-output-flush-acks async-output)
+                    (setf (async-output-flush-acks async-output) nil)))))
+      (dolist (ack acks)
+        (bt:signal-semaphore ack)))))
 
 ;;; --- Multi-Output ---
 
@@ -1001,9 +1023,9 @@ Specifying both :level and :filter is an error."
         (let ((sampler (logger-sampler lgr)))
           (when (and sampler (aref sampler level-index))
             (let ((sample-state (aref sampler level-index)))
-              (when (consp sample-state)
-                (let ((count (the fixnum (incf (the fixnum (cdr sample-state)))))
-                      (rate (the fixnum (car sample-state))))
+              (when (sampling-state-p sample-state)
+                (let ((count (the fixnum (atomics:atomic-incf (sampling-state-counter sample-state))))
+                      (rate (the fixnum (sampling-state-rate sample-state))))
                   (unless (zerop (the fixnum (mod count rate)))
                     (return-from log-fn (values))))))))
         (let ((output (logger-output lgr))
@@ -1076,7 +1098,8 @@ Specifying both :level and :filter is an error."
                      (keyword (level-from-keyword level))))
         (sampler (or (logger-sampler logger)
                      (make-array +level-slot-count+ :initial-element nil))))
-    (setf (aref sampler (floor level-val +level-step+)) (cons rate (1- rate)))
+    (setf (aref sampler (floor level-val +level-step+))
+          (make-sampling-state :rate rate :counter (1- rate)))
     (setf (logger-sampler logger) sampler)))
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
