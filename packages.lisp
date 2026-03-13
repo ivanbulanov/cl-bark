@@ -43,7 +43,21 @@
            "MAKE-PRETTY-FORMATTER"
            "PRETTY-FORMATTER"
            "SET-LEVEL"
-           "SET-SAMPLING"
+           ;; Sampling — windowed counter
+           "MAKE-WINDOWED-COUNTER"
+           "MAKE-LEVEL-SAMPLER"
+           "SET-LEVEL-SAMPLING"
+           "WINDOWED-COUNTER-INITIAL"
+           "WINDOWED-COUNTER-THEREAFTER"
+           "WINDOWED-COUNTER-WINDOW-TICKS"
+           ;; Sampling — consistent
+           "MAKE-CONSISTENT-SAMPLER"
+           "SET-CONSISTENT"
+           "CONSISTENT-SAMPLER-KEY-FN"
+           "CONSISTENT-SAMPLER-RATE"
+           ;; Sampling — logger accessors
+           "LOGGER-LEVEL-SAMPLER"
+           "LOGGER-CONSISTENT"
            "FLUSH"
            "START"
            "STOP"

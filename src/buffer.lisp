@@ -36,8 +36,7 @@
               :raw-bindings (logger-raw-bindings original)
               :formatter (logger-formatter original)
               :output (logger-output original)
-              :field-transform nil
-              :sampler nil)))
+              :field-transform nil)))
     (setf (logger-level lgr) buffer-level)
     (wire-level-fns lgr buffer-level
                     (lambda (level) (make-buffer-capture-fn level buffer)))

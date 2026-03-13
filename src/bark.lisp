@@ -624,12 +624,54 @@
 
 (defconstant +default-buffer-capacity+ 8192 "Default ring buffer capacity in log lines for async output. Power of two.")
 
-;;; --- Sampling State ---
+;;; --- Sampling ---
 
-(defstruct sampling-state
-  "Thread-safe sampling counter for rate-limited log levels."
-  (rate    1 :type fixnum :read-only t)
-  (counter 0 :type (unsigned-byte 64)))
+(defconstant +window-check-interval+ 64
+  "How often the windowed counter reads the clock (in messages).
+   Must be power of 2 for bit-and optimization.")
+
+(defstruct (windowed-counter (:constructor %make-windowed-counter))
+  "Per-level sampling: first INITIAL per window always pass, then 1-in-THEREAFTER."
+  (initial      5   :type fixnum :read-only t)
+  (thereafter   100 :type fixnum :read-only t)
+  (window-ticks 0   :type fixnum :read-only t)
+  (count        0   :type (unsigned-byte 64))
+  (window-start 0   :type (unsigned-byte 64)))
+
+(defstruct (consistent-sampler (:constructor %make-consistent-sampler))
+  "Deterministic hash-based sampling. Same key always produces same decision."
+  (key-fn nil :type function    :read-only t)
+  (rate     1 :type (integer 1) :read-only t))
+
+(declaim (inline mix-hash consistent-hash-keep-p windowed-allow-p))
+
+(defun mix-hash (h)
+  "Multiply-xorshift finalizer for improved low-bit distribution."
+  (declare (type fixnum h))
+  (let* ((h (logxor h (ash h -16)))
+         (h (ldb (byte #.(integer-length most-positive-fixnum) 0)
+                 (* h 2654435769))))
+    (logxor h (ash h -13))))
+
+(defun consistent-hash-keep-p (key rate)
+  "Deterministic keep/drop decision based on key hash."
+  (zerop (mod (mix-hash (sxhash key)) rate)))
+
+(defun windowed-allow-p (count wc)
+  "Check if COUNT (old value from atomic-incf) passes the windowed counter thresholds."
+  (declare (type (unsigned-byte 64) count))
+  (let ((initial (windowed-counter-initial wc))
+        (thereafter (windowed-counter-thereafter wc)))
+    (or (< count initial)
+        (and (plusp thereafter)
+             (zerop (mod count thereafter))))))
+
+(defun maybe-reset-window (wc now)
+  "Reset window if expired. CAS ensures only one thread resets."
+  (let ((ws (windowed-counter-window-start wc)))
+    (when (>= (- now ws) (windowed-counter-window-ticks wc))
+      (when (atomics:cas (windowed-counter-window-start wc) ws now)
+        (setf (windowed-counter-count wc) 0)))))
 
 ;;; --- Ring Buffer ---
 
@@ -966,7 +1008,8 @@ Specifying both :level and :filter is an error."
   (raw-bindings    nil   :type list :read-only t)
   (formatter       nil   :type (or null function))
   (output          nil   :type t)
-  (sampler         nil   :type (or null simple-vector))
+  (level-sampler   nil   :type (or null simple-vector))
+  (consistent      nil   :type (or null consistent-sampler))
   (field-transform nil   :type (or null function))
   (trace-fn        #'noop :type function)
   (debug-fn        #'noop :type function)
@@ -1032,14 +1075,26 @@ Specifying both :level and :filter is an error."
     (lambda (lgr message &rest fields)
       (declare (ignorable lgr) (dynamic-extent fields))
       (block log-fn
-        (let ((sampler (logger-sampler lgr)))
-          (when (and sampler (aref sampler level-index))
-            (let ((sample-state (aref sampler level-index)))
-              (when (sampling-state-p sample-state)
-                (let ((count (the fixnum (atomics:atomic-incf (sampling-state-counter sample-state))))
-                      (rate (the fixnum (sampling-state-rate sample-state))))
-                  (unless (zerop (the fixnum (mod count rate)))
-                    (return-from log-fn (values))))))))
+        (block sampling
+          ;; 1. Consistent sampler
+          (let ((cs (logger-consistent lgr)))
+            (when cs
+              (let ((key (funcall (consistent-sampler-key-fn cs)
+                                  (logger-raw-bindings lgr))))
+                (when key
+                  (if (consistent-hash-keep-p key (consistent-sampler-rate cs))
+                      (return-from sampling)
+                      (return-from log-fn (values)))))))
+          ;; 2. Windowed counter
+          (let ((ls (logger-level-sampler lgr)))
+            (when ls
+              (let ((wc (aref ls level-index)))
+                (when wc
+                  (let ((count (atomics:atomic-incf (windowed-counter-count wc))))
+                    (when (zerop (logand count (1- +window-check-interval+)))
+                      (maybe-reset-window wc (get-internal-real-time)))
+                    (unless (windowed-allow-p count wc)
+                      (return-from log-fn (values)))))))))
         (let ((output (logger-output lgr))
               (transform (logger-field-transform lgr)))
           (when output
@@ -1056,10 +1111,13 @@ Specifying both :level and :filter is an error."
         (values)))))
 
 (declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function)
-                                (:output t) (:field-transform (or null function)))
+                                (:output t) (:field-transform (or null function))
+                                (:level-sampler (or null simple-vector))
+                                (:consistent (or null consistent-sampler)))
                           (values logger &optional)) make-logger))
 
-(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output field-transform)
+(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output
+                         field-transform level-sampler consistent)
   "Create a new logger."
   (let* ((chindings (if (string= name "")
                         ""
@@ -1075,7 +1133,9 @@ Specifying both :level and :filter is an error."
                :raw-bindings raw-bindings
                :formatter formatter
                :output output
-               :field-transform field-transform)))
+               :field-transform field-transform
+               :level-sampler level-sampler
+               :consistent consistent)))
     (set-level lgr level)
     lgr))
 
@@ -1101,18 +1161,58 @@ Specifying both :level and :filter is an error."
     (setf (logger-level logger) level-val)
     (wire-level-fns logger level-val #'make-log-fn)))
 
-(declaim (ftype (function (logger (or fixnum keyword) fixnum) (values t &optional)) set-sampling))
+;;; --- Sampling API ---
 
-(defun set-sampling (logger level rate)
-  "Set sampling for LEVEL to 1-in-RATE on LOGGER."
-  (let ((level-val (etypecase level
-                     (fixnum level)
-                     (keyword (level-from-keyword level))))
-        (sampler (or (logger-sampler logger)
-                     (make-array +level-slot-count+ :initial-element nil))))
-    (setf (aref sampler (floor level-val +level-step+))
-          (make-sampling-state :rate rate :counter (1- rate)))
-    (setf (logger-sampler logger) sampler)))
+(defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))
+  "Create a windowed counter. INITIAL messages per window always pass, then 1-in-THEREAFTER.
+   THEREAFTER=0 means hard cap (drop all after initial burst)."
+  (let ((ticks (round (* window-seconds internal-time-units-per-second))))
+    (when (> ticks most-positive-fixnum)
+      (cl:error "window-seconds ~A produces ~A ticks, exceeding fixnum range"
+                window-seconds ticks))
+    (%make-windowed-counter :initial initial
+                            :thereafter thereafter
+                            :window-ticks ticks
+                            :window-start (get-internal-real-time))))
+
+(defun make-level-sampler (&key trace debug info warn error fatal)
+  "Create a level-sampler vector. Each argument must be a windowed-counter or nil."
+  (flet ((check (name val)
+           (when (and val (not (windowed-counter-p val)))
+             (cl:error "~A must be a windowed-counter or nil, got ~A" name (type-of val)))))
+    (check :trace trace) (check :debug debug) (check :info info)
+    (check :warn warn) (check :error error) (check :fatal fatal))
+  (vector nil trace debug info warn error fatal))
+
+(defun make-consistent-sampler (&key key-fn (rate 1))
+  "Create a consistent sampler. KEY-FN extracts a key from raw-bindings. RATE is 1-in-N."
+  (check-type key-fn function)
+  (when (< rate 1)
+    (cl:error "consistent-sampler rate must be >= 1, got ~A" rate))
+  (%make-consistent-sampler :key-fn key-fn :rate rate))
+
+(defun set-level-sampling (logger level windowed-counter)
+  "Set sampling for LEVEL to WINDOWED-COUNTER on LOGGER (nil to remove).
+   Thread-safe via CAS on nil->vector transition."
+  (let ((level-index (floor (etypecase level
+                              (fixnum level)
+                              (keyword (level-from-keyword level)))
+                            +level-step+)))
+    (loop
+      (let ((ls (logger-level-sampler logger)))
+        (cond
+          (ls
+           (setf (aref ls level-index) windowed-counter)
+           (return))
+          (t
+           (let ((new-ls (make-array +level-slot-count+ :initial-element nil)))
+             (setf (aref new-ls level-index) windowed-counter)
+             (when (atomics:cas (logger-level-sampler logger) nil new-ls)
+               (return)))))))))
+
+(defun set-consistent (logger consistent-sampler)
+  "Set/replace the consistent sampler on LOGGER (nil to remove)."
+  (setf (logger-consistent logger) consistent-sampler))
 
 (declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
 
@@ -1142,7 +1242,8 @@ Specifying both :level and :filter is an error."
                  :raw-bindings new-raw-bindings
                  :formatter (logger-formatter parent)
                  :output (logger-output parent)
-                 :sampler (logger-sampler parent)
+                 :level-sampler (logger-level-sampler parent)
+                 :consistent (logger-consistent parent)
                  :field-transform composed-transform)))
     (set-level child (logger-level parent))
     child))
@@ -1165,12 +1266,14 @@ Specifying both :level and :filter is an error."
 
 (declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
                                 (:name string) (:capacity fixnum) (:on-drop (or null function))
-                                (:context list) (:field-transform (or null function)))
+                                (:context list) (:field-transform (or null function))
+                                (:level-sampler (or null simple-vector))
+                                (:consistent (or null consistent-sampler)))
                           (values logger &optional)) start))
 
 (defun start (&key output (level :info) (formatter #'json-formatter)
                    (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
-                   context field-transform)
+                   context field-transform level-sampler consistent)
   "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
 When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
 When OUTPUT is a tee-output, the async-outputs are already created.
@@ -1187,7 +1290,8 @@ that is called on each field before serialization. Return (values nil nil) to dr
                                                                            :formatter formatter :on-drop on-drop))
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
          (lgr (make-logger :name name :level level :formatter formatter
-                           :output actual-output :field-transform field-transform)))
+                           :output actual-output :field-transform field-transform
+                           :level-sampler level-sampler :consistent consistent)))
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 
 (defun flush (&optional (logger *logger*))
