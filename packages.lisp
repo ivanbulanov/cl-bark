@@ -44,6 +44,7 @@
            "PRETTY-FORMATTER"
            "SET-LEVEL"
            "SET-SAMPLING"
+           "FLUSH"
            "START"
            "STOP"
            "TRACE"

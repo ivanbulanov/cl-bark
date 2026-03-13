@@ -50,7 +50,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
 - **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
 - **Bounded async buffer** — configurable ring buffer capacity with drop-on-full per destination
-- **Synchronous flush** — `flush-async-output` uses semaphore rendezvous, not sleep
+- **Synchronous flush** — `bark:flush` uses semaphore rendezvous, not sleep; works on any logger
 - **Request-scoped buffering** — `with-log-buffer` captures all log calls; on success emit only info+, on failure emit everything including debug — zero-config retroactive log level decisions
 
 ## Log Levels
@@ -119,9 +119,14 @@ Detection is compile-time for literal keywords, runtime (`keywordp`) for variabl
                  (name "") (capacity 8192) (on-drop #'bark::default-on-drop)
                  context field-transform)
 
+;; Flush pending messages (blocks until written)
+(bark:flush &optional logger)  ; defaults to *logger*
+
 ;; Stop and flush all writer threads
 (bark:stop)
 ```
+
+`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. When called with no argument, flushes `*logger*`. Handles both single-output and tee-output loggers. No-op when the logger is nil.
 
 `:output` accepts a stream, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL (defaults to `*error-output*`). When `:output` is a plain stream, `start` wraps it in an async-output. When `:output` is a tee-output, the async-outputs are already created.
 

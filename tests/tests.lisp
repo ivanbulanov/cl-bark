@@ -1424,6 +1424,48 @@
     (5am:is-true (search "before stop" (get-output-stream-string s1)))
     (5am:is-true (search "before stop" (get-output-stream-string s2)))))
 
+(5am:test test-flush-drains-pending-messages
+  "bark:flush blocks until all pending messages are written to the stream."
+  (let ((out (make-string-output-stream)))
+    (bark:start :name "flush-test" :level :info :output out)
+    (dotimes (i 10)
+      (bark:info (format nil "msg-~d" i)))
+    (bark:flush)
+    (let ((result (get-output-stream-string out)))
+      (5am:is (= 10 (count #\Newline result))
+              "Expected 10 lines after flush, got ~d" (count #\Newline result)))
+    (bark:stop)))
+
+(5am:test test-flush-with-tee-output
+  "bark:flush drains all destinations in a tee."
+  (let ((s1 (make-string-output-stream))
+        (s2 (make-string-output-stream)))
+    (bark:start :name "flush-tee" :level :info
+                :output (bark:tee
+                         (s1 :formatter #'json-formatter)
+                         (s2 :formatter #'json-formatter)))
+    (bark:info "tee-flush-msg")
+    (bark:flush)
+    (5am:is-true (search "tee-flush-msg" (get-output-stream-string s1)))
+    (5am:is-true (search "tee-flush-msg" (get-output-stream-string s2)))
+    (bark:stop)))
+
+(5am:test test-flush-explicit-logger
+  "bark:flush on a user-created logger drains its output."
+  (let* ((out (make-string-output-stream))
+         (ao (bark::make-async-output out :capacity 64))
+         (lgr (bark:make-logger :name "explicit" :level :info
+                                :formatter #'json-formatter :output ao)))
+    (bark:info lgr "explicit-msg")
+    (bark:flush lgr)
+    (5am:is-true (search "explicit-msg" (get-output-stream-string out)))
+    (bark::stop-async-output ao)))
+
+(5am:test test-flush-without-logger
+  "bark:flush is a no-op when no logger is active."
+  (let ((*logger* nil))
+    (5am:finishes (bark:flush))))
+
 ;;; --- Multi-Output: Error Recovery ---
 
 (5am:test test-on-error-stream-recovery

@@ -1176,6 +1176,19 @@ that is called on each field before serialization. Return (values nil nil) to dr
                            :output actual-output :field-transform field-transform)))
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 
+(defun flush (&optional (logger *logger*))
+  "Flush LOGGER, blocking until all pending messages are written.
+Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async output."
+  (when logger
+    (let ((output (logger-output logger)))
+      (cond
+        ((and output (tee-output-p output))
+         (loop for group across (tee-output-groups output)
+               do (loop for dest across (formatter-group-destinations group)
+                        do (flush-async-output (destination-async-output dest)))))
+        ((and output (async-output-p output))
+         (flush-async-output output))))))
+
 (defun stop ()
   "Flush and stop the global logger's writer thread(s)."
   (when *logger*
