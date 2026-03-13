@@ -685,8 +685,8 @@
 ;;; --- Async Output ---
 
 (defun default-on-drop (count)
-  "Default drop handler. Returns a JSON warning line."
-  (format nil "{\"level\":~d,\"msg\":\"bark: dropped ~d log messages (output too slow)\"}" +warn+ count))
+  "Default drop handler. Returns a message string for the formatter."
+  (format nil "bark: dropped ~d log messages (output too slow)" count))
 
 (defstruct (async-output (:constructor %make-async-output))
   "Writer thread + ring buffer for async log delivery."
@@ -694,22 +694,27 @@
   (thread    nil :type (or null bt:thread))
   (stream    nil :type (or null stream))
   (running   nil :type boolean)
+  (formatter nil :type (or null function))
   (on-drop   nil :type (or null function))
   (on-error  nil :type (or null function))
   (notify     nil :type t)
   (flush-lock nil :type t)
   (flush-acks nil :type list))
 
-(declaim (ftype (function (t &key (:capacity fixnum) (:on-drop (or null function)) (:on-error (or null function)))
+(declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null function))
+                                  (:on-drop (or null function)) (:on-error (or null function)))
                           (values async-output &optional)) make-async-output))
 
-(defun make-async-output (stream &key (capacity +default-buffer-capacity+) (on-drop #'default-on-drop) on-error)
-  "Create an async output that writes to STREAM via a background thread."
+(defun make-async-output (stream &key (capacity +default-buffer-capacity+)
+                                      formatter (on-drop #'default-on-drop) on-error)
+  "Create an async output that writes to STREAM via a background thread.
+FORMATTER, when provided, is used to format on-drop warning bindings."
   (let* ((notify (bt:make-semaphore :name "bark-notify"))
          (ao (%make-async-output
               :ring (make-ring-buffer capacity)
               :stream stream
               :running t
+              :formatter formatter
               :on-drop on-drop
               :on-error on-error
               :notify notify
@@ -758,9 +763,10 @@
 
 (defun writer-loop (async-output)
   "Main loop for the async writer thread. Batch-drains the ring buffer."
-  (let ((ring   (async-output-ring async-output))
-        (stream (async-output-stream async-output))
-        (notify (async-output-notify async-output)))
+  (let ((ring      (async-output-ring async-output))
+        (stream    (async-output-stream async-output))
+        (notify    (async-output-notify async-output))
+        (drop-fmt  (async-output-formatter async-output)))
     (flet ((handle-stream-error (e)
              "Handle a stream write error. Returns T if recovered, NIL to exit."
              (let ((on-error (async-output-on-error async-output)))
@@ -802,10 +808,15 @@
                             return old)))
               (let ((on-drop (async-output-on-drop async-output)))
                 (when on-drop
-                  (let ((warning (funcall on-drop actual-dropped)))
-                    (when warning
+                  (multiple-value-bind (message fields) (funcall on-drop actual-dropped)
+                    (when (or message fields)
                       (handler-case
-                          (progn (write-string warning stream) (terpri stream) (force-output stream))
+                          (let ((line (if drop-fmt
+                                         (funcall drop-fmt +warn+ "" nil nil message fields)
+                                         (format nil "{\"level\":~d,\"msg\":~s}" +warn+ (or message "")))))
+                            (write-string line stream)
+                            (terpri stream)
+                            (force-output stream))
                         (cl:error () nil)))))))))
         (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
                       (prog1 (async-output-flush-acks async-output)
@@ -866,6 +877,7 @@ Specifying both :level and :filter is an error."
                  (make-destination
                   :async-output (make-async-output stream
                                                    :capacity capacity
+                                                   :formatter formatter
                                                    :on-drop on-drop
                                                    :on-error on-error)
                   :formatter formatter
@@ -1169,8 +1181,10 @@ that is called on each field before serialization. Return (values nil nil) to dr
     (stop))
   (let* ((actual-output (cond
                           ((tee-output-p output) output)
-                          ((streamp output) (make-async-output output :capacity capacity :on-drop on-drop))
-                          ((null output) (make-async-output *error-output* :capacity capacity :on-drop on-drop))
+                          ((streamp output) (make-async-output output :capacity capacity
+                                                                      :formatter formatter :on-drop on-drop))
+                          ((null output) (make-async-output *error-output* :capacity capacity
+                                                                           :formatter formatter :on-drop on-drop))
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
          (lgr (make-logger :name name :level level :formatter formatter
                            :output actual-output :field-transform field-transform)))

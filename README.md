@@ -149,7 +149,7 @@ Detection is compile-time for literal keywords, runtime (`keywordp`) for variabl
 - `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
 - `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
-- `:on-drop` — drop handler for this destination (defaults to `#'bark::default-on-drop`)
+- `:on-drop` — `(lambda (count) ...)` returning `(values message fields)` (formatted through the destination's formatter at warn level) or NIL to suppress. Defaults to `#'bark::default-on-drop`
 - `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. The condition is the original condition signaled by the stream (`file-error`, `stream-error`, etc.) — bark does not wrap or translate it. Return a stream to swap and continue, or nil to exit. When omitted, the writer logs the condition to `*error-output*` and exits.
 
 The filter receives the log level (integer) and the per-call fields (the `&rest` plist passed to `bark:info` etc.). It does **not** see static context or dynamic context — those are part of formatting, not routing.
@@ -174,7 +174,7 @@ Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &
          :direction :output
          :if-exists :append)            :formatter #'bark:json-formatter
                                         :capacity 65536
-                                        :on-drop (lambda (n) (format nil "LOST ~d" n)))
+                                        :on-drop (lambda (n) (format nil "lost ~d" n)))
   ;; Errors only
   ((open "/var/log/errors.jsonl"
          :direction :output
@@ -457,24 +457,30 @@ The standard `pretty-formatter` omits timestamps (REPL use). The factory adds op
 
 ### Backpressure
 
-The async writer uses a bounded ring buffer per destination. When the buffer is full, messages are dropped and a warning is emitted inline:
+The async writer uses a bounded ring buffer per destination. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
 
 ```json
-{"level":40,"msg":"bark: dropped 153 log messages (output too slow)"}
+{"level":40,"ts":1740600000123,"msg":"bark: dropped 153 log messages (output too slow)"}
 ```
 
-Control per destination:
+The `on-drop` callback receives the drop count and returns `(values message fields)` via multiple values. The writer formats the result at warn level through the destination's formatter:
+
+| Return | Effect |
+|--------|--------|
+| `"message"` | Message only (second value defaults to nil) |
+| `(values "msg" (list :count n))` | Message + extra fields |
+| `(values nil (list :dropped n))` | Fields only, no message |
+| `nil` | Suppress entirely |
 
 ```lisp
+;; Default: returns "bark: dropped N log messages (output too slow)"
+;; Custom: message + extra fields
 (bark:tee
   (*error-output* :capacity 65536)  ; larger buffer (messages, not bytes)
-  (log-file       :on-drop (lambda (n) (format nil "DROPPED ~d" n))))  ; custom handler
-```
+  (log-file       :on-drop (lambda (n) (values (format nil "dropped ~d" n) (list :count n)))))
 
-Or globally when using a single output:
-
-```lisp
-(bark:start :capacity 65536 :on-drop (lambda (n) (format nil "DROPPED ~d" n)))
+;; Suppress drop warnings entirely
+(bark:start :on-drop (lambda (n) (declare (ignore n)) nil))
 ```
 
 ### Compile-Time Elimination

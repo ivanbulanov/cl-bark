@@ -1034,11 +1034,17 @@
       (5am:is (= 0 (bark::ring-buffer-dropped rb))))))
 
 ;;; --- Async Drop Handling ---
+;;; on-drop returns (values message fields) via multiple values:
+;;;   message + nil    → message only, formatted at warn level
+;;;   message + fields → message + extra fields
+;;;   nil + fields     → fields only, no message
+;;;   nil              → suppress entirely
 
 (5am:test test-async-drop-warning
-  "When the ring buffer overflows, a drop warning appears in the output."
+  "Default on-drop produces a formatted JSON line with level, timestamp, and message."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16)))
+         (fmt (bark:make-json-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 5)
@@ -1046,13 +1052,20 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (5am:is (search "dropped 5 log messages" result)))))
+      ;; Message content preserved
+      (5am:is (search "dropped 5 log messages" result))
+      ;; Formatted as JSON with warn level
+      (5am:is (search "\"level\":40" result))
+      (5am:is (search "\"msg\":" result)))))
 
-(5am:test test-async-custom-on-drop
-  "Custom on-drop callback controls the drop warning message."
+(5am:test test-async-drop-uses-formatter-config
+  "Drop warnings use the configured formatter's keys and format."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16
-               :on-drop (lambda (n) (format nil "LOST:~d" n)))))
+         (fmt (bark:make-json-formatter :timestamp nil
+                                        :level-format :string
+                                        :level-key "severity"
+                                        :message-key "message"))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 3)
@@ -1060,12 +1073,93 @@
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (5am:is (search "LOST:3" result)))))
+      ;; Uses configured keys
+      (5am:is (search "\"severity\":\"warn\"" result))
+      (5am:is (search "\"message\":" result))
+      ;; Does NOT use default keys
+      (5am:is (not (search "\"level\":" result)))
+      (5am:is (not (search "\"msg\":" result))))))
+
+(5am:test test-async-drop-with-timestamp
+  "Drop warnings include timestamp when formatter is configured with one."
+  (let* ((out (make-string-output-stream))
+         (fmt (bark:make-json-formatter :timestamp :unix-ms))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 2)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      ;; Should have a ts field with a numeric timestamp
+      (5am:is (search "\"ts\":" result)))))
+
+(5am:test test-async-drop-with-logfmt-formatter
+  "Drop warnings work with logfmt formatter."
+  (let* ((out (make-string-output-stream))
+         (fmt (bark:make-logfmt-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 4)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      (5am:is (search "level=warn" result))
+      (5am:is (search "msg=" result))
+      (5am:is (search "dropped 4 log messages" result)))))
+
+(5am:test test-async-custom-on-drop-message-and-fields
+  "Custom on-drop returns message + fields via multiple values."
+  (let* ((out (make-string-output-stream))
+         (fmt (bark:make-json-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16
+               :formatter fmt
+               :on-drop (lambda (n) (values (format nil "LOST ~d" n) (list :count n))))))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 3)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      ;; Custom message
+      (5am:is (search "LOST 3" result))
+      ;; Extra field from on-drop
+      (5am:is (search "\"count\":3" result))
+      ;; Formatted with warn level
+      (5am:is (search "\"level\":40" result)))))
+
+(5am:test test-async-on-drop-fields-only
+  "on-drop returning (values nil fields) emits fields without message."
+  (let* ((out (make-string-output-stream))
+         (fmt (bark:make-json-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16
+               :formatter fmt
+               :on-drop (lambda (n) (values nil (list :dropped n :severity "backpressure"))))))
+    (dotimes (i 16)
+      (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
+    (dotimes (i 3)
+      (bark::ring-buffer-push (bark::async-output-ring ao) "overflow"))
+    (bt:signal-semaphore (bark::async-output-notify ao))
+    (bark::stop-async-output ao)
+    (let ((result (get-output-stream-string out)))
+      ;; Has the fields
+      (5am:is (search "\"dropped\":3" result))
+      (5am:is (search "\"severity\":\"backpressure\"" result))
+      ;; Has level (from formatter)
+      (5am:is (search "\"level\":40" result))
+      ;; No message field
+      (5am:is (not (search "\"msg\":" result))))))
 
 (5am:test test-async-on-drop-nil-suppresses
-  "on-drop returning NIL suppresses the warning line."
+  "on-drop returning NIL suppresses the warning line entirely."
   (let* ((out (make-string-output-stream))
+         (fmt (bark:make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
+               :formatter fmt
                :on-drop (lambda (n) (declare (ignore n)) nil))))
     (dotimes (i 20)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1153,7 +1247,7 @@
 (5am:test test-make-tee-custom-capacity-and-on-drop
   "Per-destination :capacity and :on-drop are passed to async-output."
   (let* ((s1 (make-string-output-stream))
-         (custom-drop (lambda (n) (format nil "CUSTOM:~d" n)))
+         (custom-drop (lambda (n) (format nil "CUSTOM ~d" n)))
          (tee (bark:make-tee
                (list (list :stream s1 :capacity 1024 :on-drop custom-drop)))))
     (unwind-protect
