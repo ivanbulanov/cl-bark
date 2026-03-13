@@ -8,7 +8,8 @@
    #:level-from-keyword #:level-name
    ;; Struct accessors
    #:logger-p #:logger-name #:logger-level #:logger-formatter
-   #:logger-output #:logger-chindings #:logger-raw-bindings #:logger-sampler
+   #:logger-output #:logger-chindings #:logger-raw-bindings
+   #:logger-level-sampler #:logger-consistent
    #:logger-trace-fn #:logger-debug-fn #:logger-info-fn
    #:logger-warn-fn #:logger-error-fn #:logger-fatal-fn
    ;; JSON/serialization internals
@@ -42,7 +43,10 @@
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
-   #:make-logger #:child #:set-level #:set-sampling #:start #:stop
+   #:make-logger #:child #:set-level #:start #:stop
+   #:set-level-sampling #:set-consistent
+   #:make-windowed-counter #:make-level-sampler #:make-consistent-sampler
+   #:windowed-counter-window-ticks
    #:json-formatter #:logfmt-formatter #:pretty-formatter
    #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
    #:with-captured-logs #:with-context
@@ -592,27 +596,189 @@
         (5am:is-true (search "200" line))
         (5am:is-true (search "request handled" line))))))
 
-;;; --- Sampling ---
+;;; --- Sampling: mix-hash ---
 
-(5am:test test-set-sampling
-  "Set sampling, verify sampler array is populated."
-  (let ((lgr (make-logger :level :trace)))
-    (5am:is-true (null (logger-sampler lgr)))
-    (set-sampling lgr :debug 5)
-    (5am:is-true (not (null (logger-sampler lgr))))
-    (let ((entry (aref (logger-sampler lgr) 2)))
-      (5am:is-true (bark::sampling-state-p entry))
-      (5am:is (= 5 (bark::sampling-state-rate entry))))))
+(5am:test test-mix-hash-distribution
+  "mix-hash produces roughly uniform distribution across mod buckets.
+   Chi-squared test: if p > 0.01, distribution is acceptably uniform."
+  (dolist (rate '(2 3 5 10 100))
+    (let ((buckets (make-array rate :initial-element 0))
+          (n 100000))
+      (dotimes (i n)
+        (incf (aref buckets (mod (bark::mix-hash (sxhash i)) rate))))
+      ;; Chi-squared statistic
+      (let* ((expected (/ n rate))
+             (chi-sq (loop for count across buckets
+                           sum (/ (expt (- count expected) 2) expected))))
+        ;; Critical value for p=0.01 with (rate-1) degrees of freedom.
+        ;; For small rates use generous threshold; for rate=100, df=99, critical~135.
+        (let ((critical (cond ((<= rate 5) 15.0)
+                              ((<= rate 10) 25.0)
+                              (t 150.0))))
+          (5am:is-true (< chi-sq critical)
+                       "mix-hash mod ~d: chi-sq=~,2f exceeds ~,2f (n=~d)"
+                       rate chi-sq critical n))))))
 
-(5am:test test-sampling-filters
-  "Set sampling rate=2 on debug, log 10 debug messages, verify every other one passes."
+;;; --- Sampling: windowed counter ---
+
+(5am:test test-windowed-initial-burst
+  "First INITIAL messages always pass regardless of THEREAFTER."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "samp" :level :debug :output collector)))
-      (set-sampling lgr :debug 2)
-      (dotimes (i 10)
-        (funcall (logger-debug-fn lgr) lgr (format nil "msg-~d" i)))
-      (let ((logs (funcall results-fn)))
-        (5am:is (= 5 (length logs)))))))
+    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 5 :thereafter 1000
+                                                    :window-seconds 60)))))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 5)
+          (funcall fn lgr (format nil "msg-~d" i))))
+      (5am:is (= 5 (length (funcall results-fn)))))))
+
+(5am:test test-windowed-thereafter-sampling
+  "After initial burst, 1-in-THEREAFTER pass."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 0 :thereafter 10
+                                                    :window-seconds 60)))))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 1000)
+          (funcall fn lgr "msg")))
+      ;; initial=0, thereafter=10: count 0 passes (mod 0 10 = 0), then every 10th
+      ;; Total: 100 out of 1000
+      (5am:is (= 100 (length (funcall results-fn)))))))
+
+(5am:test test-windowed-hard-cap
+  "thereafter=0 drops everything after initial burst."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 3 :thereafter 0
+                                                    :window-seconds 60)))))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 100)
+          (funcall fn lgr "msg")))
+      (5am:is (= 3 (length (funcall results-fn)))))))
+
+(5am:test test-windowed-initial-zero
+  "initial=0 skips burst, goes straight to thereafter check."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 0 :thereafter 5
+                                                    :window-seconds 60)))))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 100)
+          (funcall fn lgr "msg")))
+      ;; mod 0 5 = 0 (pass), mod 5 5 = 0 (pass), ... → 20 out of 100
+      (5am:is (= 20 (length (funcall results-fn)))))))
+
+(5am:test test-windowed-window-reset
+  "After window expires, counter resets and a new burst passes."
+  (let ((wc (make-windowed-counter :initial 2 :thereafter 0 :window-seconds 1)))
+    ;; Simulate: exhaust initial burst
+    (dotimes (i 5) (atomics:atomic-incf (bark::windowed-counter-count wc)))
+    ;; Force window expiry by calling with now far enough in the future
+    (let ((future-now (+ (bark::windowed-counter-window-start wc)
+                         (* 2 (bark::windowed-counter-window-ticks wc)))))
+      (bark::maybe-reset-window wc future-now))
+    (5am:is (= 0 (bark::windowed-counter-count wc)))))
+
+(5am:test test-windowed-amortized-clock-check
+  "Window reset only happens on +window-check-interval+ boundaries."
+  (let ((wc (make-windowed-counter :initial 1000 :thereafter 0 :window-seconds 1)))
+    ;; Counts 1..63 should NOT trigger reset (interval check uses logand)
+    (dotimes (i 63)
+      (atomics:atomic-incf (bark::windowed-counter-count wc)))
+    ;; Count is now 63, window-start still original
+    (let ((old-ws (bark::windowed-counter-window-start wc))
+          (future-now (+ (bark::windowed-counter-window-start wc)
+                         (* 2 (bark::windowed-counter-window-ticks wc)))))
+      ;; Simulate the 64th message (count becomes 64, logand with 63 = 0)
+      (let ((count (atomics:atomic-incf (bark::windowed-counter-count wc))))
+        (when (zerop (logand count (1- bark::+window-check-interval+)))
+          (bark::maybe-reset-window wc future-now)))
+      ;; Now window-start should have been updated
+      (5am:is-true (/= old-ws (bark::windowed-counter-window-start wc))))))
+
+;;; --- Sampling: consistent sampler ---
+
+(5am:test test-consistent-deterministic
+  "Same key always produces same keep/drop decision."
+  (let ((rate 10)
+        (key "request-abc-123"))
+    (let ((decision (bark::consistent-hash-keep-p key rate)))
+      (dotimes (i 100)
+        (5am:is (eq decision (bark::consistent-hash-keep-p key rate)))))))
+
+(5am:test test-consistent-nil-key-passthrough
+  "key-fn returning nil falls through to windowed counter."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "cs" :level :debug :output collector
+                            :consistent (make-consistent-sampler
+                                         :key-fn (lambda (bindings)
+                                                   (declare (ignore bindings))
+                                                   nil)
+                                         :rate 10)
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 3 :thereafter 0
+                                                    :window-seconds 60)))))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 100)
+          (funcall fn lgr "msg")))
+      ;; nil key → consistent skipped → windowed: initial=3, thereafter=0
+      (5am:is (= 3 (length (funcall results-fn)))))))
+
+(5am:test test-consistent-rate-1-keeps-all
+  "rate=1 keeps every message (mod hash 1 = 0 always)."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "cs" :level :debug :output collector
+                            :consistent (make-consistent-sampler
+                                         :key-fn (lambda (bindings)
+                                                   (getf bindings :rid))
+                                         :rate 1))))
+      (let ((child-lgr (child lgr :rid "test-key")))
+        (let ((fn (logger-debug-fn child-lgr)))
+          (dotimes (i 50)
+            (funcall fn child-lgr "msg"))))
+      (5am:is (= 50 (length (funcall results-fn)))))))
+
+;;; --- Sampling: constructors ---
+
+(5am:test test-make-level-sampler-layout
+  "make-level-sampler produces correct vector layout."
+  (let* ((wc-debug (make-windowed-counter :initial 5 :thereafter 100))
+         (wc-trace (make-windowed-counter :initial 2 :thereafter 50))
+         (ls (make-level-sampler :debug wc-debug :trace wc-trace)))
+    (5am:is (= 7 (length ls)))
+    (5am:is (null (aref ls 0)))        ; index 0 unused
+    (5am:is (eq wc-trace (aref ls 1))) ; trace = index 1
+    (5am:is (eq wc-debug (aref ls 2))) ; debug = index 2
+    (5am:is (null (aref ls 3)))        ; info = nil
+    (5am:is (null (aref ls 4)))        ; warn = nil
+    (5am:is (null (aref ls 5)))        ; error = nil
+    (5am:is (null (aref ls 6)))))      ; fatal = nil
+
+(5am:test test-make-level-sampler-type-check
+  "make-level-sampler rejects non-windowed-counter arguments."
+  (5am:signals cl:error (make-level-sampler :debug 42))
+  (5am:signals cl:error (make-level-sampler :trace "not-a-counter")))
+
+(5am:test test-make-windowed-counter-ticks
+  "window-ticks computed correctly from window-seconds."
+  (let ((wc (make-windowed-counter :window-seconds 2)))
+    (5am:is (= (* 2 internal-time-units-per-second)
+               (windowed-counter-window-ticks wc)))))
+
+(5am:test test-make-consistent-sampler-rate-zero
+  "make-consistent-sampler rejects rate=0."
+  (5am:signals cl:error
+    (make-consistent-sampler :key-fn (lambda (b) (declare (ignore b)) nil)
+                             :rate 0)))
 
 ;;; --- Utilities ---
 
@@ -895,24 +1061,6 @@
       (5am:is-true (listp      (gethash "vec"  p)))
       (5am:is-true (hash-table-p (gethash "obj" p))))))
 
-;;; --- Sampling Rate ---
-
-(5am:test test-sampling-rate
-  "SET-SAMPLING passes ~1/N messages at the given level; unsampled levels unaffected."
-  (bark:with-captured-logs (logs)
-    (let ((l bark:*logger*))
-      (bark:set-sampling l :debug 10)
-      (let ((dfn (bark::logger-debug-fn l))
-            (ifn (bark::logger-info-fn  l)))
-        ;; 1000 debug messages at 1-in-10 → expect ~100, tolerance 50-150
-        (dotimes (i 1000) (funcall dfn l "throttled-msg" :i i))
-        ;; 100 info messages, no sampling → expect exactly 100
-        (dotimes (i 100)  (funcall ifn l "full-rate-msg" :i i))))
-    (let* ((all       (funcall logs))
-           (throttled (count "throttled-msg" all :test (lambda (k s) (search k s))))
-           (full-rate (count "full-rate-msg" all :test (lambda (k s) (search k s)))))
-      (5am:is (= 100 full-rate))
-      (5am:is-true (<= 50 throttled 150)))))
 
 ;;; --- Captured Logs Formatter ---
 
@@ -2136,7 +2284,8 @@
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (null (logger-field-transform buf-lgr)))
-    (5am:is (null (logger-sampler buf-lgr)))))
+    (5am:is (null (logger-level-sampler buf-lgr)))
+    (5am:is (null (logger-consistent buf-lgr)))))
 
 (5am:test test-make-buffer-logger-preserves-identity
   "Buffer logger preserves name, chindings, raw-bindings from original."
@@ -3058,30 +3207,3 @@
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
 
-;;; --- Bug fix: Atomic sampling counter ---
-
-(5am:test (test-sampling-concurrent :suite bark-tests)
-  "Sampling counter is thread-safe under concurrent log calls."
-  (let* ((collected (make-array 0 :adjustable t :fill-pointer 0))
-         (lock (bt:make-lock "collect"))
-         (collector (lambda (line)
-                      (bt:with-lock-held (lock)
-                        (vector-push-extend line collected))))
-         (lgr (make-logger :name "conc" :level :debug
-                           :formatter #'json-formatter :output collector)))
-    (set-sampling lgr :debug 10)
-    (let ((threads nil))
-      (dotimes (tid 4)
-        (push (bt:make-thread
-               (lambda ()
-                 (let ((fn (logger-debug-fn lgr)))
-                   (dotimes (i 250)
-                     (funcall fn lgr (format nil "t~d-~d" tid i)))))
-               :name (format nil "sampler-~d" tid))
-              threads))
-      (dolist (th threads) (bt:join-thread th)))
-    ;; 4 threads * 250 messages = 1000 total at 1-in-10 rate
-    ;; Expect ~100, tolerance 40-160 (wide due to concurrency)
-    (let ((count (length collected)))
-      (5am:is-true (<= 40 count 160)
-                   "Expected ~100 sampled messages, got ~d" count))))
