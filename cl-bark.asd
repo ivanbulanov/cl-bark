@@ -21,3 +21,11 @@
   ((:module "tests"
     :components
     ((:file "tests")))))
+
+(asdf:defsystem "cl-bark/concurrency-tests"
+  :depends-on ("cl-bark" "fiveam" "bordeaux-threads")
+  :serial t
+  :components
+  ((:module "tests"
+    :components
+    ((:file "sampling-concurrency-tests")))))
