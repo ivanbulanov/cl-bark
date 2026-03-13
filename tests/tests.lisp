@@ -780,6 +780,129 @@
     (make-consistent-sampler :key-fn (lambda (b) (declare (ignore b)) nil)
                              :rate 0)))
 
+;;; --- Sampling: integration ---
+
+(5am:test test-both-nil-zero-sampling
+  "When both sampler slots are nil, all messages pass."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "nil" :level :debug :output collector)))
+      (5am:is (null (logger-level-sampler lgr)))
+      (5am:is (null (logger-consistent lgr)))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 100)
+          (funcall fn lgr "msg")))
+      (5am:is (= 100 (length (funcall results-fn)))))))
+
+(5am:test test-consistent-bypasses-windowed
+  "Key-bearing messages bypass windowed counter; keyless messages use windowed."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let* ((lgr (make-logger :name "both" :level :debug :output collector
+                             :consistent (make-consistent-sampler
+                                          :key-fn (lambda (b) (getf b :rid))
+                                          :rate 1)  ; rate=1 keeps all keyed
+                             :level-sampler (make-level-sampler
+                                             :debug (make-windowed-counter
+                                                     :initial 0 :thereafter 0
+                                                     :window-seconds 60)))))
+      ;; Keyless messages: windowed initial=0 thereafter=0 → drop all
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 50)
+          (funcall fn lgr "keyless")))
+      ;; Keyed messages: consistent rate=1 → keep all (bypass windowed)
+      (let* ((keyed-lgr (child lgr :rid "test-key"))
+             (fn (logger-debug-fn keyed-lgr)))
+        (dotimes (i 50)
+          (funcall fn keyed-lgr "keyed")))
+      (let ((logs (funcall results-fn)))
+        ;; Only the 50 keyed messages should pass
+        (5am:is (= 50 (length logs)))))))
+
+(5am:test test-buffer-bypasses-sampling
+  "with-log-buffer captures all messages regardless of sampling."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "buf" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 0 :thereafter 0
+                                                    :window-seconds 60)))))
+      ;; Without buffer: everything dropped (initial=0 thereafter=0)
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 10)
+          (funcall fn lgr "direct")))
+      (5am:is (= 0 (length (funcall results-fn))))
+      ;; With buffer: everything captured (sampling bypassed)
+      (let ((bark:*logger* lgr)
+            (bark:*root-logger* nil))
+        (bark:with-log-buffer (:level :debug)
+          (dotimes (i 10)
+            (bark:debug "buffered"))))
+      ;; Buffer flushes at original level (:debug), all 10 should pass
+      (5am:is (= 10 (length (funcall results-fn)))))))
+
+(5am:test test-child-inherits-level-sampler
+  "Child shares parent's level-sampler vector; in-place mutations visible."
+  (let* ((lgr (make-logger :name "par" :level :debug
+                           :level-sampler (make-level-sampler
+                                           :debug (make-windowed-counter
+                                                   :initial 5 :thereafter 100))))
+         (ch (child lgr :component "child")))
+    ;; Same vector object
+    (5am:is (eq (logger-level-sampler lgr) (logger-level-sampler ch)))
+    ;; In-place mutation via set-level-sampling on parent visible to child
+    (let ((new-wc (make-windowed-counter :initial 10 :thereafter 50)))
+      (set-level-sampling lgr :debug new-wc)
+      (5am:is (eq new-wc (aref (logger-level-sampler ch) 2))))))
+
+(5am:test test-child-snapshots-consistent
+  "Child snapshots parent's consistent sampler; parent changes don't propagate."
+  (let* ((cs (make-consistent-sampler
+              :key-fn (lambda (b) (getf b :rid)) :rate 10))
+         (lgr (make-logger :name "par" :level :debug :consistent cs))
+         (ch (child lgr :component "child")))
+    (5am:is (eq cs (logger-consistent ch)))
+    ;; Replace on parent
+    (set-consistent lgr nil)
+    ;; Child still has original
+    (5am:is (eq cs (logger-consistent ch)))))
+
+(5am:test test-set-level-sampling-runtime-swap
+  "Replacing sampler via set-level-sampling takes effect on next log call."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "swap" :level :debug :output collector
+                            :level-sampler (make-level-sampler
+                                            :debug (make-windowed-counter
+                                                    :initial 0 :thereafter 0
+                                                    :window-seconds 60)))))
+      ;; All dropped initially
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 10) (funcall fn lgr "dropped")))
+      (5am:is (= 0 (length (funcall results-fn))))
+      ;; Swap to permissive counter
+      (set-level-sampling lgr :debug
+                          (make-windowed-counter :initial 1000 :thereafter 0
+                                                :window-seconds 60))
+      (let ((fn (logger-debug-fn lgr)))
+        (dotimes (i 10) (funcall fn lgr "passed")))
+      (5am:is (= 10 (length (funcall results-fn)))))))
+
+(5am:test test-start-with-sampling
+  "start creates a logger that respects sampling args."
+  (let ((out (make-string-output-stream)))
+    (bark:start :output out :level :debug :name "samp-start"
+                :level-sampler (make-level-sampler
+                                :debug (make-windowed-counter
+                                        :initial 3 :thereafter 0
+                                        :window-seconds 60)))
+    (unwind-protect
+         (let ((fn (logger-debug-fn bark:*logger*)))
+           (dotimes (i 10) (funcall fn bark:*logger* "msg"))
+           (bark:flush)
+           (let* ((output (get-output-stream-string out))
+                  (lines (remove "" (uiop:split-string output :separator '(#\Newline))
+                                 :test #'string=)))
+             (5am:is (= 3 (length lines)))))
+      (bark:stop))))
+
 ;;; --- Utilities ---
 
 (5am:test test-list-collector
