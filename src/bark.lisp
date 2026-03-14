@@ -128,7 +128,7 @@
 (defun write-json-escaped-string (string stream)
   "Write STRING to STREAM with JSON escaping."
   (declare (optimize (speed 3) (safety 1))
-           (type string string))
+           (type simple-string string))
   (loop for c of-type character across string do
     (case c
       (#\" (write-string "\\\"" stream))
@@ -252,7 +252,8 @@
 
 (defun emit-json-value (stream value &optional (depth *max-json-depth*))
   "Write VALUE as JSON to STREAM.  Collections recurse up to DEPTH levels."
-  (declare (optimize (speed 3) (safety 1)))
+  (declare (optimize (speed 3) (safety 1))
+           (type fixnum depth))
   (typecase value
     (string    (write-json-string stream value))
     (character (write-json-string stream (string value)))
@@ -272,7 +273,7 @@
          (progn
            (write-char #\[ stream)
            (loop for cell on value
-                 for i from 0
+                 for i fixnum from 0
                  for first = t then nil
                  when (>= i *max-json-length*)
                    do (unless first (write-char #\, stream))
@@ -290,7 +291,7 @@
          (emit-type-placeholder stream value)
          (let ((len (length value)))
            (write-char #\[ stream)
-           (loop for i from 0 below len
+           (loop for i fixnum from 0 below len
                  when (>= i *max-json-length*)
                    do (when (plusp i) (write-char #\, stream))
                       (write-string "\"...\"" stream)
@@ -303,6 +304,7 @@
          (emit-type-placeholder stream value)
          (let ((first t)
                (count 0))
+           (declare (type fixnum count))
            (write-char #\{ stream)
            (block hash-done
              (maphash (lambda (k v)
@@ -361,7 +363,7 @@
   "Write STRING to STREAM, quoting if it contains space, quote, equals, backslash,
    or control characters. Escapes quotes, backslashes, newlines, returns, and tabs."
   (declare (optimize (speed 3) (safety 1))
-           (type string string))
+           (type simple-string string))
   (let ((needs-quoting nil))
     (loop for c of-type character across string
           when (or (char= c #\Space) (char= c #\") (char= c #\=)
