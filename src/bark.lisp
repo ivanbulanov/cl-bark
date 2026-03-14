@@ -624,6 +624,10 @@
 
 (defconstant +default-buffer-capacity+ 8192 "Default ring buffer capacity in log lines for async output. Power of two.")
 
+(defconstant +pop-spin-yield-threshold+ 1000
+  "Spin iterations in ring-buffer-pop before yielding to the OS scheduler.
+   Prevents unbounded CPU spin when a producer is preempted between CAS and slot write.")
+
 ;;; --- Sampling ---
 
 (defconstant +window-check-interval+ 64
@@ -690,22 +694,30 @@
     (%make-ring-buffer :slots slots :mask (1- actual))))
 
 (defun ring-buffer-pop (rb)
-  "Pop the next value from the ring buffer. Returns NIL if empty. Single-consumer only."
+  "Pop the next value from the ring buffer. Returns NIL if empty. Single-consumer only.
+   Spins briefly if a producer has claimed a slot but not yet written the value,
+   yielding to the OS scheduler after +pop-spin-yield-threshold+ iterations."
   (declare (optimize (speed 3) (safety 1)))
   (let ((tail (ring-buffer-tail rb))
         (head (ring-buffer-head rb)))
     (when (< tail head)
       (let* ((idx (logand tail (ring-buffer-mask rb)))
              (val (svref (ring-buffer-slots rb) idx)))
-        (loop while (null val) do
-          #+sbcl (sb-ext:spin-loop-hint)
-          (setf val (svref (ring-buffer-slots rb) idx)))
+        (loop while (null val)
+              for spin fixnum from 0
+              do (if (< spin +pop-spin-yield-threshold+)
+                     (progn #+sbcl (sb-ext:spin-loop-hint))
+                     (bt:thread-yield))
+                 (setf val (svref (ring-buffer-slots rb) idx)))
         (setf (svref (ring-buffer-slots rb) idx) nil)
         (atomics:atomic-incf (ring-buffer-tail rb))
         val))))
 
-(defun ring-buffer-push (rb value)
-  "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
+(declaim (inline %ring-buffer-try-push))
+
+(defun %ring-buffer-try-push (rb value track-drops)
+  "Try to CAS VALUE into RB. When TRACK-DROPS is true, increment dropped counter
+   on failure. Returns T on success, NIL if full."
   (declare (optimize (speed 3) (safety 1)))
   (let ((mask (ring-buffer-mask rb))
         (slots (ring-buffer-slots rb)))
@@ -714,27 +726,21 @@
              (tail (ring-buffer-tail rb))
              (size (the fixnum (- head tail))))
         (when (>= size (1+ mask))
-          (atomics:atomic-incf (ring-buffer-dropped rb))
+          (when track-drops
+            (atomics:atomic-incf (ring-buffer-dropped rb)))
           (return nil))
         (when (atomics:cas (ring-buffer-head rb) head (1+ head))
           (setf (svref slots (logand head mask)) value)
           (return t))))))
 
+(defun ring-buffer-push (rb value)
+  "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
+  (%ring-buffer-try-push rb value t))
+
 (defun ring-buffer-offer (rb value)
   "Try to push VALUE onto RB. Returns T on success, NIL if full.
    Does NOT increment the dropped counter."
-  (declare (optimize (speed 3) (safety 1)))
-  (let ((mask (ring-buffer-mask rb))
-        (slots (ring-buffer-slots rb)))
-    (loop
-      (let* ((head (ring-buffer-head rb))
-             (tail (ring-buffer-tail rb))
-             (size (the fixnum (- head tail))))
-        (when (>= size (1+ mask))
-          (return nil))
-        (when (atomics:cas (ring-buffer-head rb) head (1+ head))
-          (setf (svref slots (logand head mask)) value)
-          (return t))))))
+  (%ring-buffer-try-push rb value nil))
 
 (defun ring-buffer-drain (rb)
   "Drain all available values from the ring buffer into a list. Single-consumer only."
@@ -772,6 +778,14 @@
   (block-dropped     0     :type (unsigned-byte 64))
   (space-lock        nil   :type t)
   (space-available   nil   :type t))
+
+(defun broadcast-space-available (async-output)
+  "Wake all blocked producers waiting for buffer space.
+   No-op when non-blocking (space-available is nil)."
+  (let ((cv (async-output-space-available async-output)))
+    (when cv
+      (bt:with-lock-held ((async-output-space-lock async-output))
+        (sb-thread:condition-broadcast cv)))))
 
 (declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null function))
                                   (:on-drop (or null function)) (:on-error (or null function))
@@ -831,14 +845,13 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
   (when (and async-output (async-output-running async-output))
     (flush-async-output async-output)
     (setf (async-output-running async-output) nil)
+    ;; Wake blocked producers immediately so they see running=nil and exit
+    (broadcast-space-available async-output)
     (bt:signal-semaphore (async-output-notify async-output))
     (when (async-output-thread async-output)
       (bt:join-thread (async-output-thread async-output)))
-    ;; Wake any blocked producers so they see running=nil and exit
-    (let ((cv (async-output-space-available async-output)))
-      (when cv
-        (bt:with-lock-held ((async-output-space-lock async-output))
-          (sb-thread:condition-broadcast cv))))
+    ;; Final broadcast to catch any producers that entered wait after the first
+    (broadcast-space-available async-output)
     (let ((ring (async-output-ring async-output))
           (stream (async-output-stream async-output)))
       (handler-case
@@ -913,10 +926,10 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
                         (setf (async-output-flush-acks async-output) nil)))))
           (dolist (ack acks)
             (bt:signal-semaphore ack)))
-        ;; Wake blocked producers (no-op when non-blocking: space-available is nil)
-        (let ((cv (async-output-space-available async-output)))
-          (when cv
-            (sb-thread:condition-broadcast cv)))))
+        ;; Wake blocked producers under the lock to prevent lost wakeups.
+        ;; Without the lock, a producer between offer-fail and condition-wait
+        ;; could miss the broadcast and sleep until the next writer iteration.
+        (broadcast-space-available async-output)))
     ;; Drain any orphaned flush-acks so callers don't stall for the 5s timeout
     (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
                   (prog1 (async-output-flush-acks async-output)
@@ -1407,30 +1420,27 @@ that is called on each field before serialization. Return (values nil nil) to dr
                            :level-sampler level-sampler :consistent consistent)))
     (setf *logger* (if context (apply #'child lgr context) lgr))))
 
+(defun do-async-outputs (output fn)
+  "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).
+   No-op when OUTPUT is nil or not an async-based output."
+  (cond
+    ((and output (tee-output-p output))
+     (loop for group across (tee-output-groups output)
+           do (loop for dest across (formatter-group-destinations group)
+                    do (funcall fn (destination-async-output dest)))))
+    ((and output (async-output-p output))
+     (funcall fn output))))
+
 (defun flush (&optional (logger *logger*))
   "Flush LOGGER, blocking until all pending messages are written.
 Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async output."
   (when logger
-    (let ((output (logger-output logger)))
-      (cond
-        ((and output (tee-output-p output))
-         (loop for group across (tee-output-groups output)
-               do (loop for dest across (formatter-group-destinations group)
-                        do (flush-async-output (destination-async-output dest)))))
-        ((and output (async-output-p output))
-         (flush-async-output output))))))
+    (do-async-outputs (logger-output logger) #'flush-async-output)))
 
 (defun stop ()
   "Flush and stop the global logger's writer thread(s)."
   (when *logger*
-    (let ((output (logger-output *logger*)))
-      (cond
-        ((and output (tee-output-p output))
-         (loop for group across (tee-output-groups output)
-               do (loop for dest across (formatter-group-destinations group)
-                        do (stop-async-output (destination-async-output dest)))))
-        ((and output (async-output-p output))
-         (stop-async-output output))))
+    (do-async-outputs (logger-output *logger*) #'stop-async-output)
     (setf *logger* nil)))
 
 ;;; --- Context ---

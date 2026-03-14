@@ -544,3 +544,69 @@
                           0))))
              (5am:is (plusp (bark::async-output-block-dropped blocking-ao)))))
       (stop-tee tee-out))))
+
+;;; --- broadcast-under-lock tests ---
+
+(5am:test test-broadcast-under-lock-no-lost-wakeup
+  "Stress test: N producers rapidly blocking and unblocking.
+   Without broadcast-under-lock, some producers could miss wakeups and stall.
+   All messages must be delivered within the timeout."
+  (let* ((out (make-string-output-stream))
+         (ao (make-async-output out :capacity 16 :blocking t :block-timeout 5.0))
+         (n-producers 4)
+         (msgs-per-producer 100)
+         (all-done (bt:make-semaphore :name "all-done"))
+         (threads nil))
+    (unwind-protect
+         (progn
+           (dotimes (tid n-producers)
+             (let ((id tid))
+               (push (bt:make-thread
+                      (lambda ()
+                        (dotimes (i msgs-per-producer)
+                          (bark::deliver-line ao (format nil "p~d-~d" id i)))
+                        (bt:signal-semaphore all-done))
+                      :name (format nil "stress-~d" id))
+                     threads)))
+           (dotimes (i n-producers)
+             (5am:is-true (bt:wait-on-semaphore all-done :timeout 10.0)
+                          "Producer ~d timed out — possible lost wakeup" i))
+           (flush-async-output ao)
+           (let* ((result (get-output-stream-string out))
+                  (lines (count #\Newline result)))
+             (5am:is (= (* n-producers msgs-per-producer) lines)
+                     "Expected ~d lines, got ~d" (* n-producers msgs-per-producer) lines)))
+      (stop-async-output ao)
+      (dolist (th threads) (ignore-errors (bt:join-thread th))))))
+
+(5am:test test-stop-wakes-producers-before-join
+  "Stop wakes blocked producers promptly (before joining the writer thread).
+   Producers must complete within 1 second of stop being called."
+  (let* ((out (make-string-output-stream))
+         (ao (make-async-output out :capacity 16 :blocking t :block-timeout nil))
+         (n-producers 4)
+         (all-done (bt:make-semaphore :name "all-done"))
+         (threads nil))
+    ;; Fill the buffer
+    (dotimes (i 16)
+      (bark::ring-buffer-offer (async-output-ring ao) (format nil "fill-~d" i)))
+    ;; Spawn producers that will block indefinitely (timeout=nil)
+    (dotimes (tid n-producers)
+      (push (bt:make-thread
+             (lambda ()
+               (bark::deliver-line ao "blocked")
+               (bt:signal-semaphore all-done))
+             :name (format nil "stop-wake-~d" tid))
+            threads))
+    ;; Give producers time to enter condition-wait
+    (sleep 0.1)
+    ;; Stop should wake all producers within ~1 second (not waiting for writer timeout)
+    (let ((t0 (bark::monotonic-seconds)))
+      (stop-async-output ao)
+      (dotimes (i n-producers)
+        (5am:is-true (bt:wait-on-semaphore all-done :timeout 2.0)
+                     "Producer ~d not unblocked by stop" i))
+      (let ((elapsed (- (bark::monotonic-seconds) t0)))
+        (5am:is (< elapsed 1.0)
+                "Stop took ~Fs — expected < 1s (broadcast before join)" elapsed)))
+    (dolist (th threads) (bt:join-thread th))))
