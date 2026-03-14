@@ -3123,6 +3123,45 @@
         (5am:is-true (search "\"level\":\"info\"" line))
         (5am:is-true (search "\"msg\":\"captured\"" line))))))
 
+(5am:test test-make-json-formatter-no-level
+  "make-json-formatter with :level-key nil omits the level field."
+  (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
+    (let ((result (funcall fmt +info+ "" nil nil "test" (list :code 200))))
+      (5am:is-false (search "\"level\"" result))
+      (5am:is-true (search "\"code\":200" result))
+      (5am:is-true (search "\"msg\":\"test\"" result))
+      ;; Must be valid JSON: starts with { ends with }
+      (5am:is (char= #\{ (char result 0)))
+      (5am:is (char= #\} (char result (1- (length result))))))))
+
+(5am:test test-make-json-formatter-no-level-with-timestamp
+  "make-json-formatter with :level-key nil but timestamp still present."
+  (let ((fmt (bark:make-json-formatter :level-key nil)))
+    (let ((result (funcall fmt +warn+ "" nil nil "hello" nil)))
+      (5am:is-false (search "\"level\"" result))
+      (5am:is-true (search "\"ts\":" result))
+      (5am:is-true (search "\"msg\":\"hello\"" result))
+      ;; No leading comma after {
+      (5am:is-false (string= ",\"" (subseq result 1 3))))))
+
+(5am:test test-make-json-formatter-no-level-with-chindings
+  "make-json-formatter with :level-key nil, no timestamp, but chindings present."
+  (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
+    (let* ((chd (serialize-bindings (list :svc "api")))
+           (result (funcall fmt +info+ chd nil nil "test" nil)))
+      (5am:is-false (search "\"level\"" result))
+      (5am:is-true (search "\"svc\":\"api\"" result))
+      ;; No leading comma after {
+      (5am:is-false (string= ",\"" (subseq result 1 3))))))
+
+(5am:test test-make-json-formatter-no-level-no-ts-context-only
+  "make-json-formatter with no level, no timestamp, no chindings — only context fields."
+  (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
+    (let ((result (funcall fmt +info+ "" nil '((:env . "prod")) nil nil)))
+      (5am:is-true (search "\"env\":\"prod\"" result))
+      ;; No leading comma after {
+      (5am:is-false (string= ",\"" (subseq result 1 3))))))
+
 ;;; --- Bug regression tests ---
 
 (5am:test test-logfmt-condition-escapes-quotes

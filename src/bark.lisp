@@ -221,10 +221,12 @@
          (incf i)))))
   (write-char #\] stream))
 
-(defun emit-json-key (stream key)
-  "Write KEY as a JSON object key to STREAM."
+(defun emit-json-key (stream key &optional (separator #\,))
+  "Write KEY as a JSON object key to STREAM, preceded by SEPARATOR.
+   Pass NIL as separator to omit the leading comma (first field in object)."
   (declare (optimize (speed 3) (safety 1)))
-  (write-string ",\"" stream)
+  (when separator (write-char separator stream))
+  (write-char #\" stream)
   (typecase key
     (string (write-json-escaped-string key stream))
     (symbol (write-json-escaped-string (key-string key) stream))
@@ -320,19 +322,23 @@
      (write-char #\} stream))
     (t (emit-type-placeholder stream value))))
 
-(defun emit-json-fields (stream fields)
-  "Write a plist of FIELDS as JSON key-value pairs to STREAM."
+(defun emit-json-fields (stream fields &optional (first-separator #\,))
+  "Write a plist of FIELDS as JSON key-value pairs to STREAM.
+   FIRST-SEPARATOR is the separator before the first key (NIL to omit)."
   (declare (optimize (speed 3) (safety 1)))
-  (loop for (k v) on fields by #'cddr do
-    (emit-json-key stream k)
-    (emit-json-value stream v)))
+  (loop for (k v) on fields by #'cddr
+        for sep = first-separator then #\,
+        do (emit-json-key stream k sep)
+           (emit-json-value stream v)))
 
-(defun emit-context-fields (stream context)
-  "Write dynamic context fields (alist) as JSON key-value pairs to STREAM."
+(defun emit-context-fields (stream context &optional (first-separator #\,))
+  "Write dynamic context fields (alist) as JSON key-value pairs to STREAM.
+   FIRST-SEPARATOR is the separator before the first key (NIL to omit)."
   (declare (optimize (speed 3) (safety 1)))
-  (dolist (pair context)
-    (emit-json-key stream (car pair))
-    (emit-json-value stream (cdr pair))))
+  (loop for pair in context
+        for sep = first-separator then #\,
+        do (emit-json-key stream (car pair) sep)
+           (emit-json-value stream (cdr pair))))
 
 (declaim (ftype (function (list) (values string &optional)) serialize-bindings))
 
@@ -490,40 +496,62 @@
                    year month day h min s remainder)))))))
 
 (defun build-json-level-prefixes (level-key level-format)
-  "Build a vector of pre-computed JSON level prefix strings.
+  "Build a vector of pre-computed JSON level field strings (without opening brace).
    LEVEL-KEY is the JSON key name (e.g. \"level\" or \"severity\").
    LEVEL-FORMAT is :numeric or :string."
   (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
     (loop for i from +trace+ to +fatal+
           do (setf (aref prefixes i)
                    (ecase level-format
-                     (:numeric (format nil "{\"~a\":~d" level-key i))
-                     (:string (format nil "{\"~a\":\"~a\"" level-key (level-name i))))))
+                     (:numeric (format nil "\"~a\":~d" level-key i))
+                     (:string (format nil "\"~a\":\"~a\"" level-key (level-name i))))))
     prefixes))
 
 (defun make-json-formatter (&key (timestamp :unix-ms) (level-format :string)
                                   (level-key "level") (timestamp-key "ts")
                                   (message-key "msg"))
   "Return a JSON formatter closure with custom keys and formats.
-   Pre-computes level prefix vector, timestamp key fragment, and message key fragment."
-  (let ((prefixes (build-json-level-prefixes level-key level-format))
-        (ts-fragment (when timestamp (format nil ",\"~a\":" timestamp-key)))
-        (msg-prefix (format nil ",\"~a\":\"" message-key)))
+   Pre-computes level prefix vector, timestamp key fragment, and message key fragment.
+   Pass :level-key NIL to omit the level field entirely."
+  (let ((prefixes (when level-key
+                    (build-json-level-prefixes level-key level-format)))
+        (ts-key (when timestamp (format nil "\"~a\":" timestamp-key)))
+        (msg-key (format nil "\"~a\":\"" message-key)))
     (lambda (level chindings raw-bindings context message fields)
       (declare (optimize (speed 3) (safety 1)))
       (declare (ignore raw-bindings))
       (with-output-to-string (s)
-        (write-string (svref prefixes level) s)
-        (when ts-fragment
-          (write-string ts-fragment s)
-          (emit-timestamp timestamp s))
-        (write-string chindings s)
-        (emit-context-fields s context)
-        (emit-json-fields s fields)
-        (when message
-          (write-string msg-prefix s)
-          (write-json-escaped-string message s)
-          (write-string "\"" s))
+        (write-char #\{ s)
+        (let ((wrote nil))
+          ;; Level
+          (when prefixes
+            (write-string (svref prefixes level) s)
+            (setf wrote t))
+          ;; Timestamp
+          (when ts-key
+            (when wrote (write-char #\, s))
+            (write-string ts-key s)
+            (emit-timestamp timestamp s)
+            (setf wrote t))
+          ;; Chindings (pre-serialized with leading commas)
+          (let ((clen (length chindings)))
+            (when (plusp clen)
+              (if wrote
+                  (write-string chindings s)
+                  (progn (write-string chindings s :start 1)
+                         (setf wrote t)))))
+          ;; Context and fields
+          (let ((sep (if wrote #\, nil)))
+            (emit-context-fields s context sep)
+            (when context (setf sep #\,))
+            (emit-json-fields s fields sep)
+            (when fields (setf sep #\,))
+            ;; Message
+            (when message
+              (when sep (write-char sep s))
+              (write-string msg-key s)
+              (write-json-escaped-string message s)
+              (write-string "\"" s))))
         (write-string "}" s)))))
 
 (defun make-logfmt-formatter (&key (timestamp :unix-ms) (level-key "level")
