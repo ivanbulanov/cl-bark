@@ -501,7 +501,7 @@
                      (:string (format nil "{\"~a\":\"~a\"" level-key (level-name i))))))
     prefixes))
 
-(defun make-json-formatter (&key (timestamp :unix-ms) (level-format :numeric)
+(defun make-json-formatter (&key (timestamp :unix-ms) (level-format :string)
                                   (level-key "level") (timestamp-key "ts")
                                   (message-key "msg"))
   "Return a JSON formatter closure with custom keys and formats.
