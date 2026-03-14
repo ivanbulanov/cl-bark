@@ -7,7 +7,7 @@
   (:import-from #:bark
    #:make-logger #:make-windowed-counter #:make-level-sampler
    #:set-level-sampling #:logger-debug-fn
-   #:json-formatter #:+level-slot-count+ #:make-child))
+   #:json-formatter #:make-child))
 
 (in-package #:bark-concurrency-tests)
 
@@ -76,9 +76,7 @@
             (setf (aref counters level-index) wc)
             (push (bt:make-thread
                    (lambda ()
-                     (set-level-sampling lgr
-                                        (* level-index bark:+level-step+)
-                                        wc))
+                     (set-level-sampling lgr level-index wc))
                    :name (format nil "cas-~d" tid))
                   thread-list))))
       (dolist (th thread-list) (bt:join-thread th)))
@@ -86,7 +84,7 @@
     (5am:is-true (not (null (bark::logger-level-sampler lgr))))
     ;; Verify: all 6 level slots have their windowed-counter (no silent overwrites)
     (let ((ls (bark::logger-level-sampler lgr)))
-      (5am:is (= +level-slot-count+ (length ls)))
+      (5am:is (= bark:+level-slot-count+ (length ls)))
       (dotimes (idx 6)
         (let ((slot (aref ls (1+ idx))))
           (5am:is-true (eq slot (aref counters (1+ idx)))

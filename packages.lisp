@@ -4,7 +4,7 @@
   (:use "COMMON-LISP")
   (:shadow "DEBUG" "ERROR" "TRACE" "WARN")
   (:export "+DEBUG+" "+ERROR+" "+FATAL+" "+INFO+" "+TRACE+" "+WARN+"
-           "+LEVEL-STEP+" "+LEVEL-SLOT-COUNT+"
+           "+LEVEL-SLOT-COUNT+"
            "+MIN-RING-CAPACITY+" "+DEFAULT-BUFFER-CAPACITY+"
            "*COMPILE-TIME-MAX-LEVEL*"
            "*LOG-CONTEXT*"

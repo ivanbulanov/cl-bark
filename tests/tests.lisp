@@ -70,21 +70,21 @@
 
 (5am:test test-level-constants
   "Verify all level constant values."
-  (5am:is (= 10 +trace+))
-  (5am:is (= 20 +debug+))
-  (5am:is (= 30 +info+))
-  (5am:is (= 40 +warn+))
-  (5am:is (= 50 +error+))
-  (5am:is (= 60 +fatal+)))
+  (5am:is (= 1 +trace+))
+  (5am:is (= 2 +debug+))
+  (5am:is (= 3 +info+))
+  (5am:is (= 4 +warn+))
+  (5am:is (= 5 +error+))
+  (5am:is (= 6 +fatal+)))
 
 (5am:test test-level-from-keyword
   "Test level-from-keyword for all keywords and invalid input."
-  (5am:is (= 10 (level-from-keyword :trace)))
-  (5am:is (= 20 (level-from-keyword :debug)))
-  (5am:is (= 30 (level-from-keyword :info)))
-  (5am:is (= 40 (level-from-keyword :warn)))
-  (5am:is (= 50 (level-from-keyword :error)))
-  (5am:is (= 60 (level-from-keyword :fatal)))
+  (5am:is (= 1 (level-from-keyword :trace)))
+  (5am:is (= 2 (level-from-keyword :debug)))
+  (5am:is (= 3 (level-from-keyword :info)))
+  (5am:is (= 4 (level-from-keyword :warn)))
+  (5am:is (= 5 (level-from-keyword :error)))
+  (5am:is (= 6 (level-from-keyword :fatal)))
   (5am:signals cl:error (level-from-keyword :bogus)))
 
 (5am:test test-level-name
@@ -395,7 +395,7 @@
 
 (5am:test test-set-level-all-disabled
   "Set level very high, verify all function slots are noop."
-  (let ((lgr (make-logger :level 70)))
+  (let ((lgr (make-logger :level 7)))
     (5am:is (eq #'noop (logger-trace-fn lgr)))
     (5am:is (eq #'noop (logger-debug-fn lgr)))
     (5am:is (eq #'noop (logger-info-fn lgr)))
@@ -446,7 +446,7 @@
     (5am:is-true (search "\"ts\"" output))
     (5am:is-true (search "\"msg\"" output))
     (5am:is-true (search "hello world" output))
-    (5am:is-true (search "30" output))))
+    (5am:is-true (search "3" output))))
 
 (5am:test test-json-formatter-with-fields
   "Test json-formatter with per-call fields."
@@ -1005,8 +1005,8 @@
 
 (5am:test test-json-level-numbers
   "All 6 levels emit the correct numeric level code in JSON output."
-  (loop for (kw expected) in '((:trace 10) (:debug 20) (:info 30)
-                                (:warn 40) (:error 50) (:fatal 60))
+  (loop for (kw expected) in '((:trace 1) (:debug 2) (:info 3)
+                                (:warn 4) (:error 5) (:fatal 6))
         do (let* ((line (log-to-string kw #'bark:json-formatter))
                   (level (gethash "level" (yason:parse line))))
              (5am:is (= expected level)))))
@@ -1236,12 +1236,12 @@
     (let ((lines (funcall logs)))
       (5am:is (= 6 (length lines)))
       ;; Verify each level number in order
-      (5am:is (search "\"level\":10" (nth 0 lines)))
-      (5am:is (search "\"level\":20" (nth 1 lines)))
-      (5am:is (search "\"level\":30" (nth 2 lines)))
-      (5am:is (search "\"level\":40" (nth 3 lines)))
-      (5am:is (search "\"level\":50" (nth 4 lines)))
-      (5am:is (search "\"level\":60" (nth 5 lines))))))
+      (5am:is (search "\"level\":1" (nth 0 lines)))
+      (5am:is (search "\"level\":2" (nth 1 lines)))
+      (5am:is (search "\"level\":3" (nth 2 lines)))
+      (5am:is (search "\"level\":4" (nth 3 lines)))
+      (5am:is (search "\"level\":5" (nth 4 lines)))
+      (5am:is (search "\"level\":6" (nth 5 lines))))))
 
 (5am:test test-macros-with-fields
   "Convenience macros pass per-call fields through to the formatter."
@@ -1332,7 +1332,7 @@
       ;; Message content preserved
       (5am:is (search "dropped 5 log messages" result))
       ;; Formatted as JSON with warn level
-      (5am:is (search "\"level\":40" result))
+      (5am:is (search "\"level\":4" result))
       (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-uses-formatter-config
@@ -1407,7 +1407,7 @@
       ;; Extra field from on-drop
       (5am:is (search "\"count\":3" result))
       ;; Formatted with warn level
-      (5am:is (search "\"level\":40" result)))))
+      (5am:is (search "\"level\":4" result)))))
 
 (5am:test test-async-on-drop-fields-only
   "on-drop returning (values nil fields) emits fields without message."
@@ -1427,7 +1427,7 @@
       (5am:is (search "\"dropped\":3" result))
       (5am:is (search "\"severity\":\"backpressure\"" result))
       ;; Has level (from formatter)
-      (5am:is (search "\"level\":40" result))
+      (5am:is (search "\"level\":4" result))
       ;; No message field
       (5am:is (not (search "\"msg\":" result))))))
 
@@ -1925,8 +1925,8 @@
       (bark:fatal lgr "f")
       (let ((logs (funcall results-fn)))
         (5am:is (= 6 (length logs)))
-        (5am:is-true (search "\"level\":10" (nth 0 logs)))
-        (5am:is-true (search "\"level\":60" (nth 5 logs)))))))
+        (5am:is-true (search "\"level\":1" (nth 0 logs)))
+        (5am:is-true (search "\"level\":6" (nth 5 logs)))))))
 
 (5am:test test-explicit-logger-no-message
   "Explicit logger as sole arg emits a log entry with nil message."
@@ -1936,7 +1936,7 @@
       (let ((logs (funcall results-fn)))
         (5am:is (= 1 (length logs)))
         ;; Should have level but no msg key (nil message)
-        (5am:is-true (search "\"level\":30" (first logs)))
+        (5am:is-true (search "\"level\":3" (first logs)))
         (5am:is-false (search "\"msg\":" (first logs)))))))
 
 (5am:test test-explicit-logger-keyword-fields-only
@@ -3016,7 +3016,7 @@
                                        :message-key "message")))
     (let* ((*override-timestamp* 1234567890000)
            (result (funcall fmt +info+ "" nil nil "hello" nil)))
-      (5am:is-true (search "\"severity\":30" result))
+      (5am:is-true (search "\"severity\":3" result))
       (5am:is-true (search "\"time\":1234567890000" result))
       (5am:is-true (search "\"message\":\"hello\"" result))
       ;; Default keys should NOT appear
@@ -3043,7 +3043,7 @@
   (let ((fmt (bark:make-json-formatter :timestamp nil)))
     (let ((result (funcall fmt +info+ "" nil nil "test" nil)))
       (5am:is-false (search "\"ts\":" result))
-      (5am:is-true (search "\"level\":30" result))
+      (5am:is-true (search "\"level\":3" result))
       (5am:is-true (search "\"msg\":\"test\"" result)))))
 
 (5am:test test-make-json-formatter-fields

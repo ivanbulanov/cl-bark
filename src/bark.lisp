@@ -4,21 +4,19 @@
 
 ;;; --- Levels ---
 
-(defconstant +trace+ 10 "Trace log level.")
+(defconstant +trace+ 1 "Trace log level.")
 
-(defconstant +debug+ 20 "Debug log level.")
+(defconstant +debug+ 2 "Debug log level.")
 
-(defconstant +info+ 30 "Info log level.")
+(defconstant +info+ 3 "Info log level.")
 
-(defconstant +warn+ 40 "Warning log level.")
+(defconstant +warn+ 4 "Warning log level.")
 
-(defconstant +error+ 50 "Error log level.")
+(defconstant +error+ 5 "Error log level.")
 
-(defconstant +fatal+ 60 "Fatal log level.")
+(defconstant +fatal+ 6 "Fatal log level.")
 
-(defconstant +level-step+ 10 "Spacing between consecutive log levels.")
-
-(defconstant +level-slot-count+ (1+ (/ +fatal+ +level-step+))
+(defconstant +level-slot-count+ (1+ +fatal+)
   "Number of level index slots (0 through fatal).")
 
 (defparameter *level-colors*
@@ -29,20 +27,12 @@
     "33"    ; warn  = yellow
     "31"    ; error = red
     "35")   ; fatal = magenta
-  "ANSI color codes indexed by (/ level +level-step+).")
+  "ANSI color codes indexed by level.")
 
-(defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by (/ level +level-step+).")
+(defparameter *level-names* #(nil "trace" "debug" "info" "warn" "error" "fatal") "Vector of level name strings indexed by level.")
 
 (defparameter *level-names-upper* #(nil "TRACE" "DEBUG" "INFO " "WARN " "ERROR" "FATAL")
   "Pre-computed uppercase padded level names for pretty-formatter.")
-
-(defparameter *level-prefixes*
-  (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
-    (loop for i from +trace+ to +fatal+ by +level-step+
-          do (setf (aref prefixes (floor i +level-step+))
-                   (format nil "{\"level\":~d" i)))
-    prefixes)
-  "Pre-computed JSON level prefixes indexed by (/ level +level-step+).")
 
 (declaim (ftype (function (keyword) (values fixnum &optional)) level-from-keyword))
 
@@ -61,10 +51,9 @@
 (defun level-name (level)
   "Convert a numeric level to its name string."
   (declare (type fixnum level))
-  (let ((idx (truncate level +level-step+)))
-    (if (and (>= idx (/ +trace+ +level-step+)) (<= idx (/ +fatal+ +level-step+)))
-        (svref *level-names* idx)
-        "unknown")))
+  (if (<= +trace+ level +fatal+)
+      (svref *level-names* level)
+      "unknown"))
 
 ;;; --- Serialization Limits ---
 
@@ -505,9 +494,8 @@
    LEVEL-KEY is the JSON key name (e.g. \"level\" or \"severity\").
    LEVEL-FORMAT is :numeric or :string."
   (let ((prefixes (make-array +level-slot-count+ :initial-element nil)))
-    (loop for i from +trace+ to +fatal+ by +level-step+
-          for idx = (floor i +level-step+)
-          do (setf (aref prefixes idx)
+    (loop for i from +trace+ to +fatal+
+          do (setf (aref prefixes i)
                    (ecase level-format
                      (:numeric (format nil "{\"~a\":~d" level-key i))
                      (:string (format nil "{\"~a\":\"~a\"" level-key (level-name i))))))
@@ -525,7 +513,7 @@
       (declare (optimize (speed 3) (safety 1)))
       (declare (ignore raw-bindings))
       (with-output-to-string (s)
-        (write-string (svref prefixes (floor level +level-step+)) s)
+        (write-string (svref prefixes level) s)
         (when ts-fragment
           (write-string ts-fragment s)
           (emit-timestamp timestamp s))
@@ -571,7 +559,7 @@
         (let* ((*print-level* *max-pretty-depth*)
                (*print-length* *max-pretty-length*)
                (*print-circle* t)
-               (level-idx (floor level +level-step+))
+               (level-idx level)
                (color (svref *level-colors* level-idx))
                (stacks nil))
           (flet ((write-key (k)
@@ -1182,7 +1170,7 @@ Specifying both :level and :filter is an error."
   "Create a log function for LEVEL-VALUE."
   (declare (optimize (speed 3) (safety 1))
            (type fixnum level-value))
-  (let ((level-index (floor level-value +level-step+)))
+  (let ((level-index level-value))
     (lambda (lgr message &rest fields)
       (declare (ignorable lgr) (dynamic-extent fields))
       (block log-fn
@@ -1335,10 +1323,9 @@ Specifying both :level and :filter is an error."
 (defun set-level-sampling (logger level windowed-counter)
   "Set sampling for LEVEL to WINDOWED-COUNTER on LOGGER (nil to remove).
    Thread-safe via CAS on nil->vector transition."
-  (let ((level-index (floor (etypecase level
-                              (fixnum level)
-                              (keyword (level-from-keyword level)))
-                            +level-step+)))
+  (let ((level-index (etypecase level
+                      (fixnum level)
+                      (keyword (level-from-keyword level)))))
     (loop
       (let ((ls (logger-level-sampler logger)))
         (cond
