@@ -720,11 +720,34 @@
           (setf (svref slots (logand head mask)) value)
           (return t))))))
 
+(defun ring-buffer-offer (rb value)
+  "Try to push VALUE onto RB. Returns T on success, NIL if full.
+   Does NOT increment the dropped counter."
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((mask (ring-buffer-mask rb))
+        (slots (ring-buffer-slots rb)))
+    (loop
+      (let* ((head (ring-buffer-head rb))
+             (tail (ring-buffer-tail rb))
+             (size (the fixnum (- head tail))))
+        (when (>= size (1+ mask))
+          (return nil))
+        (when (atomics:cas (ring-buffer-head rb) head (1+ head))
+          (setf (svref slots (logand head mask)) value)
+          (return t))))))
+
 (defun ring-buffer-drain (rb)
   "Drain all available values from the ring buffer into a list. Single-consumer only."
   (loop for val = (ring-buffer-pop rb) while val collect val))
 
 ;;; --- Async Output ---
+
+(declaim (ftype (function () (values double-float &optional)) monotonic-seconds))
+
+(defun monotonic-seconds ()
+  "Current time in seconds (monotonic, double-float precision)."
+  (/ (get-internal-real-time)
+     #.(coerce internal-time-units-per-second 'double-float)))
 
 (defun default-on-drop (count)
   "Default drop handler. Returns a message string for the formatter."
@@ -732,25 +755,36 @@
 
 (defstruct (async-output (:constructor %make-async-output))
   "Writer thread + ring buffer for async log delivery."
-  (ring      nil :type (or null ring-buffer))
-  (thread    nil :type (or null bt:thread))
-  (stream    nil :type (or null stream))
-  (running   nil :type boolean)
-  (formatter nil :type (or null function))
-  (on-drop   nil :type (or null function))
-  (on-error  nil :type (or null function))
-  (notify     nil :type t)
-  (flush-lock nil :type t)
-  (flush-acks nil :type list))
+  (ring              nil   :type (or null ring-buffer))
+  (thread            nil   :type (or null bt:thread))
+  (stream            nil   :type (or null stream))
+  (running           nil   :type boolean)
+  (formatter         nil   :type (or null function))
+  (on-drop           nil   :type (or null function))
+  (on-error          nil   :type (or null function))
+  (notify            nil   :type t)
+  (flush-lock        nil   :type t)
+  (flush-acks        nil   :type list)
+  ;; Blocking mode slots
+  (blocking-p        nil   :type boolean)
+  (block-timeout     5.0d0 :type (or double-float null))
+  (on-block-timeout  nil   :type (or null function))
+  (block-dropped     0     :type (unsigned-byte 64))
+  (space-lock        nil   :type t)
+  (space-available   nil   :type t))
 
 (declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null function))
-                                  (:on-drop (or null function)) (:on-error (or null function)))
+                                  (:on-drop (or null function)) (:on-error (or null function))
+                                  (:blocking boolean) (:block-timeout t)
+                                  (:on-block-timeout (or null function)))
                           (values async-output &optional)) make-async-output))
 
 (defun make-async-output (stream &key (capacity +default-buffer-capacity+)
-                                      formatter (on-drop #'default-on-drop) on-error)
+                                      formatter (on-drop #'default-on-drop) on-error
+                                      blocking (block-timeout 5.0) on-block-timeout)
   "Create an async output that writes to STREAM via a background thread.
-FORMATTER, when provided, is used to format on-drop warning bindings."
+FORMATTER, when provided, is used to format on-drop warning bindings.
+When BLOCKING is true, callers wait for space instead of dropping messages."
   (let* ((notify (bt:make-semaphore :name "bark-notify"))
          (ao (%make-async-output
               :ring (make-ring-buffer capacity)
@@ -760,7 +794,16 @@ FORMATTER, when provided, is used to format on-drop warning bindings."
               :on-drop on-drop
               :on-error on-error
               :notify notify
-              :flush-lock (bt:make-lock "bark-flush"))))
+              :flush-lock (bt:make-lock "bark-flush")
+              :blocking-p blocking
+              :block-timeout (when block-timeout
+                               (coerce block-timeout 'double-float))
+              :on-block-timeout on-block-timeout
+              :space-lock (when blocking
+                            (bt:make-lock "bark-space"))
+              :space-available (when blocking
+                                 (bt:make-condition-variable
+                                  :name "bark-space-available")))))
     (let ((err-output *error-output*))
       (setf (async-output-thread ao)
             (bt:make-thread (lambda ()
@@ -791,6 +834,11 @@ FORMATTER, when provided, is used to format on-drop warning bindings."
     (bt:signal-semaphore (async-output-notify async-output))
     (when (async-output-thread async-output)
       (bt:join-thread (async-output-thread async-output)))
+    ;; Wake any blocked producers so they see running=nil and exit
+    (let ((cv (async-output-space-available async-output)))
+      (when cv
+        (bt:with-lock-held ((async-output-space-lock async-output))
+          (sb-thread:condition-broadcast cv))))
     (let ((ring (async-output-ring async-output))
           (stream (async-output-stream async-output)))
       (handler-case
@@ -864,7 +912,11 @@ FORMATTER, when provided, is used to format on-drop warning bindings."
                       (prog1 (async-output-flush-acks async-output)
                         (setf (async-output-flush-acks async-output) nil)))))
           (dolist (ack acks)
-            (bt:signal-semaphore ack)))))
+            (bt:signal-semaphore ack)))
+        ;; Wake blocked producers (no-op when non-blocking: space-available is nil)
+        (let ((cv (async-output-space-available async-output)))
+          (when cv
+            (sb-thread:condition-broadcast cv)))))
     ;; Drain any orphaned flush-acks so callers don't stall for the 5s timeout
     (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
                   (prog1 (async-output-flush-acks async-output)
@@ -893,18 +945,22 @@ FORMATTER, when provided, is used to format on-drop warning bindings."
 
 (defun make-tee (destinations)
   "Create a fan-out output from a list of destination plists.
-Each plist accepts :stream (required), :formatter, :filter, :level, :capacity, :on-drop, :on-error.
+Each plist accepts :stream (required), :formatter, :filter, :level, :capacity,
+:on-drop, :on-error, :blocking, :block-timeout, :on-block-timeout.
 Specifying both :level and :filter is an error."
   (let ((dests
           (mapcar
            (lambda (spec)
-             (let ((stream    (getf spec :stream))
-                   (formatter (or (getf spec :formatter) #'json-formatter))
-                   (filter-fn (getf spec :filter))
-                   (level-kw  (getf spec :level))
-                   (capacity  (or (getf spec :capacity) +default-buffer-capacity+))
-                   (on-drop   (or (getf spec :on-drop) #'default-on-drop))
-                   (on-error  (getf spec :on-error)))
+             (let ((stream           (getf spec :stream))
+                   (formatter        (or (getf spec :formatter) #'json-formatter))
+                   (filter-fn        (getf spec :filter))
+                   (level-kw         (getf spec :level))
+                   (capacity         (or (getf spec :capacity) +default-buffer-capacity+))
+                   (on-drop          (or (getf spec :on-drop) #'default-on-drop))
+                   (on-error         (getf spec :on-error))
+                   (blocking         (getf spec :blocking))
+                   (block-timeout    (getf spec :block-timeout 5.0))
+                   (on-block-timeout (getf spec :on-block-timeout)))
                (when (and filter-fn level-kw)
                  (cl:error "Cannot specify both :filter and :level for a tee destination"))
                (let ((actual-filter
@@ -921,7 +977,10 @@ Specifying both :level and :filter is an error."
                                                    :capacity capacity
                                                    :formatter formatter
                                                    :on-drop on-drop
-                                                   :on-error on-error)
+                                                   :on-error on-error
+                                                   :blocking blocking
+                                                   :block-timeout block-timeout
+                                                   :on-block-timeout on-block-timeout)
                   :formatter formatter
                   :filter actual-filter))))
            destinations)))
@@ -943,7 +1002,8 @@ Specifying both :level and :filter is an error."
                 'simple-vector)))))
 
 (defmacro tee (&rest destination-specs)
-  "Syntax sugar over make-tee. Each spec is (stream-expr &key formatter filter level capacity on-drop on-error)."
+  "Syntax sugar over make-tee. Each spec is
+(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout)."
   `(make-tee
     (list ,@(loop for spec in destination-specs
                   for (stream-expr . keys) = spec
@@ -968,19 +1028,54 @@ Specifying both :level and :filter is an error."
         (let ((line (funcall (formatter-group-formatter group)
                              level-value chindings raw-bindings context message fields)))
           (dolist (dest passing)
-            (let ((ao (destination-async-output dest)))
-              (ring-buffer-push (async-output-ring ao) line)
-              (bt:signal-semaphore (async-output-notify ao))))))))
+            (deliver-line (destination-async-output dest) line))))))
   (values))
 
 ;;; --- Output Delivery ---
 
+(defun blocking-deliver (ao line)
+  "Deliver LINE to blocking async-output AO, waiting for space if full."
+  (let ((ring (async-output-ring ao))
+        (notify (async-output-notify ao)))
+    ;; Fast path: try offer without locking
+    (when (ring-buffer-offer ring line)
+      (bt:signal-semaphore notify)
+      (return-from blocking-deliver))
+    ;; Slow path: wait for space
+    (let* ((timeout (async-output-block-timeout ao))
+           (deadline (when timeout
+                       (+ (monotonic-seconds) timeout))))
+      (bt:with-lock-held ((async-output-space-lock ao))
+        (loop
+          (when (ring-buffer-offer ring line)
+            (bt:signal-semaphore notify)
+            (return-from blocking-deliver))
+          (unless (async-output-running ao)
+            (return))
+          (let ((remaining (when deadline
+                             (- deadline (monotonic-seconds)))))
+            (when (and remaining (<= remaining 0.0d0))
+              (return))
+            (bt:condition-wait (async-output-space-available ao)
+                               (async-output-space-lock ao)
+                               :timeout (or remaining nil))))))
+    ;; Timed out or stopped — handle callback and count
+    (let ((cb (async-output-on-block-timeout ao)))
+      (when cb
+        (handler-case (funcall cb line (async-output-stream ao))
+          (cl:error (e)
+            (format *error-output* "bark on-block-timeout error: ~a~%" e)
+            (force-output *error-output*)))))
+    (atomics:atomic-incf (async-output-block-dropped ao))))
+
 (defun deliver-line (output line)
   "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
   (if (async-output-p output)
-      (progn
-        (ring-buffer-push (async-output-ring output) line)
-        (bt:signal-semaphore (async-output-notify output)))
+      (if (async-output-blocking-p output)
+          (blocking-deliver output line)
+          (progn
+            (ring-buffer-push (async-output-ring output) line)
+            (bt:signal-semaphore (async-output-notify output))))
       (etypecase output
         (stream (write-string line output) (terpri output) (force-output output))
         (function (funcall output line)))))
@@ -1268,26 +1363,44 @@ Specifying both :level and :filter is an error."
                                 (:name string) (:capacity fixnum) (:on-drop (or null function))
                                 (:context list) (:field-transform (or null function))
                                 (:level-sampler (or null simple-vector))
-                                (:consistent (or null consistent-sampler)))
+                                (:consistent (or null consistent-sampler))
+                                (:blocking boolean) (:block-timeout t)
+                                (:on-block-timeout (or null function)))
                           (values logger &optional)) start))
 
 (defun start (&key output (level :info) (formatter #'json-formatter)
                    (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
-                   context field-transform level-sampler consistent)
+                   context field-transform level-sampler consistent
+                   blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout)
   "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
 When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
 When OUTPUT is a tee-output, the async-outputs are already created.
+Passing :blocking, :block-timeout, or :on-block-timeout with a tee-output signals an error.
 CONTEXT, when provided, is a plist of static context fields.
 FIELD-TRANSFORM, when provided, is a function (lambda (key value) -> (values new-value keep-p))
 that is called on each field before serialization. Return (values nil nil) to drop a field."
   (when (and *logger* (logger-output *logger*))
     (stop))
+  (when (and (tee-output-p output)
+             (or blocking on-block-timeout block-timeout-supplied-p))
+    (cl:error "Cannot specify :blocking, :block-timeout, or :on-block-timeout ~
+               with a tee-output. Configure blocking per-destination in bark:tee."))
   (let* ((actual-output (cond
                           ((tee-output-p output) output)
-                          ((streamp output) (make-async-output output :capacity capacity
-                                                                      :formatter formatter :on-drop on-drop))
-                          ((null output) (make-async-output *error-output* :capacity capacity
-                                                                           :formatter formatter :on-drop on-drop))
+                          ((streamp output) (make-async-output output
+                                                               :capacity capacity
+                                                               :formatter formatter
+                                                               :on-drop on-drop
+                                                               :blocking blocking
+                                                               :block-timeout block-timeout
+                                                               :on-block-timeout on-block-timeout))
+                          ((null output) (make-async-output *error-output*
+                                                            :capacity capacity
+                                                            :formatter formatter
+                                                            :on-drop on-drop
+                                                            :blocking blocking
+                                                            :block-timeout block-timeout
+                                                            :on-block-timeout on-block-timeout))
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
          (lgr (make-logger :name name :level level :formatter formatter
                            :output actual-output :field-transform field-transform

@@ -20,7 +20,8 @@
   :components
   ((:module "tests"
     :components
-    ((:file "tests")))))
+    ((:file "tests")
+     (:file "blocking-tests")))))
 
 (asdf:defsystem "cl-bark/concurrency-tests"
   :depends-on ("cl-bark" "fiveam" "bordeaux-threads")
