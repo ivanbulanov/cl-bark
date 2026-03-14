@@ -11,7 +11,7 @@
    #:tee-output-p #:tee-output-groups
    #:destination-async-output #:formatter-group-destinations
    #:json-formatter #:make-json-formatter
-   #:make-logger #:start #:stop
+   #:make-logger #:stop
    #:*logger*))
 
 (in-package #:bark-blocking-tests)
@@ -320,55 +320,55 @@
 ;;; --- bark:start integration ---
 
 (5am:test test-start-with-blocking
-  "bark:start with :blocking t creates a blocking async-output."
+  "bark:make-logger with :blocking t creates a blocking async-output."
   (let ((out (make-string-output-stream)))
-    (start :output out :blocking t :block-timeout 10.0)
+    (setf *logger* (make-logger :output out :blocking t :block-timeout 10.0))
     (unwind-protect
          (let ((ao (bark::logger-output *logger*)))
            (5am:is (bark::async-output-blocking-p ao))
            (5am:is (= 10.0d0 (bark::async-output-block-timeout ao))))
-      (stop))))
+      (stop *logger*))))
 
 (5am:test test-start-blocking-with-tee-signals-error
-  "bark:start with :blocking and a tee-output signals an error."
+  "bark:make-logger with :blocking and a tee-output signals an error."
   (let* ((out1 (make-string-output-stream))
          (out2 (make-string-output-stream))
          (tee-out (make-tee (list (list :stream out1) (list :stream out2)))))
     (unwind-protect
          (5am:signals cl:error
-           (start :output tee-out :blocking t))
+           (make-logger :output tee-out :blocking t))
       (stop-tee tee-out))))
 
 (5am:test test-start-block-timeout-with-tee-signals-error
-  "bark:start with :block-timeout and a tee-output signals an error."
+  "bark:make-logger with :block-timeout and a tee-output signals an error."
   (let* ((out1 (make-string-output-stream))
          (out2 (make-string-output-stream))
          (tee-out (make-tee (list (list :stream out1) (list :stream out2)))))
     (unwind-protect
          (5am:signals cl:error
-           (start :output tee-out :block-timeout 1.0))
+           (make-logger :output tee-out :block-timeout 1.0))
       (stop-tee tee-out))))
 
 (5am:test test-start-on-block-timeout-with-tee-signals-error
-  "bark:start with :on-block-timeout and a tee-output signals an error."
+  "bark:make-logger with :on-block-timeout and a tee-output signals an error."
   (let* ((out1 (make-string-output-stream))
          (out2 (make-string-output-stream))
          (tee-out (make-tee (list (list :stream out1) (list :stream out2)))))
     (unwind-protect
          (5am:signals cl:error
-           (start :output tee-out :on-block-timeout (lambda (m s) (declare (ignore m s)))))
+           (make-logger :output tee-out :on-block-timeout (lambda (m s) (declare (ignore m s)))))
       (stop-tee tee-out))))
 
 (5am:test test-start-blocking-end-to-end
-  "End-to-end: bark:start with :blocking t, log a message, verify delivery."
+  "End-to-end: bark:make-logger with :blocking t, log a message, verify delivery."
   (let ((out (make-string-output-stream)))
-    (start :output out :blocking t :formatter (make-json-formatter :timestamp nil))
+    (setf *logger* (make-logger :output out :blocking t :formatter (make-json-formatter :timestamp nil)))
     (unwind-protect
          (progn
            (bark:info "blocking-e2e")
            (bark:flush)
            (5am:is (search "blocking-e2e" (get-output-stream-string out))))
-      (stop))))
+      (stop *logger*))))
 
 ;;; --- concurrency tests ---
 

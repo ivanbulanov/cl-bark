@@ -7,9 +7,8 @@
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
    #:level-from-keyword #:level-name
    ;; Struct accessors
-   #:logger-p #:logger-name #:logger-level #:logger-formatter
+   #:logger-p #:logger-level #:logger-formatter
    #:logger-output #:logger-chindings #:logger-raw-bindings
-   #:logger-level-sampler #:logger-consistent
    #:logger-trace-fn #:logger-debug-fn #:logger-info-fn
    #:logger-warn-fn #:logger-error-fn #:logger-fatal-fn
    ;; JSON/serialization internals
@@ -43,7 +42,7 @@
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
-   #:make-logger #:child #:set-level #:start #:stop
+   #:make-logger #:make-child #:set-level #:stop
    #:set-level-sampling #:set-consistent
    #:make-windowed-counter #:make-level-sampler #:make-consistent-sampler
    #:windowed-counter-window-ticks
@@ -58,6 +57,14 @@
   :description "Comprehensive test suite for the cl-bark logging library.")
 
 (5am:in-suite bark-tests)
+
+;;; --- Test utilities ---
+
+(defun sync-output (stream)
+  "Wrap STREAM in a function for synchronous log delivery in tests.
+   Use this with make-logger to avoid async wrapping when testing
+   formatting, filtering, and other non-async concerns."
+  (lambda (line) (write-string line stream) (terpri stream)))
 
 ;;; --- Levels ---
 
@@ -348,7 +355,7 @@
 (5am:test test-logfmt-bare-key-for-true
   "In logfmt, boolean t emits bare key with no =value."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
+    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg" :verbose t :count 42))
     (let ((s (get-output-stream-string out)))
       ;; Should have bare "verbose" without "=true"
@@ -360,10 +367,9 @@
 ;;; --- Logger ---
 
 (5am:test test-make-logger
-  "Create a logger with make-logger, verify name, level, formatter."
-  (let ((lgr (make-logger :name "myapp" :level :debug :formatter #'json-formatter)))
+  "Create a logger with make-logger, verify level and formatter."
+  (let ((lgr (make-logger :context '(:name "myapp") :level :debug :formatter #'json-formatter)))
     (5am:is-true (logger-p lgr))
-    (5am:is (string= "myapp" (logger-name lgr)))
     (5am:is (= +debug+ (logger-level lgr)))
     (5am:is (eq #'json-formatter (logger-formatter lgr)))))
 
@@ -399,9 +405,9 @@
 
 (5am:test test-child-logger
   "Create parent with chindings, create child with more bindings, verify concatenation."
-  (let* ((parent (make-logger :name "parent" :level :trace))
-         (parent-with-bindings (child parent :service "web"))
-         (ch (child parent-with-bindings :request-id "abc")))
+  (let* ((parent (make-logger :context '(:name "parent") :level :trace))
+         (parent-with-bindings (make-child parent '(:service "web")))
+         (ch (make-child parent-with-bindings '(:request-id "abc"))))
     (5am:is-true (search "service" (logger-chindings ch)))
     (5am:is-true (search "web" (logger-chindings ch)))
     (5am:is-true (search "request-id" (logger-chindings ch)))
@@ -411,9 +417,9 @@
 
 (5am:test test-child-raw-bindings
   "Create parent with raw-bindings, create child, verify raw-bindings are appended."
-  (let* ((parent (make-logger :name "parent" :level :trace))
-         (p1 (child parent :a 1 :b 2))
-         (ch (child p1 :c 3)))
+  (let* ((parent (make-logger :context '(:name "parent") :level :trace))
+         (p1 (make-child parent '(:a 1 :b 2)))
+         (ch (make-child p1 '(:c 3))))
     (let ((rb (logger-raw-bindings ch)))
       (5am:is-true (not (null rb)))
       (5am:is (= 1 (getf rb :a)))
@@ -423,7 +429,7 @@
 (5am:test test-named-logger-json
   "Verify logger name appears in JSON output."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((*logger* (make-logger :name "myapp" :level :info
+    (let ((*logger* (make-logger :context '(:name "myapp") :level :info
                                   :formatter #'json-formatter
                                   :output collector)))
       (bark:info "hello")
@@ -581,8 +587,8 @@
 (5am:test test-end-to-end
   "Full flow: create logger, set level, log with context + child + fields."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let* ((lgr (make-logger :name "e2e" :level :trace :output collector))
-           (ch (child lgr :service "api")))
+    (let* ((lgr (make-logger :context '(:name "e2e") :level :trace :output collector))
+           (ch (make-child lgr '(:service "api"))))
       (let ((*log-context* (list (cons :trace-id "t-999"))))
         (funcall (logger-info-fn ch) ch "request handled" :status 200 :duration 42))
       (let* ((logs (funcall results-fn))
@@ -624,7 +630,7 @@
 (5am:test test-windowed-initial-burst
   "First INITIAL messages always pass regardless of THEREAFTER."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "wc") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 5 :thereafter 1000
@@ -637,7 +643,7 @@
 (5am:test test-windowed-thereafter-sampling
   "After initial burst, 1-in-THEREAFTER pass."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "wc") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 0 :thereafter 10
@@ -652,7 +658,7 @@
 (5am:test test-windowed-hard-cap
   "thereafter=0 drops everything after initial burst."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "wc") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 3 :thereafter 0
@@ -665,7 +671,7 @@
 (5am:test test-windowed-initial-zero
   "initial=0 skips burst, goes straight to thereafter check."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "wc" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "wc") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 0 :thereafter 5
@@ -717,7 +723,7 @@
 (5am:test test-consistent-nil-key-passthrough
   "key-fn returning nil falls through to windowed counter."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "cs" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "cs") :level :debug :output collector
                             :consistent (make-consistent-sampler
                                          :key-fn (lambda (bindings)
                                                    (declare (ignore bindings))
@@ -736,12 +742,12 @@
 (5am:test test-consistent-rate-1-keeps-all
   "rate=1 keeps every message (mod hash 1 = 0 always)."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "cs" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "cs") :level :debug :output collector
                             :consistent (make-consistent-sampler
                                          :key-fn (lambda (bindings)
                                                    (getf bindings :rid))
                                          :rate 1))))
-      (let ((child-lgr (child lgr :rid "test-key")))
+      (let ((child-lgr (make-child lgr '(:rid "test-key"))))
         (let ((fn (logger-debug-fn child-lgr)))
           (dotimes (i 50)
             (funcall fn child-lgr "msg"))))
@@ -785,9 +791,9 @@
 (5am:test test-both-nil-zero-sampling
   "When both sampler slots are nil, all messages pass."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "nil" :level :debug :output collector)))
-      (5am:is (null (logger-level-sampler lgr)))
-      (5am:is (null (logger-consistent lgr)))
+    (let ((lgr (make-logger :context '(:name "nil") :level :debug :output collector)))
+      (5am:is (null (bark::logger-level-sampler lgr)))
+      (5am:is (null (bark::logger-consistent lgr)))
       (let ((fn (logger-debug-fn lgr)))
         (dotimes (i 100)
           (funcall fn lgr "msg")))
@@ -796,7 +802,7 @@
 (5am:test test-consistent-bypasses-windowed
   "Key-bearing messages bypass windowed counter; keyless messages use windowed."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let* ((lgr (make-logger :name "both" :level :debug :output collector
+    (let* ((lgr (make-logger :context '(:name "both") :level :debug :output collector
                              :consistent (make-consistent-sampler
                                           :key-fn (lambda (b) (getf b :rid))
                                           :rate 1)  ; rate=1 keeps all keyed
@@ -809,7 +815,7 @@
         (dotimes (i 50)
           (funcall fn lgr "keyless")))
       ;; Keyed messages: consistent rate=1 → keep all (bypass windowed)
-      (let* ((keyed-lgr (child lgr :rid "test-key"))
+      (let* ((keyed-lgr (make-child lgr '(:rid "test-key")))
              (fn (logger-debug-fn keyed-lgr)))
         (dotimes (i 50)
           (funcall fn keyed-lgr "keyed")))
@@ -820,7 +826,7 @@
 (5am:test test-buffer-bypasses-sampling
   "with-log-buffer captures all messages regardless of sampling."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "buf" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "buf") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 0 :thereafter 0
@@ -841,34 +847,34 @@
 
 (5am:test test-child-inherits-level-sampler
   "Child shares parent's level-sampler vector; in-place mutations visible."
-  (let* ((lgr (make-logger :name "par" :level :debug
+  (let* ((lgr (make-logger :context '(:name "par") :level :debug
                            :level-sampler (make-level-sampler
                                            :debug (make-windowed-counter
                                                    :initial 5 :thereafter 100))))
-         (ch (child lgr :component "child")))
+         (ch (make-child lgr '(:component "child"))))
     ;; Same vector object
-    (5am:is (eq (logger-level-sampler lgr) (logger-level-sampler ch)))
+    (5am:is (eq (bark::logger-level-sampler lgr) (bark::logger-level-sampler ch)))
     ;; In-place mutation via set-level-sampling on parent visible to child
     (let ((new-wc (make-windowed-counter :initial 10 :thereafter 50)))
       (set-level-sampling lgr :debug new-wc)
-      (5am:is (eq new-wc (aref (logger-level-sampler ch) 2))))))
+      (5am:is (eq new-wc (aref (bark::logger-level-sampler ch) 2))))))
 
 (5am:test test-child-snapshots-consistent
   "Child snapshots parent's consistent sampler; parent changes don't propagate."
   (let* ((cs (make-consistent-sampler
               :key-fn (lambda (b) (getf b :rid)) :rate 10))
-         (lgr (make-logger :name "par" :level :debug :consistent cs))
-         (ch (child lgr :component "child")))
-    (5am:is (eq cs (logger-consistent ch)))
+         (lgr (make-logger :context '(:name "par") :level :debug :consistent cs))
+         (ch (make-child lgr '(:component "child"))))
+    (5am:is (eq cs (bark::logger-consistent ch)))
     ;; Replace on parent
     (set-consistent lgr nil)
     ;; Child still has original
-    (5am:is (eq cs (logger-consistent ch)))))
+    (5am:is (eq cs (bark::logger-consistent ch)))))
 
 (5am:test test-set-level-sampling-runtime-swap
   "Replacing sampler via set-level-sampling takes effect on next log call."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "swap" :level :debug :output collector
+    (let ((lgr (make-logger :context '(:name "swap") :level :debug :output collector
                             :level-sampler (make-level-sampler
                                             :debug (make-windowed-counter
                                                     :initial 0 :thereafter 0
@@ -886,13 +892,13 @@
       (5am:is (= 10 (length (funcall results-fn)))))))
 
 (5am:test test-start-with-sampling
-  "start creates a logger that respects sampling args."
+  "make-logger creates a logger that respects sampling args."
   (let ((out (make-string-output-stream)))
-    (bark:start :output out :level :debug :context '(:name "samp-start")
-                :level-sampler (make-level-sampler
-                                :debug (make-windowed-counter
-                                        :initial 3 :thereafter 0
-                                        :window-seconds 60)))
+    (setf bark:*logger* (bark:make-logger :output out :level :debug :context '(:name "samp-start")
+                                          :level-sampler (make-level-sampler
+                                                          :debug (make-windowed-counter
+                                                                  :initial 3 :thereafter 0
+                                                                  :window-seconds 60))))
     (unwind-protect
          (let ((fn (logger-debug-fn bark:*logger*)))
            (dotimes (i 10) (funcall fn bark:*logger* "msg"))
@@ -901,7 +907,7 @@
                   (lines (remove "" (uiop:split-string output :separator '(#\Newline))
                                  :test #'string=)))
              (5am:is (= 3 (length lines)))))
-      (bark:stop))))
+      (bark:stop bark:*logger*))))
 
 ;;; --- Utilities ---
 
@@ -979,7 +985,7 @@
 (defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level logger-level :formatter fmt :output out)))
+    (let ((l (bark:make-logger :level logger-level :formatter fmt :output (sync-output out))))
       (let ((fn (funcall (ecase msg-level
                            (:trace #'bark::logger-trace-fn)
                            (:debug #'bark::logger-debug-fn)
@@ -1069,7 +1075,7 @@
 (5am:test test-child-logger-fields
   "CHILD logger pre-attaches fields to every message it emits."
   (bark:with-captured-logs (logs)
-    (let ((child (bark:child bark:*logger* :component "db" :pool 5)))
+    (let ((child (bark:make-child bark:*logger* '(:component "db" :pool 5))))
       (bark:info "parent msg")
       (funcall (bark::logger-info-fn child) child "child msg" :query "SELECT 1"))
     (let* ((entries (mapcar #'yason:parse (funcall logs)))
@@ -1088,7 +1094,7 @@
 (5am:test test-set-level-dynamic
   "SET-LEVEL swaps fn slots so level changes take effect immediately."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :trace :formatter #'bark:json-formatter :output out)))
+    (let ((l (bark:make-logger :level :trace :formatter #'bark:json-formatter :output (sync-output out))))
       ;; At :trace - debug fires
       (funcall (bark::logger-debug-fn l) l "should-emit")
       (bark:set-level l :error)
@@ -1105,11 +1111,11 @@
 ;;; --- Async Output Integration ---
 
 (5am:test test-async-output-integration
-  "START creates an async-backed logger; STOP flushes all pending messages."
+  "make-logger creates an async-backed logger; stop flushes all pending messages."
   (let ((out (make-string-output-stream)))
-    (bark:start :output out :level :info :capacity 64)
+    (setf bark:*logger* (bark:make-logger :output out :level :info :capacity 64))
     (bark:info "integration-test-msg")
-    (bark:stop)
+    (bark:stop bark:*logger*)
     (let ((result (get-output-stream-string out)))
       (5am:is (search "integration-test-msg" result)))))
 
@@ -1135,7 +1141,7 @@
 (5am:test test-logfmt-quoting-rules
   "Logfmt formatter quotes values containing spaces; bare values are unquoted."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
+    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg"
                :bare  "simple"
                :space "has spaces"
@@ -1561,7 +1567,7 @@
                (s1 :formatter #'json-formatter)
                (s2 :formatter #'logfmt-formatter))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "tee-test" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "tee-test") :level :info :output tee)))
            (bark:info "hello" :key "val")
            (stop-tee tee)
            (let ((json-out (get-output-stream-string s1))
@@ -1583,7 +1589,7 @@
                (s-all    :formatter #'json-formatter)
                (s-errors :formatter #'json-formatter :level :error))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "route" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "route") :level :info :output tee)))
            (bark:info "all good")
            (bark:error "disk full")
            (stop-tee tee)
@@ -1608,7 +1614,7 @@
                                   (declare (ignore level))
                                   (getf fields :audit))))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "filter" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "filter") :level :info :output tee)))
            (bark:info "page loaded" :path "/home")
            (bark:info "user login" :audit t :user-id 42)
            (stop-tee tee)
@@ -1636,7 +1642,7 @@
                (list (list :stream s1 :formatter counting-fmt)
                      (list :stream s2 :formatter counting-fmt)))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "opt" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "opt") :level :info :output tee)))
            (bark:info "shared format test")
            (stop-tee tee)
            ;; Formatter should have been called exactly once (not twice)
@@ -1659,7 +1665,7 @@
                (list (list :stream s1 :formatter counting-fmt)
                      (list :stream s2 :formatter counting-fmt :level :error)))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "opt-filter" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "opt-filter") :level :info :output tee)))
            ;; Info message: only s1 passes filter, s2 filtered out
            (bark:info "info only")
            (stop-tee tee)
@@ -1677,8 +1683,8 @@
                (s1 :formatter #'json-formatter)
                (s2 :formatter #'json-formatter))))
     (unwind-protect
-         (let* ((parent (make-logger :name "parent" :level :info :output tee))
-                (ch (child parent :component "auth")))
+         (let* ((parent (make-logger :context '(:name "parent") :level :info :output tee))
+                (ch (make-child parent '(:component "auth"))))
            (let ((*logger* ch))
              (bark:info "token verified" :user-id 42))
            (stop-tee tee)
@@ -1701,7 +1707,7 @@
                (s1 :formatter #'json-formatter)
                (s2 :formatter #'json-formatter))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "ctx" :level :info :output tee)))
+         (let ((*logger* (make-logger :context '(:name "ctx") :level :info :output tee)))
            (bark:with-context (:request-id "req-123")
              (bark:info "hello"))
            (stop-tee tee)
@@ -1715,7 +1721,7 @@
   (let* ((s1 (make-string-output-stream))
          (tee (bark:tee (s1 :formatter #'json-formatter))))
     (unwind-protect
-         (let ((*logger* (make-logger :name "lvl" :level :warn :output tee)))
+         (let ((*logger* (make-logger :context '(:name "lvl") :level :warn :output tee)))
            ;; Info is below logger level -> noop function -> never reaches tee
            (bark:info "should not appear")
            (bark:warn "should appear")
@@ -1728,23 +1734,23 @@
 ;;; --- Multi-Output: Lifecycle ---
 
 (5am:test test-start-with-plain-stream
-  "start with :output as a plain stream wraps it in async-output."
+  "make-logger with :output as a plain stream wraps it in async-output."
   (let ((out (make-string-output-stream)))
-    (bark:start :output out :level :info)
+    (setf bark:*logger* (bark:make-logger :output out :level :info))
     (bark:info "stream test")
-    (bark:stop)
+    (bark:stop bark:*logger*)
     (5am:is-true (search "stream test" (get-output-stream-string out)))))
 
 (5am:test test-start-with-tee-output
-  "start with :output as a tee-output uses it directly."
+  "make-logger with :output as a tee-output uses it directly."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream)))
-    (bark:start :level :info
-                :output (bark:tee
-                         (s1 :formatter #'json-formatter)
-                         (s2 :formatter #'pretty-formatter)))
+    (setf bark:*logger* (bark:make-logger :level :info
+                                          :output (bark:tee
+                                                   (s1 :formatter #'json-formatter)
+                                                   (s2 :formatter #'pretty-formatter))))
     (bark:info "tee start test" :key "val")
-    (bark:stop)
+    (bark:stop bark:*logger*)
     (let ((json-out (get-output-stream-string s1))
           (pretty-out (get-output-stream-string s2)))
       (5am:is-true (search "tee start test" json-out))
@@ -1752,22 +1758,22 @@
       (5am:is-true (search "\"msg\"" json-out)))))
 
 (5am:test test-start-default-output
-  "start with no :output defaults to *error-output*."
+  "make-logger with no :output defaults to *error-output*."
   (let* ((out (make-string-output-stream))
          (*error-output* out))
-    (bark:start :level :info)
+    (setf bark:*logger* (bark:make-logger :level :info))
     (bark:info "default test")
-    (bark:stop)
+    (bark:stop bark:*logger*)
     (5am:is-true (search "default test" (get-output-stream-string out)))))
 
 (5am:test test-start-with-context-and-tee
-  "start with :context and :output tee wraps in child with context."
+  "make-logger with :context and :output tee passes context fields through."
   (let* ((s1 (make-string-output-stream)))
-    (bark:start :level :info
-                :output (bark:tee (s1 :formatter #'json-formatter))
-                :context '(:name "ctx" :role "broker" :pid 123))
+    (setf bark:*logger* (bark:make-logger :level :info
+                                          :output (bark:tee (s1 :formatter #'json-formatter))
+                                          :context '(:name "ctx" :role "broker" :pid 123)))
     (bark:info "context tee test")
-    (bark:stop)
+    (bark:stop bark:*logger*)
     (let ((out (get-output-stream-string s1)))
       (5am:is-true (search "context tee test" out))
       (5am:is-true (search "role" out))
@@ -1777,12 +1783,13 @@
   "stop with tee output stops all writer threads."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream)))
-    (bark:start :level :info
-                :output (bark:tee
-                         (s1 :formatter #'json-formatter)
-                         (s2 :formatter #'json-formatter)))
+    (setf bark:*logger* (bark:make-logger :level :info
+                                          :output (bark:tee
+                                                   (s1 :formatter #'json-formatter)
+                                                   (s2 :formatter #'json-formatter))))
     (bark:info "before stop")
-    (bark:stop)
+    (bark:stop bark:*logger*)
+    (setf bark:*logger* nil)
     ;; After stop, *logger* should be nil
     (5am:is-true (null *logger*))
     ;; Both streams should have the message
@@ -1792,39 +1799,38 @@
 (5am:test test-flush-drains-pending-messages
   "bark:flush blocks until all pending messages are written to the stream."
   (let ((out (make-string-output-stream)))
-    (bark:start :level :info :output out)
+    (setf bark:*logger* (bark:make-logger :level :info :output out))
     (dotimes (i 10)
       (bark:info (format nil "msg-~d" i)))
     (bark:flush)
     (let ((result (get-output-stream-string out)))
       (5am:is (= 10 (count #\Newline result))
               "Expected 10 lines after flush, got ~d" (count #\Newline result)))
-    (bark:stop)))
+    (bark:stop bark:*logger*)))
 
 (5am:test test-flush-with-tee-output
   "bark:flush drains all destinations in a tee."
   (let ((s1 (make-string-output-stream))
         (s2 (make-string-output-stream)))
-    (bark:start :level :info
-                :output (bark:tee
-                         (s1 :formatter #'json-formatter)
-                         (s2 :formatter #'json-formatter)))
+    (setf bark:*logger* (bark:make-logger :level :info
+                                          :output (bark:tee
+                                                   (s1 :formatter #'json-formatter)
+                                                   (s2 :formatter #'json-formatter))))
     (bark:info "tee-flush-msg")
     (bark:flush)
     (5am:is-true (search "tee-flush-msg" (get-output-stream-string s1)))
     (5am:is-true (search "tee-flush-msg" (get-output-stream-string s2)))
-    (bark:stop)))
+    (bark:stop bark:*logger*)))
 
 (5am:test test-flush-explicit-logger
   "bark:flush on a user-created logger drains its output."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 64))
-         (lgr (bark:make-logger :name "explicit" :level :info
-                                :formatter #'json-formatter :output ao)))
+         (lgr (bark:make-logger :context '(:name "explicit") :level :info
+                                :formatter #'json-formatter :output out :capacity 64)))
     (bark:info lgr "explicit-msg")
     (bark:flush lgr)
     (5am:is-true (search "explicit-msg" (get-output-stream-string out)))
-    (bark::stop-async-output ao)))
+    (bark:stop lgr)))
 
 (5am:test test-flush-without-logger
   "bark:flush is a no-op when no logger is active."
@@ -1896,8 +1902,8 @@
   "Passing a logger as first arg routes to that logger, not *logger*."
   (multiple-value-bind (c1 r1) (make-list-collector)
     (multiple-value-bind (c2 r2) (make-list-collector)
-      (let ((*logger* (make-logger :name "global" :level :info :output c1))
-            (other   (make-logger :name "other"  :level :info :output c2)))
+      (let ((*logger* (make-logger :context '(:name "global") :level :info :output c1))
+            (other   (make-logger :context '(:name "other")  :level :info :output c2)))
         (bark:info "goes to global")
         (bark:info other "goes to other")
         (let ((global-logs (funcall r1))
@@ -1910,7 +1916,7 @@
 (5am:test test-explicit-logger-all-levels
   "All six macros accept an explicit logger as first argument."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "explicit" :level :trace :output collector)))
+    (let ((lgr (make-logger :context '(:name "explicit") :level :trace :output collector)))
       (bark:trace lgr "t")
       (bark:debug lgr "d")
       (bark:info  lgr "i")
@@ -1925,7 +1931,7 @@
 (5am:test test-explicit-logger-no-message
   "Explicit logger as sole arg emits a log entry with nil message."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "solo" :level :info :output collector)))
+    (let ((lgr (make-logger :context '(:name "solo") :level :info :output collector)))
       (bark:info lgr)
       (let ((logs (funcall results-fn)))
         (5am:is (= 1 (length logs)))
@@ -1936,7 +1942,7 @@
 (5am:test test-explicit-logger-keyword-fields-only
   "Explicit logger with keyword fields only (no message)."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "kw" :level :info :output collector)))
+    (let ((lgr (make-logger :context '(:name "kw") :level :info :output collector)))
       (bark:info lgr :method "GET" :status 200)
       (let* ((logs (funcall results-fn))
              (line (first logs)))
@@ -1948,7 +1954,7 @@
 (5am:test test-explicit-logger-with-fields
   "Explicit logger receives per-call fields."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "fields" :level :info :output collector)))
+    (let ((lgr (make-logger :context '(:name "fields") :level :info :output collector)))
       (bark:info lgr "request" :method "GET" :path "/api")
       (let* ((logs (funcall results-fn))
              (line (first logs)))
@@ -1960,8 +1966,8 @@
   "Dynamic context applies to explicit logger too."
   (multiple-value-bind (c1 r1) (make-list-collector)
     (multiple-value-bind (c2 r2) (make-list-collector)
-      (let ((*logger* (make-logger :name "global" :level :info :output c1))
-            (other   (make-logger :name "other"  :level :info :output c2)))
+      (let ((*logger* (make-logger :context '(:name "global") :level :info :output c1))
+            (other   (make-logger :context '(:name "other")  :level :info :output c2)))
         (bark:with-context (:req "123")
           (bark:info "global msg")
           (bark:info other "other msg"))
@@ -2192,7 +2198,7 @@
    Child bindings are pre-serialized into chindings at child creation time."
   (bark:with-captured-logs (get-logs #'json-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:child bark:*logger* :boot-err c)))
+           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let* ((parsed (yason:parse (first (funcall get-logs))))
@@ -2205,7 +2211,7 @@
    raw-bindings carry the live condition object, serialized at log time."
   (bark:with-captured-logs (get-logs #'logfmt-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:child bark:*logger* :boot-err c)))
+           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let ((line (first (funcall get-logs))))
@@ -2216,7 +2222,7 @@
    raw-bindings carry the live condition object, serialized at log time."
   (bark:with-captured-logs (get-logs #'pretty-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:child bark:*logger* :boot-err c)))
+           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let ((line (first (funcall get-logs))))
@@ -2238,7 +2244,7 @@
 (5am:test test-field-transform-drop-per-call
   "Field transform drops per-call fields when returning (values nil nil)."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :secret)
                                                 (values nil nil)
@@ -2252,7 +2258,7 @@
 (5am:test test-field-transform-mask-value
   "Field transform masks a value by returning a replacement."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :token)
                                                 "****"
@@ -2266,7 +2272,7 @@
 (5am:test test-field-transform-passthrough
   "Field transform returning value unchanged is a no-op."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (declare (ignore key))
                                             value))))
@@ -2278,7 +2284,7 @@
 (5am:test test-field-transform-on-dynamic-context
   "Field transform applies to dynamic context fields."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output out
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :password)
                                                 (values nil nil)
@@ -2295,12 +2301,12 @@
 (5am:test test-field-transform-on-child-static-bindings
   "Field transform applies to child logger static bindings at creation time."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:child parent :component "auth" :secret "key-abc")))
+           (ch (bark:make-child parent '(:component "auth" :secret "key-abc"))))
       (funcall (logger-info-fn ch) ch "hello"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "\"component\":\"auth\"" result))
@@ -2310,7 +2316,7 @@
 (5am:test test-field-transform-nil-means-no-transform
   "A nil field-transform slot means no transformation (default)."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output out)))
+    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out))))
       (5am:is (null (logger-field-transform l)))
       (funcall (logger-info-fn l) l "msg" :key "val"))
     (let ((result (get-output-stream-string out)))
@@ -2319,12 +2325,12 @@
 (5am:test test-field-transform-inherited-by-child
   "Child inherits parent's field-transform."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:child parent :component "db")))
+           (ch (bark:make-child parent '(:component "db"))))
       (funcall (logger-info-fn ch) ch "query" :sql "SELECT 1" :secret "pw"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "\"sql\":\"SELECT 1\"" result))
@@ -2333,16 +2339,16 @@
 (5am:test test-field-transform-child-compose
   "Child can add its own field-transform, composed with parent's."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output out
+    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:child parent :component "auth"
-                                  :field-transform (lambda (key value)
-                                                     (if (eq key :token)
-                                                         "****"
-                                                         value)))))
+           (ch (bark:make-child parent '(:component "auth")
+                                        :field-transform (lambda (key value)
+                                                           (if (eq key :token)
+                                                               "****"
+                                                               value)))))
       (funcall (logger-info-fn ch) ch "login" :user "alice" :secret "pw" :token "xyz"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "\"user\":\"alice\"" result))
@@ -2360,7 +2366,7 @@
 (5am:test test-field-transform-with-logfmt
   "Field transform works with logfmt formatter too."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'logfmt-formatter :output out
+    (let ((l (make-logger :level :info :formatter #'logfmt-formatter :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :password)
                                                 (values nil nil)
@@ -2392,7 +2398,7 @@
 (5am:test test-override-timestamp-in-json-output
   "JSON formatter uses *override-timestamp* when bound."
   (let* ((out (make-string-output-stream))
-         (l (make-logger :level :info :formatter #'json-formatter :output out)))
+         (l (make-logger :level :info :formatter #'json-formatter :output (sync-output out))))
     (let ((bark::*override-timestamp* 9999999))
       (funcall (logger-info-fn l) l "test"))
     (let* ((line (get-output-stream-string out))
@@ -2418,34 +2424,33 @@
 
 (5am:test test-make-buffer-logger-level-lowered
   "Buffer logger has level lowered to the requested capture level."
-  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+  (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (= +trace+ (logger-level buf-lgr)))))
 
 (5am:test test-make-buffer-logger-slots-cleared
   "Buffer logger has field-transform and sampler set to nil."
-  (let* ((original (make-logger :name "app" :level :info :output *standard-output*
+  (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*
                                 :field-transform (lambda (k v) (declare (ignore k)) v)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (null (logger-field-transform buf-lgr)))
-    (5am:is (null (logger-level-sampler buf-lgr)))
-    (5am:is (null (logger-consistent buf-lgr)))))
+    (5am:is (null (bark::logger-level-sampler buf-lgr)))
+    (5am:is (null (bark::logger-consistent buf-lgr)))))
 
 (5am:test test-make-buffer-logger-preserves-identity
-  "Buffer logger preserves name, chindings, raw-bindings from original."
-  (let* ((parent (make-logger :name "app" :level :info :output *standard-output*))
-         (original (child parent :component "auth"))
+  "Buffer logger preserves chindings and raw-bindings from original."
+  (let* ((parent (make-logger :context '(:name "app") :level :info :output *standard-output*))
+         (original (make-child parent '(:component "auth")))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
-    (5am:is (string= (logger-name original) (logger-name buf-lgr)))
     (5am:is (string= (logger-chindings original) (logger-chindings buf-lgr)))
     (5am:is (equal (logger-raw-bindings original) (logger-raw-bindings buf-lgr)))))
 
 (5am:test test-make-buffer-logger-captures-entries
   "Calling log functions on buffer logger pushes entries to buffer vector."
-  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+  (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (funcall (logger-info-fn buf-lgr) buf-lgr "hello" :key "val")
@@ -2457,7 +2462,7 @@
 
 (5am:test test-make-buffer-logger-captures-context
   "Buffer logger snapshots *log-context* at log time."
-  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+  (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (let ((*log-context* (list (cons :req-id "r1"))))
@@ -2466,7 +2471,7 @@
 
 (5am:test test-make-buffer-logger-captures-all-levels
   "Buffer logger captures entries at all enabled levels."
-  (let* ((original (make-logger :name "app" :level :info :output *standard-output*))
+  (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (funcall (logger-trace-fn buf-lgr) buf-lgr "t")
@@ -2484,7 +2489,7 @@
 (5am:test test-flush-buffer-normal-exit-filters-by-level
   "Normal exit: only entries >= original level are emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
@@ -2498,7 +2503,7 @@
 (5am:test test-flush-buffer-abnormal-exit-emits-all
   "Abnormal exit with condition: all entries emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (cond (make-condition 'simple-error :format-control "boom")))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
@@ -2511,7 +2516,7 @@
 (5am:test test-flush-buffer-non-condition-nlx-filters
   "Non-condition NLX (normal-exit-p=nil, condition=nil): filter like normal exit."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
@@ -2523,7 +2528,7 @@
 (5am:test test-flush-buffer-uses-override-timestamp
   "Flushed entries use their captured timestamp, not wall clock."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +info+ :message "test" :timestamp 42) buffer)
     (flush-buffer buffer root t nil nil +info+)
@@ -2534,7 +2539,7 @@
 (5am:test test-flush-buffer-applies-field-transform
   "Flush applies root logger's field transform to entry fields."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)
                             :field-transform (lambda (key value)
                                               (if (eq key :secret)
                                                   (values nil nil)
@@ -2552,7 +2557,7 @@
 (5am:test test-flush-buffer-on-flush-callback
   "on-flush callback controls which entries are emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          ;; Only emit warn and above
          (on-flush (lambda (entries condition normal-exit-p)
@@ -2567,7 +2572,7 @@
 
 (5am:test test-flush-buffer-on-flush-receives-all-args
   "on-flush callback receives entries, condition, and normal-exit-p."
-  (let* ((root (make-logger :name "app" :level :info :formatter #'json-formatter
+  (let* ((root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                             :output (make-string-output-stream)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (cond (make-condition 'simple-error :format-control "err"))
@@ -2584,7 +2589,7 @@
 (5am:test test-flush-buffer-empty-does-nothing
   "Flushing an empty buffer produces no output."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (flush-buffer buffer root t nil nil +info+)
     (5am:is (string= "" (get-output-stream-string out)))))
@@ -2592,7 +2597,7 @@
 (5am:test test-flush-buffer-preserves-entry-order
   "Entries are flushed in the order they were captured."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
+         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +info+ :message "first" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "second" :timestamp 200) buffer)
@@ -2608,7 +2613,7 @@
 (5am:test test-with-log-buffer-normal-exit-filters
   "Normal exit filters to entries >= logger's configured level."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:debug "hidden")
       (bark:info "visible"))
@@ -2619,7 +2624,7 @@
 (5am:test test-with-log-buffer-abnormal-exit-emits-all
   "Abnormal exit emits all buffered entries."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (ignore-errors
       (with-log-buffer ()
         (bark:debug "debug-trail")
@@ -2631,13 +2636,13 @@
 
 (5am:test test-with-log-buffer-returns-body-value
   "with-log-buffer returns the value of the body."
-  (let ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                                :output (make-string-output-stream))))
     (5am:is (= 42 (with-log-buffer () 42)))))
 
 (5am:test test-with-log-buffer-returns-multiple-values
   "with-log-buffer preserves multiple return values."
-  (let ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                                :output (make-string-output-stream))))
     (multiple-value-bind (a b) (with-log-buffer () (values 1 2))
       (5am:is (= 1 a))
@@ -2646,7 +2651,7 @@
 (5am:test test-with-log-buffer-handled-error-is-normal
   "Error caught inside body = normal exit, debug discarded."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:debug "pre-error")
       (handler-case (cl:error "handled")
@@ -2658,7 +2663,7 @@
 (5am:test test-with-log-buffer-return-from-is-normal
   "return-from (non-condition NLX) treated as normal exit."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (block outer
       (with-log-buffer ()
         (bark:debug "hidden-debug")
@@ -2671,7 +2676,7 @@
 (5am:test test-with-log-buffer-custom-level
   "Custom capture level limits what gets buffered."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (ignore-errors
       (with-log-buffer (:level :debug)
         (bark:trace "trace-hidden")
@@ -2684,7 +2689,7 @@
 (5am:test test-with-log-buffer-on-flush-callback
   "on-flush callback controls emission."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore condition normal-exit-p))
                                   ;; Only emit entries with :audit in fields
@@ -2700,7 +2705,7 @@
 (5am:test test-with-log-buffer-captures-context
   "Dynamic context is captured at log time, not flush time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (with-context (:req "r1")
         (bark:info "inside-ctx"))
@@ -2716,7 +2721,7 @@
 (5am:test test-with-log-buffer-preserves-timestamps
   "Each entry retains its own timestamp from log time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:info "msg1")
       (bark:info "msg2"))
@@ -2735,9 +2740,9 @@
   "Explicit logger arg bypasses the buffer."
   (let* ((buf-out (make-string-output-stream))
          (direct-out (make-string-output-stream))
-         (*logger* (make-logger :name "buf" :level :info :formatter #'json-formatter :output buf-out))
-         (direct-lgr (make-logger :name "direct" :level :info :formatter #'json-formatter
-                                  :output direct-out)))
+         (*logger* (make-logger :context '(:name "buf") :level :info :formatter #'json-formatter :output (sync-output buf-out)))
+         (direct-lgr (make-logger :context '(:name "direct") :level :info :formatter #'json-formatter
+                                  :output (sync-output direct-out))))
     (with-log-buffer ()
       (bark:info "buffered")
       (bark:info direct-lgr "direct"))
@@ -2759,7 +2764,7 @@
 (5am:test test-nested-buffer-inner-flushes-to-root
   "Inner buffer flushes directly to root logger output."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:info "outer-1")
       (with-log-buffer ()
@@ -2774,7 +2779,7 @@
 (5am:test test-nested-buffer-inner-failure-outer-success
   "Inner failure dumps inner debug; outer still filters normally."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:debug "outer-debug")
       (bark:info "outer-info")
@@ -2796,7 +2801,7 @@
 (5am:test test-nested-buffer-root-logger-preserved
   "*root-logger* is set by outermost scope and preserved through nesting."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     ;; Three levels deep — all should flush to same root
     (with-log-buffer ()
       (with-log-buffer ()
@@ -2809,7 +2814,7 @@
 (5am:test test-with-log-buffer-on-flush-nil-suppresses-all
   "on-flush returning nil suppresses all output."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore entries condition normal-exit-p))
                                   nil))
@@ -2819,8 +2824,8 @@
 (5am:test test-with-log-buffer-child-logger-chindings
   "Buffer scope with child logger preserves static context in output."
   (let* ((out (make-string-output-stream))
-         (parent (make-logger :name "app" :level :info :formatter #'json-formatter :output out))
-         (*logger* (child parent :component "auth")))
+         (parent (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (*logger* (make-child parent '(:component "auth"))))
     (with-log-buffer ()
       (bark:info "login"))
     (let* ((result (get-output-stream-string out))
@@ -2830,7 +2835,7 @@
 (5am:test test-with-log-buffer-field-transform-at-flush
   "Root logger's field transform is applied at flush time, not capture time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'json-formatter :output out
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                   (if (eq key :token) "****" value)))))
     (with-log-buffer ()
@@ -2841,7 +2846,7 @@
 
 (5am:test test-with-log-buffer-on-flush-sees-handled-condition
   "handler-case inside body catches first; on-flush sees normal exit."
-  (let* ((*logger* (make-logger :name "app" :level :info :formatter #'json-formatter
+  (let* ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                                 :output (make-string-output-stream)))
          (seen-condition nil)
          (seen-normal-exit-p nil))
@@ -2861,7 +2866,7 @@
 (5am:test test-with-log-buffer-logfmt-formatter
   "Buffer works with logfmt formatter."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "app" :level :info :formatter #'logfmt-formatter :output out)))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'logfmt-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:info "hello" :key "val"))
     (let ((result (get-output-stream-string out)))
@@ -2871,7 +2876,7 @@
 (5am:test test-with-log-buffer-pretty-formatter
   "Buffer works with pretty formatter."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "test" :level :info :formatter #'pretty-formatter :output out)))
+         (*logger* (make-logger :context '(:name "test") :level :info :formatter #'pretty-formatter :output (sync-output out))))
     (with-log-buffer ()
       (bark:info "hello"))
     (let ((result (get-output-stream-string out)))
@@ -2952,7 +2957,7 @@
 (5am:test test-macro-explicit-logger-keyword-fields
   "Logging macro with explicit logger and keyword-first fields."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "test" :level :info :output collector)))
+    (let ((lgr (make-logger :context '(:name "test") :level :info :output collector)))
       (bark:info lgr :event "created" :id 7)
       (let* ((logs (funcall results-fn))
              (line (first logs)))
@@ -2964,7 +2969,7 @@
 (5am:test test-macro-explicit-logger-string-message
   "Logging macro with explicit logger and string message."
   (multiple-value-bind (collector results-fn) (make-list-collector)
-    (let ((lgr (make-logger :name "test" :level :info :output collector)))
+    (let ((lgr (make-logger :context '(:name "test") :level :info :output collector)))
       (bark:info lgr "hello" :k "v")
       (let* ((logs (funcall results-fn))
              (line (first logs)))
@@ -2994,7 +2999,7 @@
 (5am:test test-buffer-nil-message-roundtrip
   "Buffer captures and flushes entries with nil message."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :name "test" :level :info :output out)))
+         (*logger* (make-logger :context '(:name "test") :level :info :output (sync-output out))))
     (with-log-buffer ()
       (bark:info :event "buffered"))
     (let ((result (get-output-stream-string out)))
@@ -3099,7 +3104,7 @@
   (let* ((out (make-string-output-stream))
          (fmt (bark:make-json-formatter :timestamp nil :level-format :string
                                         :message-key "text"))
-         (*logger* (make-logger :name "test" :level :info :output out
+         (*logger* (make-logger :context '(:name "test") :level :info :output (sync-output out)
                                 :formatter fmt)))
     (bark:info "works")
     (let ((result (get-output-stream-string out)))
@@ -3163,7 +3168,7 @@
 (5am:test test-logfmt-value-newline-in-string
   "logfmt values containing newlines are quoted and newlines escaped."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output out)))
+    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg" :data (format nil "line1~%line2")))
     (let ((s (get-output-stream-string out)))
       ;; Must not contain a literal newline in the value portion

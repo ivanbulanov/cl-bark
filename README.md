@@ -9,8 +9,8 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 ## Quick Start
 
 ```lisp
-;; Start the global async logger
-(bark:start :name "myapp" :level :info)
+;; Create the global async logger
+(setf bark:*logger* (bark:make-logger :level :info :context '(:name "myapp")))
 
 ;; Log structured messages
 (bark:info "user logged in" :user-id 42 :method "oauth")
@@ -24,12 +24,12 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
   (bark:warn "slow query" :duration-ms 1500))
 
 ;; Static context (pre-serialized, fixed for the logger's lifetime)
-(let ((auth-logger (bark:child bark:*logger* :component "auth")))
+(let ((auth-logger (bark:make-child bark:*logger* '(:component "auth"))))
   (let ((bark:*logger* auth-logger))
     (bark:info "token verified")))
 
 ;; Stop (flushes and joins writer thread)
-(bark:stop)
+(bark:stop bark:*logger*)
 ```
 
 ## Features
@@ -93,46 +93,51 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 
 Detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
 
-### Logger Management
+### Lifecycle
 
 ```lisp
-;; Create a logger (synchronous output — no background thread)
-(bark:make-logger &key (name "") (level :info) (formatter #'json-formatter) output field-transform)
+;; Create logger and assign to the global
+(setf bark:*logger*
+      (bark:make-logger &key output (level :info) (formatter #'json-formatter)
+                             context field-transform
+                             (capacity 8192) (on-drop #'default-on-drop)
+                             blocking (block-timeout 5.0) on-block-timeout
+                             level-sampler consistent))
 
 ;; Create child logger with static context (pre-serialized fields)
-(bark:child parent &rest context)
+(bark:make-child parent context &key field-transform level)
 
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
 
 ;; Set sampling rate (1-in-N)
 (bark:set-sampling logger level rate)
-```
-
-`make-logger` writes synchronously to `:output` (a stream or function) in the caller's thread. It does **not** wrap the output in an async writer. Use `make-logger` for testing, for function-based outputs, or when you manage async I/O yourself. Use `start` for production logging with automatic async wrapping.
-
-### Lifecycle
-
-```lisp
-;; Start global async logger
-(bark:start &key output (level :info) (formatter #'json-formatter)
-                 (name "") (capacity 8192) (on-drop #'bark::default-on-drop)
-                 context field-transform)
 
 ;; Flush pending messages (blocks until written)
 (bark:flush &optional logger)  ; defaults to *logger*
 
-;; Stop and flush all writer threads
-(bark:stop)
+;; Stop and flush all writer threads (NIL is a no-op)
+(bark:stop logger)
 ```
 
-`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. When called with no argument, flushes `*logger*`. Handles both single-output and tee-output loggers. No-op when the logger is nil.
+`bark:make-logger` is the main entry point. It creates a logger and returns it — assign it to `bark:*logger*` or any other variable. The output type determines whether async I/O is used:
 
-`:output` accepts a stream, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL (defaults to `*error-output*`). When `:output` is a plain stream, `start` wraps it in an async-output. When `:output` is a tee-output, the async-outputs are already created.
+| `:output` value | Behavior |
+|---|---|
+| Stream | Wrapped in async-output (background thread + ring buffer) |
+| Function | Called synchronously — no thread, no buffer |
+| `tee-output` | Used as-is (already contains async-outputs internally) |
+| NIL | Defaults to `*error-output*`, wrapped in async-output |
 
-`:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields.
+`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL.
+
+`:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields. Use `:context '(:name "myapp")` instead of the old `:name` parameter.
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
+
+`bark:stop` flushes and joins all writer threads for the given logger. Passing NIL is a no-op. Calling on a child logger signals an error — always stop the root logger.
+
+`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. When called with no argument, flushes `*logger*`. Handles both single-output and tee-output loggers. No-op when the logger is nil.
 
 ### Multi-Output
 
@@ -188,13 +193,13 @@ Specifying both `:level` and `:filter` in the same destination spec is a compile
 
 Log output includes fields from three sources, merged in this order:
 
-1. **Static context** — fixed fields on the logger, set once via `bark:child`. Pre-serialized at creation time; zero cost per log call.
+1. **Static context** — fixed fields on the logger, set once via `bark:make-child`. Pre-serialized at creation time; zero cost per log call.
 2. **Dynamic context** — scoped fields via `bark:with-context`. Active for all log calls within the dynamic extent. Thread-isolated via CL special variables.
 3. **Per-call fields** — the `&rest` arguments passed directly to `bark:info`, `bark:warn`, etc.
 
 ```lisp
 ;; Static context — lives on the logger
-(let ((bark:*logger* (bark:child bark:*logger* :component "auth")))
+(let ((bark:*logger* (bark:make-child bark:*logger* '(:component "auth"))))
 
   ;; Dynamic context — scoped to this body
   (bark:with-context (:request-id "req-123")
@@ -210,7 +215,7 @@ Log output includes fields from three sources, merged in this order:
 
 ```lisp
 ;; Fixed for this component — every log carries :component automatically
-(defvar *db-log* (bark:child bark:*logger* :component "database" :pool-size 10))
+(defvar *db-log* (bark:make-child bark:*logger* '(:component "database" :pool-size 10)))
 (bark:info *db-log* "connection acquired")
 ```
 
@@ -239,7 +244,7 @@ With child loggers alone, you'd need to create a new child of each logger per re
 
 ```lisp
 (dotimes (i pool-size)
-  (let ((log (bark:child bark:*logger* :worker-id i)))
+  (let ((log (bark:make-child bark:*logger* (list :worker-id i))))
     (spawn-worker log)))
 ```
 
@@ -299,12 +304,14 @@ The transform is a function `(lambda (key value) ...)` returning:
 
 ```lisp
 ;; Drop :password fields, mask :token values
-(bark:start :name "myapp" :level :info
-            :field-transform (lambda (key value)
-                               (case key
-                                 (:password (values nil nil))
-                                 (:token    "****")
-                                 (t         value))))
+(setf bark:*logger*
+      (bark:make-logger :level :info
+                        :context '(:name "myapp")
+                        :field-transform (lambda (key value)
+                                           (case key
+                                             (:password (values nil nil))
+                                             (:token    "****")
+                                             (t         value)))))
 
 (bark:info "login" :user "alice" :password "hunter2" :token "abc-xyz")
 ;; => {"level":30,...,"user":"alice","token":"****","msg":"login"}
@@ -317,22 +324,22 @@ The transform applies to **all three field sources**:
 |--------|-------------|
 | Per-call fields | At log call time, before formatting |
 | Dynamic context | At log call time, before formatting |
-| Static context (child) | At `child` creation time, before pre-serialization |
+| Static context (child) | At `make-child` creation time, before pre-serialization |
 
-**Inheritance.** Children inherit the parent's transform. A child can add its own via `:field-transform` in the bindings — it composes with the parent's (parent runs first, then child):
+**Inheritance.** Children inherit the parent's transform. A child can add its own via `:field-transform` — it composes with the parent's (parent runs first, then child):
 
 ```lisp
-(let* ((parent (bark:make-logger :name "app" :level :info :output stream
+(let* ((parent (bark:make-logger :level :info :output stream
                                  :field-transform (lambda (key value)
                                                     (if (eq key :secret)
                                                         (values nil nil)
                                                         value))))
        ;; Child adds token masking on top of parent's secret dropping
-       (child (bark:child parent :component "auth"
-                                 :field-transform (lambda (key value)
-                                                    (if (eq key :token)
-                                                        "****"
-                                                        value)))))
+       (child (bark:make-child parent '(:component "auth")
+                               :field-transform (lambda (key value)
+                                                  (if (eq key :token)
+                                                      "****"
+                                                      value)))))
   (let ((bark:*logger* child))
     (bark:info "login" :user "alice" :secret "pw" :token "xyz")))
 ;; => :secret dropped (parent), :token masked (child)
@@ -406,16 +413,17 @@ The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"m
 
 ```lisp
 ;; GCP Cloud Logging format
-(bark:start :formatter (bark:make-json-formatter
-                         :level-key "severity" :level-format :string
-                         :timestamp-key "timestamp" :timestamp :iso8601
-                         :message-key "message"))
+(setf bark:*logger*
+      (bark:make-logger :formatter (bark:make-json-formatter
+                                     :level-key "severity" :level-format :string
+                                     :timestamp-key "timestamp" :timestamp :iso8601
+                                     :message-key "message")))
 
 (bark:info "deployed" :version "1.2.3")
 ;; => {"severity":"info","timestamp":"2025-01-15T12:00:00.000Z","version":"1.2.3","message":"deployed"}
 
 ;; Omit timestamp (external system adds it)
-(bark:start :formatter (bark:make-json-formatter :timestamp nil))
+(setf bark:*logger* (bark:make-logger :formatter (bark:make-json-formatter :timestamp nil)))
 ;; => {"level":30,"version":"1.2.3","msg":"deployed"}
 ```
 
@@ -429,7 +437,8 @@ The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"m
 Level is always a string in logfmt. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`.
 
 ```lisp
-(bark:start :formatter (bark:make-logfmt-formatter :level-key "lvl" :message-key "message"))
+(setf bark:*logger*
+      (bark:make-logger :formatter (bark:make-logfmt-formatter :level-key "lvl" :message-key "message")))
 (bark:info "ready" :port 8080)
 ;; => lvl=info ts=1736942400000 port=8080 message=ready
 ```
@@ -444,7 +453,7 @@ The standard `pretty-formatter` omits timestamps (REPL use). The factory adds op
 
 ```lisp
 ;; Pretty with ISO 8601 timestamps
-(bark:start :formatter (bark:make-pretty-formatter :timestamp :iso8601))
+(setf bark:*logger* (bark:make-logger :formatter (bark:make-pretty-formatter :timestamp :iso8601)))
 ;; => INFO  ts="2025-01-15T12:00:00.000Z" ready port=8080
 ```
 
@@ -480,7 +489,7 @@ The `on-drop` callback receives the drop count and returns `(values message fiel
   (log-file       :on-drop (lambda (n) (values (format nil "dropped ~d" n) (list :count n)))))
 
 ;; Suppress drop warnings entirely
-(bark:start :on-drop (lambda (n) (declare (ignore n)) nil))
+(setf bark:*logger* (bark:make-logger :on-drop (lambda (n) (declare (ignore n)) nil)))
 ```
 
 ### Compile-Time Elimination
@@ -569,10 +578,12 @@ Same events, different formats. The most common multi-output scenario.
                          :direction :output :if-exists :append
                          :if-does-not-exist :create))
 
-(bark:start :name "myapp" :level :info
-            :output (bark:tee
-                     (*error-output* :formatter #'bark:pretty-formatter)
-                     (*log-file*     :formatter #'bark:json-formatter)))
+(setf bark:*logger*
+      (bark:make-logger :level :info
+                        :context '(:name "myapp")
+                        :output (bark:tee
+                                 (*error-output* :formatter #'bark:pretty-formatter)
+                                 (*log-file*     :formatter #'bark:json-formatter))))
 
 (bark:info "request handled" :status 200)
 ;; => pretty-printed to stderr
@@ -584,11 +595,13 @@ Same events, different formats. The most common multi-output scenario.
 All events to console, errors only to a separate file.
 
 ```lisp
-(bark:start :name "myapp" :level :info
-            :output (bark:tee
-                     (*error-output* :formatter #'bark:pretty-formatter)
-                     (*error-file*   :formatter #'bark:json-formatter
-                                     :level :error)))
+(setf bark:*logger*
+      (bark:make-logger :level :info
+                        :context '(:name "myapp")
+                        :output (bark:tee
+                                 (*error-output* :formatter #'bark:pretty-formatter)
+                                 (*error-file*   :formatter #'bark:json-formatter
+                                                 :level :error))))
 
 (bark:info "all good")           ; console only
 (bark:error "disk full" :vol 3)  ; console + error file
@@ -599,13 +612,15 @@ All events to console, errors only to a separate file.
 Audit events to a dedicated stream based on a per-call field.
 
 ```lisp
-(bark:start :name "myapp" :level :info
-            :output (bark:tee
-                     (*error-output* :formatter #'bark:json-formatter)
-                     (*audit-file*   :formatter #'bark:json-formatter
-                                     :filter (lambda (level fields)
-                                               (declare (ignore level))
-                                               (getf fields :audit)))))
+(setf bark:*logger*
+      (bark:make-logger :level :info
+                        :context '(:name "myapp")
+                        :output (bark:tee
+                                 (*error-output* :formatter #'bark:json-formatter)
+                                 (*audit-file*   :formatter #'bark:json-formatter
+                                                 :filter (lambda (level fields)
+                                                           (declare (ignore level))
+                                                           (getf fields :audit))))))
 
 (bark:info "page loaded" :path "/home")                     ; console only
 (bark:info "user login" :audit t :user-id 42 :method "sso") ; console + audit file
@@ -616,10 +631,11 @@ Audit events to a dedicated stream based on a per-call field.
 Explicit logger arg bypasses `*logger*`. Each logger has its own output pipeline.
 
 ```lisp
-(bark:start :name "app" :level :info)
+(setf bark:*logger* (bark:make-logger :level :info :context '(:name "app")))
 
 (defvar *audit-logger*
-  (bark:make-logger :name "audit" :level :info
+  (bark:make-logger :level :info
+                    :context '(:name "audit")
                     :output (open "/var/log/audit.jsonl"
                                   :direction :output :if-exists :append)))
 
@@ -740,7 +756,7 @@ These are **intentionally** not supported and won't be added:
 | Non-goal | Rationale | Recourse |
 |----------|-----------|----------|
 | **Filters on static/dynamic context** | Static context is known at logger creation time — the routing decision can be made then, not deferred to filter time. Dynamic context is scoped, not routed. | Use separate loggers or the explicit logger argument for routing based on static context. |
-| **Output override on `child`** | `child` is for adding static context, not rerouting. Mixing these concerns complicates the mental model. | Use a separate logger with its own output for different routing. |
+| **Output override on `make-child`** | `make-child` is for adding static context, not rerouting. Mixing these concerns complicates the mental model. | Use a separate logger with its own output for different routing. |
 | **Named logger registry** | Global mutable registries add implicit coupling. CL already has `defvar` and `defparameter`. | Manage logger variables yourself: `(defvar *audit-logger* (bark:make-logger ...))`. |
 | **Structured data in ring buffer** | Formatting in the caller thread is a deliberate throughput and efficiency choice. See [Caller-Thread Formatting](#caller-thread-formatting) for full rationale. | — |
 | **Output as a user-visible object** | The tee's internal representation (`tee-output`, `destination`, `formatter-group`) is an implementation detail. | Use `make-tee`/`tee` to create outputs. Inspect via the logger's output slot if needed for debugging. |
@@ -755,7 +771,8 @@ All conditions are signaled at configuration time. Logging macros never signal �
 | `set-level` | `type-error` | Level is neither `fixnum` nor keyword (from `etypecase`) |
 | `make-tee` | `simple-error` | Both `:filter` and `:level` on the same destination |
 | `tee` | `simple-error` | Same, at macro expansion time |
-| `start` | `simple-error` | `:output` is not a stream, `tee-output`, or `nil` |
+| `make-logger` | `simple-error` | `:output` is not a stream, function, `tee-output`, or `nil` |
+| `stop` | `simple-error` | Called on a child logger |
 
 Writer thread stream errors (`file-error`, `stream-error`, etc.) are caught internally. When `:on-error` is provided, it receives the original condition — see [Error Recovery](#error-recovery). Otherwise the error is logged to `*error-output*` and the writer exits.
 

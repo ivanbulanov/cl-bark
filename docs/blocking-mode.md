@@ -9,34 +9,34 @@ Blocking mode adds optional backpressure: when the ring buffer is full, the call
 ### Single destination
 
 ```lisp
-(bark:start :output *error-output*
-            :blocking t)
+(setf bark:*logger* (bark:make-logger :output *error-output*
+                                      :blocking t))
 ```
 
 ### With timeout and callback
 
 ```lisp
-(bark:start :output audit-stream
-            :blocking t
-            :block-timeout 5.0           ; seconds (default), nil = wait forever
-            :on-block-timeout
-            (lambda (message stream)
-              (format *error-output* "AUDIT DROP: ~a~%" message)))
+(setf bark:*logger* (bark:make-logger :output audit-stream
+                                      :blocking t
+                                      :block-timeout 5.0           ; seconds (default), nil = wait forever
+                                      :on-block-timeout
+                                      (lambda (message stream)
+                                        (format *error-output* "AUDIT DROP: ~a~%" message))))
 ```
 
 ### Per-destination in tee
 
 ```lisp
-(bark:start :output (bark:tee
-                      (audit-stream :blocking t
-                                    :block-timeout 5.0
-                                    :on-block-timeout #'handle-audit-drop)
-                      (*standard-output* :formatter #'bark:pretty-formatter)))
+(setf bark:*logger* (bark:make-logger :output (bark:tee
+                                                (audit-stream :blocking t
+                                                              :block-timeout 5.0
+                                                              :on-block-timeout #'handle-audit-drop)
+                                                (*standard-output* :formatter #'bark:pretty-formatter))))
 ```
 
 ## API
 
-### `bark:start` — new keyword arguments
+### `bark:make-logger` — keyword arguments
 
 | Keyword | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -76,6 +76,6 @@ For blocking mode with N concurrent producer threads, set `:capacity >= 2N` to m
 ## Edge Cases
 
 - **Writer thread dies:** Blocked producers hang until timeout fires.
-- **`bark:stop` with blocked producers:** All producers are woken via broadcast. Messages from producers blocked during stop go through the timeout/callback path.
+- **`bark:stop` with blocked producers:** All producers are woken via broadcast. Messages from producers blocked during stop go through the timeout/callback path. Call as `(bark:stop bark:*logger*)` or pass the logger returned by `bark:make-logger`.
 - **Tee with mixed blocking/non-blocking:** If a non-blocking destination succeeds and a blocking destination times out, the message is delivered to the first but dropped for the second. The `on-block-timeout` callback fires for the failing destination.
 - **`with-log-buffer` + blocking:** Buffer flush replays through the root logger. If the root output is blocking, flush can block. This is correct behavior.

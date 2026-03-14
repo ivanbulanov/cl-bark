@@ -31,7 +31,6 @@
   "Create a buffer-logger: a copy of ORIGINAL with level lowered to BUFFER-LEVEL,
    field-transform and sampler cleared, and level slots replaced with capture functions."
   (let ((lgr (%make-logger
-              :name (logger-name original)
               :chindings (logger-chindings original)
               :raw-bindings (logger-raw-bindings original)
               :formatter (logger-formatter original)

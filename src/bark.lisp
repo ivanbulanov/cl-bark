@@ -1113,7 +1113,7 @@ Specifying both :level and :filter is an error."
 
 (defstruct (logger (:constructor %make-logger))
   "A bark logger instance."
-  (name            ""    :type string :read-only t)
+  (root-p          nil   :type boolean :read-only t)
   (level           +info+ :type fixnum)
   (chindings       ""    :type string :read-only t)
   (raw-bindings    nil   :type list :read-only t)
@@ -1221,28 +1221,64 @@ Specifying both :level and :filter is an error."
                                   ctx message flds))))
         (values)))))
 
-(declaim (ftype (function (&key (:name string) (:level (or fixnum keyword)) (:formatter function)
-                                (:output t) (:field-transform (or null function))
+(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
+                                (:context list) (:field-transform (or null function))
+                                (:capacity fixnum) (:on-drop (or null function))
+                                (:blocking boolean) (:block-timeout t)
+                                (:on-block-timeout (or null function))
                                 (:level-sampler (or null simple-vector))
                                 (:consistent (or null consistent-sampler)))
                           (values logger &optional)) make-logger))
 
-(defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output
-                         field-transform level-sampler consistent)
-  "Create a new logger with synchronous output.
-   OUTPUT can be a stream, a function, or NIL. No async wrapping is applied.
-   NAME, when provided, is added as a regular static field via CHILD — not
-   pre-serialized to JSON. All static context (including name) goes through CHILD."
-  (let ((lgr (%make-logger
-              :formatter formatter
-              :output output
-              :field-transform field-transform
-              :level-sampler level-sampler
-              :consistent consistent)))
+(defun make-logger (&key output (level :info) (formatter #'json-formatter)
+                         context field-transform
+                         (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
+                         level-sampler consistent)
+  "Create a new logger. OUTPUT determines async vs sync behavior:
+   - Stream or NIL: wrapped in async-output (background thread + ring buffer).
+   - Function: called synchronously — no thread, no buffer.
+   - tee-output: used as-is (already contains async-outputs).
+   CONTEXT, when provided, is a plist of static context fields.
+   Async-specific parameters (CAPACITY, ON-DROP, BLOCKING, BLOCK-TIMEOUT,
+   ON-BLOCK-TIMEOUT) are silently ignored for function outputs.
+   Passing them with a tee-output signals an error."
+  (when (and (tee-output-p output)
+             (or blocking on-block-timeout block-timeout-supplied-p
+                 (/= capacity +default-buffer-capacity+)
+                 (not (eq on-drop #'default-on-drop))))
+    (cl:error "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
+               :block-timeout, :on-block-timeout) with a tee-output. ~
+               Configure these per-destination in bark:tee."))
+  (let* ((actual-output (cond
+                          ((functionp output) output)
+                          ((tee-output-p output) output)
+                          ((or (streamp output) (null output))
+                           (make-async-output (or output *error-output*)
+                                              :capacity capacity
+                                              :formatter formatter
+                                              :on-drop on-drop
+                                              :blocking blocking
+                                              :block-timeout block-timeout
+                                              :on-block-timeout on-block-timeout))
+                          (t (cl:error "Invalid :output for make-logger: ~a ~
+                                        (expected stream, function, tee-output, or NIL)" output))))
+         (effective-context (if (and context field-transform)
+                                (apply-field-transform-plist field-transform context)
+                                context))
+         (chindings (if effective-context (serialize-bindings effective-context) ""))
+         (raw-bindings effective-context)
+         (lgr (%make-logger
+               :root-p t
+               :chindings chindings
+               :raw-bindings raw-bindings
+               :formatter formatter
+               :output actual-output
+               :field-transform field-transform
+               :level-sampler level-sampler
+               :consistent consistent)))
     (set-level lgr level)
-    (if (string= name "")
-        lgr
-        (child lgr :name name))))
+    lgr))
 
 (declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
 
@@ -1319,31 +1355,31 @@ Specifying both :level and :filter is an error."
   "Set/replace the consistent sampler on LOGGER (nil to remove)."
   (setf (logger-consistent logger) consistent-sampler))
 
-(declaim (ftype (function (logger &rest t) (values logger &rest t)) child))
+(declaim (ftype (function (logger list &key (:level (or null fixnum keyword))
+                                            (:field-transform (or null function)))
+                          (values logger &optional)) make-child))
 
-(defun child (parent &rest bindings)
-  "Create a child logger from PARENT with additional BINDINGS pre-serialized.
-   Inherits the parent's field-transform. When BINDINGS include :field-transform,
-   the value is composed with the parent's transform (child runs after parent).
-   When BINDINGS include :name, it sets the logger's display name for print-object."
-  (let* ((child-transform (getf bindings :field-transform))
-         (clean-bindings (loop for (k v) on bindings by #'cddr
-                               unless (eq k :field-transform)
-                                 collect k and collect v))
-         (parent-transform (logger-field-transform parent))
-         (composed-transform (compose-field-transforms child-transform parent-transform))
-         (effective-bindings (if composed-transform
-                                 (apply-field-transform-plist composed-transform clean-bindings)
-                                 clean-bindings))
+(defun make-child (parent context &key level field-transform)
+  "Create a child logger from PARENT with CONTEXT (a plist) pre-serialized.
+   Inherits the parent's formatter, output, level-sampler, and consistent slots
+   (snapshots at creation time). LEVEL overrides the inherited level; when omitted,
+   the child inherits the parent's current level. FIELD-TRANSFORM composes with the
+   parent's transform (child runs after parent)."
+  (let* ((parent-transform (logger-field-transform parent))
+         (composed-transform (compose-field-transforms field-transform parent-transform))
+         (effective-bindings (if (and context composed-transform)
+                                 (apply-field-transform-plist composed-transform context)
+                                 context))
          (new-chindings (concatenate 'string
                                       (logger-chindings parent)
                                       (serialize-bindings effective-bindings)))
          (new-raw-bindings (append (logger-raw-bindings parent) effective-bindings))
-         (child-name (or (getf effective-bindings :name)
-                         (logger-name parent)))
+         (child-level (cond
+                        ((null level) (logger-level parent))
+                        ((keywordp level) (level-from-keyword level))
+                        (t level)))
          (child (%make-logger
-                 :name child-name
-                 :level (logger-level parent)
+                 :level child-level
                  :chindings new-chindings
                  :raw-bindings new-raw-bindings
                  :formatter (logger-formatter parent)
@@ -1351,7 +1387,7 @@ Specifying both :level and :filter is an error."
                  :level-sampler (logger-level-sampler parent)
                  :consistent (logger-consistent parent)
                  :field-transform composed-transform)))
-    (set-level child (logger-level parent))
+    (set-level child child-level)
     child))
 
 (defmethod print-object ((ao async-output) stream)
@@ -1364,59 +1400,12 @@ Specifying both :level and :filter is an error."
               (if ring (ring-buffer-dropped ring) 0)))))
 
 (defmethod print-object ((lgr logger) stream)
-  "Print logger showing name and level."
-  (print-unreadable-object (lgr stream :type t :identity t)
-    (format stream "~A level=~A" (logger-name lgr) (level-name (logger-level lgr)))))
+  "Print logger showing level and kind."
+  (print-unreadable-object (lgr stream :type t)
+    (format stream "~A~@[ ~A~]" (level-name (logger-level lgr))
+            (unless (logger-root-p lgr) "child"))))
 
 ;;; --- Lifecycle ---
-
-(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
-                                (:capacity fixnum) (:on-drop (or null function))
-                                (:context list) (:field-transform (or null function))
-                                (:level-sampler (or null simple-vector))
-                                (:consistent (or null consistent-sampler))
-                                (:blocking boolean) (:block-timeout t)
-                                (:on-block-timeout (or null function)))
-                          (values logger &optional)) start))
-
-(defun start (&key output (level :info) (formatter #'json-formatter)
-                   (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
-                   context field-transform level-sampler consistent
-                   blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout)
-  "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
-When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
-When OUTPUT is a tee-output, the async-outputs are already created.
-Passing :blocking, :block-timeout, or :on-block-timeout with a tee-output signals an error.
-CONTEXT, when provided, is a plist of static context fields (e.g. :name \"myapp\" :role \"broker\").
-FIELD-TRANSFORM, when provided, is a function (lambda (key value) -> (values new-value keep-p))
-that is called on each field before serialization. Return (values nil nil) to drop a field."
-  (when (and *logger* (logger-output *logger*))
-    (stop))
-  (when (and (tee-output-p output)
-             (or blocking on-block-timeout block-timeout-supplied-p))
-    (cl:error "Cannot specify :blocking, :block-timeout, or :on-block-timeout ~
-               with a tee-output. Configure blocking per-destination in bark:tee."))
-  (let* ((actual-output (cond
-                          ((tee-output-p output) output)
-                          ((streamp output) (make-async-output output
-                                                               :capacity capacity
-                                                               :formatter formatter
-                                                               :on-drop on-drop
-                                                               :blocking blocking
-                                                               :block-timeout block-timeout
-                                                               :on-block-timeout on-block-timeout))
-                          ((null output) (make-async-output *error-output*
-                                                            :capacity capacity
-                                                            :formatter formatter
-                                                            :on-drop on-drop
-                                                            :blocking blocking
-                                                            :block-timeout block-timeout
-                                                            :on-block-timeout on-block-timeout))
-                          (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
-         (lgr (make-logger :level level :formatter formatter
-                           :output actual-output :field-transform field-transform
-                           :level-sampler level-sampler :consistent consistent)))
-    (setf *logger* (if context (apply #'child lgr context) lgr))))
 
 (defun do-async-outputs (output fn)
   "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).
@@ -1435,11 +1424,16 @@ Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async o
   (when logger
     (do-async-outputs (logger-output logger) #'flush-async-output)))
 
-(defun stop ()
-  "Flush and stop the global logger's writer thread(s)."
-  (when *logger*
-    (do-async-outputs (logger-output *logger*) #'stop-async-output)
-    (setf *logger* nil)))
+(defun stop (logger)
+  "Stop writer threads for LOGGER. Idempotent — calling stop on an already-stopped
+   or sync logger is a no-op. Passing NIL is a no-op. Signals an error if LOGGER
+   is a child (children share the parent's output)."
+  (when logger
+    (unless (logger-root-p logger)
+      (cl:error "Cannot stop a child logger — it shares the parent's output. ~
+                 Stop the root logger instead."))
+    (do-async-outputs (logger-output logger) #'stop-async-output))
+  nil)
 
 ;;; --- Context ---
 
@@ -1457,8 +1451,9 @@ Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async o
    Binds VAR to a function that returns the list of logged strings.
    FORMATTER defaults to #'json-formatter but can be any formatter function."
   `(multiple-value-bind (collector results-fn) (make-list-collector)
-     (let* ((*logger* (make-logger :name "test" :level :trace
-                                   :formatter ,formatter :output collector)))
+     (let* ((*logger* (make-logger :level :trace
+                                   :formatter ,formatter :output collector
+                                   :context '(:name "test"))))
        (let ((,var results-fn))
          ,@body))))
 

@@ -6,8 +6,8 @@
   (:use #:cl)
   (:import-from #:bark
    #:make-logger #:make-windowed-counter #:make-level-sampler
-   #:set-level-sampling #:logger-debug-fn #:logger-level-sampler
-   #:json-formatter #:+level-slot-count+))
+   #:set-level-sampling #:logger-debug-fn
+   #:json-formatter #:+level-slot-count+ #:make-child))
 
 (in-package #:bark-concurrency-tests)
 
@@ -37,7 +37,7 @@
         (initial 5)
         (thereafter 100))
     (multiple-value-bind (output count-fn) (make-counting-output)
-      (let ((lgr (make-logger :name "conc" :level :debug
+      (let ((lgr (make-logger :context '(:name "conc") :level :debug
                               :formatter #'json-formatter :output output
                               :level-sampler (make-level-sampler
                                               :debug (make-windowed-counter
@@ -66,7 +66,7 @@
 
 (5am:test test-set-level-sampling-cas-race
   "Concurrent set-level-sampling from nil: exactly one vector allocated, all counters present."
-  (let ((lgr (make-logger :name "cas" :level :debug))
+  (let ((lgr (make-logger :context '(:name "cas") :level :debug))
         (counters (make-array 7 :initial-element nil)))
     ;; 6 threads, one per level (trace=1 through fatal=6)
     (let ((thread-list nil))
@@ -83,9 +83,9 @@
                   thread-list))))
       (dolist (th thread-list) (bt:join-thread th)))
     ;; Verify: vector exists
-    (5am:is-true (not (null (logger-level-sampler lgr))))
+    (5am:is-true (not (null (bark::logger-level-sampler lgr))))
     ;; Verify: all 6 level slots have their windowed-counter (no silent overwrites)
-    (let ((ls (logger-level-sampler lgr)))
+    (let ((ls (bark::logger-level-sampler lgr)))
       (5am:is (= +level-slot-count+ (length ls)))
       (dotimes (idx 6)
         (let ((slot (aref ls (1+ idx))))
@@ -97,7 +97,7 @@
 (5am:test test-concurrent-no-crash
   "Concurrent logging with both samplers does not crash or corrupt."
   (multiple-value-bind (output count-fn) (make-counting-output)
-    (let ((lgr (make-logger :name "stress" :level :debug
+    (let ((lgr (make-logger :context '(:name "stress") :level :debug
                             :formatter #'json-formatter :output output
                             :consistent (bark:make-consistent-sampler
                                          :key-fn (lambda (b) (getf b :rid))
@@ -113,7 +113,7 @@
             (push (bt:make-thread
                    (lambda ()
                      (let* ((lgr2 (if use-key
-                                      (bark:child lgr :rid (format nil "req-~d" tid))
+                                      (make-child lgr (list :rid (format nil "req-~d" tid)))
                                       lgr))
                             (fn (logger-debug-fn lgr2)))
                        (dotimes (i 5000)
