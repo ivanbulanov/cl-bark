@@ -14,7 +14,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 ;; Log structured messages
 (bark:info "user logged in" :user-id 42 :method "oauth")
-;; => {"level":30,"ts":1740600000123,"name":"myapp","user-id":42,"method":"oauth","msg":"user logged in"}
+;; => {"level":"info","ts":1740600000123,"name":"myapp","user-id":42,"method":"oauth","msg":"user logged in"}
 
 (bark:debug "cache miss" :key "session:abc")  ; silenced at :info level — noop call
 
@@ -57,14 +57,12 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 | Level | Value | Keyword |
 |-------|-------|---------|
-| Trace | 10 | `:trace` |
-| Debug | 20 | `:debug` |
-| Info | 30 | `:info` |
-| Warn | 40 | `:warn` |
-| Error | 50 | `:error` |
-| Fatal | 60 | `:fatal` |
-
-Levels are integer-encoded, spaced by 10 for user-defined intermediate levels.
+| Trace | 1 | `:trace` |
+| Debug | 2 | `:debug` |
+| Info | 3 | `:info` |
+| Warn | 4 | `:warn` |
+| Error | 5 | `:error` |
+| Fatal | 6 | `:fatal` |
 
 ## API Reference
 
@@ -84,11 +82,11 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 ```lisp
 ;; With message
 (bark:info "user registered" :user-id 42)
-;; => {"level":30,"ts":...,"user-id":42,"msg":"user registered"}
+;; => {"level":"info","ts":...,"user-id":42,"msg":"user registered"}
 
 ;; Without message — fields only
 (bark:info :event "registration" :user-id 42)
-;; => {"level":30,"ts":...,"event":"registration","user-id":42}
+;; => {"level":"info","ts":...,"event":"registration","user-id":42}
 ```
 
 Detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
@@ -266,7 +264,7 @@ Conditions passed as field values are automatically serialized with their type a
 (handler-case (process-request)
   (cl:error (c)
     (bark:error "request failed" :err c :path "/api/users")))
-;; JSON: {"level":50,...,"err":{"type":"simple-error","msg":"connection refused"},"path":"/api/users","msg":"request failed"}
+;; JSON: {"level":"error",...,"err":{"type":"simple-error","msg":"connection refused"},"path":"/api/users","msg":"request failed"}
 ;; logfmt: level=error ... err="simple-error: connection refused" path=/api/users msg=request\ failed
 ;; pretty: ERROR request failed err=simple-error: connection refused path=/api/users
 ```
@@ -314,7 +312,7 @@ The transform is a function `(lambda (key value) ...)` returning:
                                              (t         value)))))
 
 (bark:info "login" :user "alice" :password "hunter2" :token "abc-xyz")
-;; => {"level":30,...,"user":"alice","token":"****","msg":"login"}
+;; => {"level":"info",...,"user":"alice","token":"****","msg":"login"}
 ;; :password is gone, :token is masked
 ```
 
@@ -356,7 +354,7 @@ A formatter is a function with signature:
 
 | Parameter | Type | Purpose |
 |-----------|------|---------|
-| `level` | fixnum | Numeric log level (10-60) |
+| `level` | fixnum | Numeric log level (1-6) |
 | `chindings` | string | Pre-serialized JSON fragment of static context (for JSON formatters) |
 | `raw-bindings` | plist | Static context as a key-value plist (for non-JSON formatters) |
 | `context` | alist | Dynamic context from `with-context` |
@@ -393,12 +391,12 @@ All types are accepted — no log call ever signals `type-error`. Ratios are coe
 
 #### Formatter Factories
 
-The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"msg"` keys, Unix millisecond timestamps). Formatter factories return closures with the same signature, but with configurable keys, level formats, and timestamp formats. Everything is pre-computed at factory time — no per-call overhead.
+The built-in formatters use fixed defaults (string levels, `"level"`/`"ts"`/`"msg"` keys, Unix millisecond timestamps). Formatter factories return closures with the same signature, but with configurable keys, level formats, and timestamp formats. Everything is pre-computed at factory time — no per-call overhead.
 
 **`make-json-formatter`**
 
 ```lisp
-(bark:make-json-formatter &key (timestamp :unix-ms) (level-format :numeric)
+(bark:make-json-formatter &key (timestamp :unix-ms) (level-format :string)
                                (level-key "level") (timestamp-key "ts")
                                (message-key "msg"))
 ```
@@ -406,8 +404,8 @@ The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"m
 | Parameter | Values | Default |
 |-----------|--------|---------|
 | `timestamp` | `:unix-ms`, `:iso8601`, `nil` (omit) | `:unix-ms` |
-| `level-format` | `:numeric`, `:string` | `:numeric` |
-| `level-key` | any string | `"level"` |
+| `level-format` | `:string`, `:numeric` | `:string` |
+| `level-key` | any string, or `nil` (omit) | `"level"` |
 | `timestamp-key` | any string | `"ts"` |
 | `message-key` | any string | `"msg"` |
 
@@ -424,7 +422,11 @@ The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"m
 
 ;; Omit timestamp (external system adds it)
 (setf bark:*logger* (bark:make-logger :formatter (bark:make-json-formatter :timestamp nil)))
-;; => {"level":30,"version":"1.2.3","msg":"deployed"}
+;; => {"level":"info","version":"1.2.3","msg":"deployed"}
+
+;; Omit level (external system adds it)
+(setf bark:*logger* (bark:make-logger :formatter (bark:make-json-formatter :level-key nil)))
+;; => {"ts":1740600000123,"msg":"deployed"}
 ```
 
 **`make-logfmt-formatter`**
@@ -434,7 +436,7 @@ The built-in formatters use fixed defaults (numeric levels, `"level"`/`"ts"`/`"m
                                   (timestamp-key "ts") (message-key "msg"))
 ```
 
-Level is always a string in logfmt. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`.
+Level is always a string in logfmt. Pass `:level-key nil` to omit it. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`.
 
 ```lisp
 (setf bark:*logger*
@@ -446,10 +448,10 @@ Level is always a string in logfmt. Timestamp accepts `:unix-ms`, `:iso8601`, or
 **`make-pretty-formatter`**
 
 ```lisp
-(bark:make-pretty-formatter &key timestamp (timestamp-key "ts"))
+(bark:make-pretty-formatter &key timestamp (timestamp-key "ts") (show-level t))
 ```
 
-The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display.
+The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display. Pass `:show-level nil` to omit the colored level label.
 
 ```lisp
 ;; Pretty with ISO 8601 timestamps
@@ -469,7 +471,7 @@ The standard `pretty-formatter` omits timestamps (REPL use). The factory adds op
 The async writer uses a bounded ring buffer per destination. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
 
 ```json
-{"level":40,"ts":1740600000123,"msg":"bark: dropped 153 log messages (output too slow)"}
+{"level":"warn","ts":1740600000123,"msg":"bark: dropped 153 log messages (output too slow)"}
 ```
 
 The `on-drop` callback receives the drop count and returns `(values message fields)` via multiple values. The writer formats the result at warn level through the destination's formatter:
