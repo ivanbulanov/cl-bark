@@ -1371,7 +1371,7 @@ Specifying both :level and :filter is an error."
 ;;; --- Lifecycle ---
 
 (declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
-                                (:name string) (:capacity fixnum) (:on-drop (or null function))
+                                (:capacity fixnum) (:on-drop (or null function))
                                 (:context list) (:field-transform (or null function))
                                 (:level-sampler (or null simple-vector))
                                 (:consistent (or null consistent-sampler))
@@ -1380,14 +1380,14 @@ Specifying both :level and :filter is an error."
                           (values logger &optional)) start))
 
 (defun start (&key output (level :info) (formatter #'json-formatter)
-                   (name "") (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                   (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
                    context field-transform level-sampler consistent
                    blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout)
   "Start the global logger. OUTPUT can be a stream, a tee-output, or NIL (defaults to *error-output*).
 When OUTPUT is a plain stream, it is wrapped in an async-output with CAPACITY and ON-DROP.
 When OUTPUT is a tee-output, the async-outputs are already created.
 Passing :blocking, :block-timeout, or :on-block-timeout with a tee-output signals an error.
-CONTEXT, when provided, is a plist of static context fields.
+CONTEXT, when provided, is a plist of static context fields (e.g. :name \"myapp\" :role \"broker\").
 FIELD-TRANSFORM, when provided, is a function (lambda (key value) -> (values new-value keep-p))
 that is called on each field before serialization. Return (values nil nil) to drop a field."
   (when (and *logger* (logger-output *logger*))
@@ -1415,10 +1415,8 @@ that is called on each field before serialization. Return (values nil nil) to dr
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
          (lgr (make-logger :level level :formatter formatter
                            :output actual-output :field-transform field-transform
-                           :level-sampler level-sampler :consistent consistent))
-         (child-bindings (append (unless (string= name "") (list :name name))
-                                 context)))
-    (setf *logger* (if child-bindings (apply #'child lgr child-bindings) lgr))))
+                           :level-sampler level-sampler :consistent consistent)))
+    (setf *logger* (if context (apply #'child lgr context) lgr))))
 
 (defun do-async-outputs (output fn)
   "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).

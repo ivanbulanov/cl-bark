@@ -888,7 +888,7 @@
 (5am:test test-start-with-sampling
   "start creates a logger that respects sampling args."
   (let ((out (make-string-output-stream)))
-    (bark:start :output out :level :debug :name "samp-start"
+    (bark:start :output out :level :debug :context '(:name "samp-start")
                 :level-sampler (make-level-sampler
                                 :debug (make-windowed-counter
                                         :initial 3 :thereafter 0
@@ -1730,7 +1730,7 @@
 (5am:test test-start-with-plain-stream
   "start with :output as a plain stream wraps it in async-output."
   (let ((out (make-string-output-stream)))
-    (bark:start :output out :level :info :name "plain")
+    (bark:start :output out :level :info)
     (bark:info "stream test")
     (bark:stop)
     (5am:is-true (search "stream test" (get-output-stream-string out)))))
@@ -1739,7 +1739,7 @@
   "start with :output as a tee-output uses it directly."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream)))
-    (bark:start :name "tee" :level :info
+    (bark:start :level :info
                 :output (bark:tee
                          (s1 :formatter #'json-formatter)
                          (s2 :formatter #'pretty-formatter)))
@@ -1755,7 +1755,7 @@
   "start with no :output defaults to *error-output*."
   (let* ((out (make-string-output-stream))
          (*error-output* out))
-    (bark:start :name "default" :level :info)
+    (bark:start :level :info)
     (bark:info "default test")
     (bark:stop)
     (5am:is-true (search "default test" (get-output-stream-string out)))))
@@ -1763,9 +1763,9 @@
 (5am:test test-start-with-context-and-tee
   "start with :context and :output tee wraps in child with context."
   (let* ((s1 (make-string-output-stream)))
-    (bark:start :name "ctx" :level :info
+    (bark:start :level :info
                 :output (bark:tee (s1 :formatter #'json-formatter))
-                :context '(:role "broker" :pid 123))
+                :context '(:name "ctx" :role "broker" :pid 123))
     (bark:info "context tee test")
     (bark:stop)
     (let ((out (get-output-stream-string s1)))
@@ -1777,7 +1777,7 @@
   "stop with tee output stops all writer threads."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream)))
-    (bark:start :name "teardown" :level :info
+    (bark:start :level :info
                 :output (bark:tee
                          (s1 :formatter #'json-formatter)
                          (s2 :formatter #'json-formatter)))
@@ -1792,7 +1792,7 @@
 (5am:test test-flush-drains-pending-messages
   "bark:flush blocks until all pending messages are written to the stream."
   (let ((out (make-string-output-stream)))
-    (bark:start :name "flush-test" :level :info :output out)
+    (bark:start :level :info :output out)
     (dotimes (i 10)
       (bark:info (format nil "msg-~d" i)))
     (bark:flush)
@@ -1805,7 +1805,7 @@
   "bark:flush drains all destinations in a tee."
   (let ((s1 (make-string-output-stream))
         (s2 (make-string-output-stream)))
-    (bark:start :name "flush-tee" :level :info
+    (bark:start :level :info
                 :output (bark:tee
                          (s1 :formatter #'json-formatter)
                          (s2 :formatter #'json-formatter)))
