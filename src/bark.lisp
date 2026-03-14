@@ -557,39 +557,46 @@
 (defun make-logfmt-formatter (&key (timestamp :unix-ms) (level-key "level")
                                     (timestamp-key "ts") (message-key "msg"))
   "Return a logfmt formatter closure with custom keys.
-   Level is always string for logfmt. Pre-computes key name strings."
-  (let ((level-prefix (format nil "~a=" level-key))
+   Level is always string for logfmt. Pre-computes key name strings.
+   Pass :level-key NIL to omit the level field entirely."
+  (let ((level-prefix (when level-key (format nil "~a=" level-key)))
         (ts-prefix (when timestamp (format nil " ~a=" timestamp-key)))
-        (msg-prefix (format nil " ~a=" message-key)))
+        (ts-prefix-first (when timestamp (format nil "~a=" timestamp-key)))
+        (msg-prefix (format nil " ~a=" message-key))
+        (msg-prefix-first (format nil "~a=" message-key)))
     (lambda (level chindings raw-bindings context message fields)
       (declare (ignore chindings))
       (with-output-to-string (s)
-        (write-string level-prefix s)
-        (write-string (level-name level) s)
-        (when ts-prefix
-          (write-string ts-prefix s)
-          (emit-timestamp timestamp s))
-        (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
-        (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
-        (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
-        (when message
-          (write-string msg-prefix s)
-          (emit-logfmt-value s message))))))
+        (let ((wrote nil))
+          (when level-prefix
+            (write-string level-prefix s)
+            (write-string (level-name level) s)
+            (setf wrote t))
+          (when ts-prefix
+            (write-string (if wrote ts-prefix ts-prefix-first) s)
+            (emit-timestamp timestamp s)
+            (setf wrote t))
+          (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
+          (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
+          (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
+          (when message
+            (write-string (if wrote msg-prefix msg-prefix-first) s)
+            (emit-logfmt-value s message)))))))
 
-(defun make-pretty-formatter (&key timestamp (timestamp-key "ts"))
+(defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t))
   "Return a pretty formatter closure with optional timestamp display.
    TIMESTAMP is nil (no timestamp), :iso8601, or :unix-ms.
-   Level is always colored string."
-  (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
+   Level is always colored string. Pass :show-level NIL to omit it."
+  (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc)))
+        (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
     (lambda (level chindings raw-bindings context message fields)
       (declare (ignore chindings))
       (with-output-to-string (s)
         (let* ((*print-level* *max-pretty-depth*)
                (*print-length* *max-pretty-length*)
                (*print-circle* t)
-               (level-idx level)
-               (color (svref *level-colors* level-idx))
-               (stacks nil))
+               (stacks nil)
+               (wrote nil))
           (flet ((write-key (k)
                    (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
                  (write-val (k v)
@@ -600,10 +607,14 @@
                      ((typep v 'condition)
                       (write-condition-summary s v))
                      (t (princ v s)))))
-            (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level-idx) #\Esc)
+            (when show-level
+              (let ((color (svref *level-colors* level)))
+                (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level) #\Esc))
+              (setf wrote t))
             (when ts-prefix
-              (write-string ts-prefix s)
-              (emit-timestamp timestamp s))
+              (write-string (if wrote ts-prefix ts-prefix-first) s)
+              (emit-timestamp timestamp s)
+              (setf wrote t))
             (when message
               (write-char #\Space s)
               (write-string message s))

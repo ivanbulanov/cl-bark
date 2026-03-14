@@ -3162,6 +3162,27 @@
       ;; No leading comma after {
       (5am:is-false (string= ",\"" (subseq result 1 3))))))
 
+(5am:test test-make-logfmt-formatter-no-level
+  "make-logfmt-formatter with :level-key nil omits the level field."
+  (let ((fmt (bark:make-logfmt-formatter :level-key nil)))
+    (let ((result (funcall fmt +info+ "" nil nil "test" (list :code 200))))
+      (5am:is-false (search "level=" result))
+      (5am:is-false (search "NIL=" result))
+      (5am:is-true (search "ts=" result))
+      (5am:is-true (search "code=200" result))
+      (5am:is-true (search "msg=" result))
+      ;; Timestamp is now first — no leading space
+      (5am:is (char/= #\Space (char result 0))))))
+
+(5am:test test-make-pretty-formatter-no-level
+  "make-pretty-formatter with :show-level nil omits the colored level label."
+  (let ((fmt (bark:make-pretty-formatter :show-level nil)))
+    (let ((result (funcall fmt +info+ "" nil nil "hello" nil)))
+      (5am:is-true (search "hello" result))
+      ;; Should NOT contain any of the level names
+      (5am:is-false (search "INFO" result))
+      (5am:is-false (search "info" result)))))
+
 ;;; --- Bug regression tests ---
 
 (5am:test test-logfmt-condition-escapes-quotes
