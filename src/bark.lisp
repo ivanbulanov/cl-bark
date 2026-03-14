@@ -1229,26 +1229,20 @@ Specifying both :level and :filter is an error."
 
 (defun make-logger (&key (name "") (level :info) (formatter #'json-formatter) output
                          field-transform level-sampler consistent)
-  "Create a new logger."
-  (let* ((chindings (if (string= name "")
-                        ""
-                        (with-output-to-string (s)
-                          (emit-json-key s "name")
-                          (emit-json-value s name))))
-         (raw-bindings (if (string= name "")
-                           nil
-                           (list :name name)))
-         (lgr (%make-logger
-               :name name
-               :chindings chindings
-               :raw-bindings raw-bindings
-               :formatter formatter
-               :output output
-               :field-transform field-transform
-               :level-sampler level-sampler
-               :consistent consistent)))
+  "Create a new logger with synchronous output.
+   OUTPUT can be a stream, a function, or NIL. No async wrapping is applied.
+   NAME, when provided, is added as a regular static field via CHILD — not
+   pre-serialized to JSON. All static context (including name) goes through CHILD."
+  (let ((lgr (%make-logger
+              :formatter formatter
+              :output output
+              :field-transform field-transform
+              :level-sampler level-sampler
+              :consistent consistent)))
     (set-level lgr level)
-    lgr))
+    (if (string= name "")
+        lgr
+        (child lgr :name name))))
 
 (declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
 
@@ -1330,13 +1324,12 @@ Specifying both :level and :filter is an error."
 (defun child (parent &rest bindings)
   "Create a child logger from PARENT with additional BINDINGS pre-serialized.
    Inherits the parent's field-transform. When BINDINGS include :field-transform,
-   the value is composed with the parent's transform (child runs after parent)."
+   the value is composed with the parent's transform (child runs after parent).
+   When BINDINGS include :name, it sets the logger's display name for print-object."
   (let* ((child-transform (getf bindings :field-transform))
-         (clean-bindings (if child-transform
-                             (loop for (k v) on bindings by #'cddr
-                                   unless (eq k :field-transform)
-                                     collect k and collect v)
-                             bindings))
+         (clean-bindings (loop for (k v) on bindings by #'cddr
+                               unless (eq k :field-transform)
+                                 collect k and collect v))
          (parent-transform (logger-field-transform parent))
          (composed-transform (compose-field-transforms child-transform parent-transform))
          (effective-bindings (if composed-transform
@@ -1346,8 +1339,10 @@ Specifying both :level and :filter is an error."
                                       (logger-chindings parent)
                                       (serialize-bindings effective-bindings)))
          (new-raw-bindings (append (logger-raw-bindings parent) effective-bindings))
+         (child-name (or (getf effective-bindings :name)
+                         (logger-name parent)))
          (child (%make-logger
-                 :name (logger-name parent)
+                 :name child-name
                  :level (logger-level parent)
                  :chindings new-chindings
                  :raw-bindings new-raw-bindings
@@ -1418,10 +1413,12 @@ that is called on each field before serialization. Return (values nil nil) to dr
                                                             :block-timeout block-timeout
                                                             :on-block-timeout on-block-timeout))
                           (t (cl:error "Invalid :output for start: ~a (expected stream, tee-output, or NIL)" output))))
-         (lgr (make-logger :name name :level level :formatter formatter
+         (lgr (make-logger :level level :formatter formatter
                            :output actual-output :field-transform field-transform
-                           :level-sampler level-sampler :consistent consistent)))
-    (setf *logger* (if context (apply #'child lgr context) lgr))))
+                           :level-sampler level-sampler :consistent consistent))
+         (child-bindings (append (unless (string= name "") (list :name name))
+                                 context)))
+    (setf *logger* (if child-bindings (apply #'child lgr child-bindings) lgr))))
 
 (defun do-async-outputs (output fn)
   "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).
