@@ -758,7 +758,8 @@
      #.(coerce internal-time-units-per-second 'double-float)))
 
 (defun default-on-drop (count)
-  "Default drop handler. Returns a message string for the formatter."
+  "Default drop handler. Returns (values message fields) for the formatter.
+   Message is a string, fields is nil. Either value can be nil to suppress."
   (format nil "bark: dropped ~d log messages (output too slow)" count))
 
 (defstruct (async-output (:constructor %make-async-output))
@@ -831,7 +832,7 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
 (declaim (ftype (function ((or async-output null)) (values null &optional)) flush-async-output))
 
 (defun flush-async-output (async-output)
-  "Flush the async writer. Blocks until current queue is drained."
+  "Flush the async writer. Blocks until current queue is drained (5s timeout)."
   (when (and async-output (async-output-running async-output))
     (let ((ack (bt:make-semaphore :name "bark-flush-ack")))
       (bt:with-lock-held ((async-output-flush-lock async-output))

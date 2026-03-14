@@ -1922,6 +1922,29 @@
         (5am:is-true (search "\"level\":10" (nth 0 logs)))
         (5am:is-true (search "\"level\":60" (nth 5 logs)))))))
 
+(5am:test test-explicit-logger-no-message
+  "Explicit logger as sole arg emits a log entry with nil message."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "solo" :level :info :output collector)))
+      (bark:info lgr)
+      (let ((logs (funcall results-fn)))
+        (5am:is (= 1 (length logs)))
+        ;; Should have level but no msg key (nil message)
+        (5am:is-true (search "\"level\":30" (first logs)))
+        (5am:is-false (search "\"msg\":" (first logs)))))))
+
+(5am:test test-explicit-logger-keyword-fields-only
+  "Explicit logger with keyword fields only (no message)."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let ((lgr (make-logger :name "kw" :level :info :output collector)))
+      (bark:info lgr :method "GET" :status 200)
+      (let* ((logs (funcall results-fn))
+             (line (first logs)))
+        (5am:is (= 1 (length logs)))
+        (5am:is-true (search "\"method\":\"GET\"" line))
+        (5am:is-true (search "\"status\":200" line))
+        (5am:is-false (search "\"msg\":" line))))))
+
 (5am:test test-explicit-logger-with-fields
   "Explicit logger receives per-call fields."
   (multiple-value-bind (collector results-fn) (make-list-collector)
