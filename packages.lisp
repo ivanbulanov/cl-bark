@@ -1,69 +1,50 @@
 ;;; packages.lisp — Package definitions
 
-(defpackage "BARK"
-  (:use "COMMON-LISP")
-  (:shadow "DEBUG" "ERROR" "TRACE" "WARN")
-  (:export "+DEBUG+" "+ERROR+" "+FATAL+" "+INFO+" "+TRACE+" "+WARN+"
-           "+LEVEL-SLOT-COUNT+"
-           "+MIN-RING-CAPACITY+" "+DEFAULT-BUFFER-CAPACITY+"
-           "*COMPILE-TIME-MAX-LEVEL*"
-           "*LOG-CONTEXT*"
-           "*LOGGER*"
-           "*MAX-JSON-DEPTH*"
-           "*MAX-JSON-LENGTH*"
-           "*MAX-PRETTY-DEPTH*"
-           "*MAX-PRETTY-LENGTH*"
-           ;; Serialization API
-           "EMIT-JSON-VALUE" "EMIT-JSON-KEY" "EMIT-JSON-FIELDS"
-           "EMIT-LOGFMT-VALUE" "EMIT-LOGFMT-KEY"
-           "WRITE-JSON-ESCAPED-STRING" "SERIALIZE-BINDINGS"
-           ;; Condition serialization
-           "CAPTURE"
-           "CAPTURED-ERROR" "CAPTURED-ERROR-P"
-           "CAPTURED-ERROR-CONDITION" "CAPTURED-ERROR-STACK"
-           "*MAX-JSON-STACK-FRAMES*"
-           "*MAX-PRETTY-STACK-FRAMES*"
-           "ASYNC-OUTPUT"
-           "COMPOSE-FIELD-TRANSFORMS"
-           "DEBUG"
-           "ERROR"
-           "FATAL"
-           "INFO"
-           "JSON-FORMATTER"
-           "LOGGER"
-           "LOGGER-P"
-           "LOGFMT-FORMATTER"
-           ;; Multi-output
-           "MAKE-TEE"
-           "TEE"
-           "MAKE-JSON-FORMATTER"
-           "MAKE-CHILD"
-           "MAKE-LOGGER"
-           "MAKE-LOGFMT-FORMATTER"
-           "MAKE-PRETTY-FORMATTER"
-           "PRETTY-FORMATTER"
-           "SET-LEVEL"
-           ;; Sampling — windowed counter
-           "MAKE-WINDOWED-COUNTER"
-           "MAKE-LEVEL-SAMPLER"
-           "SET-LEVEL-SAMPLING"
-           "WINDOWED-COUNTER-INITIAL"
-           "WINDOWED-COUNTER-THEREAFTER"
-           "WINDOWED-COUNTER-WINDOW-TICKS"
-           ;; Sampling — consistent
-           "MAKE-CONSISTENT-SAMPLER"
-           "SET-CONSISTENT"
-           "CONSISTENT-SAMPLER-KEY-FN"
-           "CONSISTENT-SAMPLER-RATE"
-           "FLUSH"
-           "STOP"
-           "TRACE"
-           "WARN"
-           "WITH-CAPTURED-LOGS"
-           "WITH-CONTEXT"
-           "WITH-LOG-BUFFER"
-           "*ROOT-LOGGER*"
-           "BUFFER-ENTRY" "BUFFER-ENTRY-LEVEL" "BUFFER-ENTRY-MESSAGE"
-           "BUFFER-ENTRY-FIELDS" "BUFFER-ENTRY-CONTEXT" "BUFFER-ENTRY-TIMESTAMP"
-           "MAKE-BUFFER-ENTRY"
-           "CURRENT-LOG-TIMESTAMP-MS"))
+(defpackage #:bark
+  (:use #:cl)
+  (:shadow #:debug #:error #:trace #:warn)
+  (:export
+   ;; levels
+   #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
+   #:+level-slot-count+
+   ;; conditions
+   #:capture
+   #:captured-error #:captured-error-p
+   #:captured-error-condition #:captured-error-stack
+   ;; timestamps
+   #:current-log-timestamp-ms
+   ;; json
+   #:*max-json-depth* #:*max-json-length* #:*max-json-stack-frames*
+   #:emit-json-value #:emit-json-key #:emit-json-fields
+   #:write-json-escaped-string #:serialize-bindings
+   ;; logfmt
+   #:emit-logfmt-value #:emit-logfmt-key
+   ;; pretty
+   #:*max-pretty-depth* #:*max-pretty-length* #:*max-pretty-stack-frames*
+   ;; formatters
+   #:json-formatter #:logfmt-formatter #:pretty-formatter
+   #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
+   ;; ring-buffer
+   #:+min-ring-capacity+ #:+default-buffer-capacity+
+   ;; writer / output
+   #:async-output
+   #:make-tee #:tee
+   ;; logger
+   #:*logger* #:*log-context* #:*compile-time-max-level*
+   #:logger #:logger-p
+   #:make-logger #:make-child #:set-level
+   #:compose-field-transforms
+   #:make-windowed-counter #:make-level-sampler #:set-level-sampling
+   #:windowed-counter-initial #:windowed-counter-thereafter
+   #:windowed-counter-window-ticks
+   #:make-consistent-sampler #:set-consistent
+   #:consistent-sampler-key-fn #:consistent-sampler-rate
+   #:flush #:stop
+   #:trace #:debug #:info #:warn #:error #:fatal
+   #:with-context #:with-captured-logs
+   ;; buffer
+   #:*root-logger*
+   #:with-log-buffer
+   #:buffer-entry #:buffer-entry-level #:buffer-entry-message
+   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
+   #:make-buffer-entry))

@@ -1,11 +1,14 @@
 ;;; cl-bark.asd — System definition
-(asdf:defsystem "cl-bark"
+(asdf:defsystem #:cl-bark
   :description "High-performance structured logger for Common Lisp"
-  :author "Ivan Bulanov <https://github.com/ivanbulanov>"
+  :long-description "Async structured logging with JSON/logfmt/pretty output, multi-output fan-out, child loggers, sampling, and request-scoped buffering."
+  :author "Ivan Bulanov"
   :license "MIT"
   :homepage "https://github.com/ivanbulanov/cl-bark"
-  :depends-on ("atomics" "bordeaux-threads" "dissect" "local-time")
-  :version "2.0.0"
+  :source-control (:git "https://github.com/ivanbulanov/cl-bark.git")
+  :bug-tracker "https://github.com/ivanbulanov/cl-bark/issues"
+  :version "0.1.0"
+  :depends-on (#:atomics #:bordeaux-threads #:dissect #:local-time)
   :serial t
   :components
   ((:file "packages")
@@ -14,8 +17,8 @@
     ((:file "bark")
      (:file "buffer")))))
 
-(asdf:defsystem "cl-bark/tests"
-  :depends-on ("cl-bark" "fiveam" "uiop" "yason")
+(asdf:defsystem #:cl-bark/tests
+  :depends-on (#:cl-bark #:fiveam #:uiop #:yason)
   :serial t
   :components
   ((:module "tests"
@@ -23,8 +26,8 @@
     ((:file "tests")
      (:file "blocking-tests")))))
 
-(asdf:defsystem "cl-bark/concurrency-tests"
-  :depends-on ("cl-bark" "fiveam" "bordeaux-threads")
+(asdf:defsystem #:cl-bark/concurrency-tests
+  :depends-on (#:cl-bark #:fiveam #:bordeaux-threads)
   :serial t
   :components
   ((:module "tests"
