@@ -1,0 +1,460 @@
+;;; src/logger.lisp — Logger, sampling, lifecycle, and logging macros
+
+(in-package #:bark)
+
+;;; --- Sampling ---
+
+(defconstant +window-check-interval+ 64
+  "How often the windowed counter reads the clock (in messages).
+   Must be power of 2 for bit-and optimization.")
+
+(defstruct (windowed-counter (:constructor %make-windowed-counter))
+  "Per-level sampling: first INITIAL per window always pass, then 1-in-THEREAFTER."
+  (initial      5   :type fixnum :read-only t)
+  (thereafter   100 :type fixnum :read-only t)
+  (window-ticks 0   :type fixnum :read-only t)
+  (count        0   :type (unsigned-byte 64))
+  (window-start 0   :type fixnum))
+
+(defstruct (consistent-sampler (:constructor %make-consistent-sampler))
+  "Deterministic hash-based sampling. Same key always produces same decision."
+  (key-fn nil :type function    :read-only t)
+  (rate     1 :type (integer 1) :read-only t))
+
+(declaim (inline mix-hash consistent-hash-keep-p windowed-allow-p))
+
+(defun mix-hash (h)
+  "Multiply-xorshift finalizer for improved low-bit distribution."
+  (declare (type fixnum h))
+  (let* ((h (logxor h (ash h -16)))
+         (h (ldb (byte #.(integer-length most-positive-fixnum) 0)
+                 (* h 2654435769))))
+    (logxor h (ash h -13))))
+
+(defun consistent-hash-keep-p (key rate)
+  "Deterministic keep/drop decision based on key hash."
+  (zerop (mod (mix-hash (sxhash key)) rate)))
+
+(defun windowed-allow-p (count wc)
+  "Check if COUNT (post-increment value from atomic-incf) passes the windowed counter thresholds."
+  (declare (type (unsigned-byte 64) count))
+  (let ((initial (windowed-counter-initial wc))
+        (thereafter (windowed-counter-thereafter wc)))
+    (or (<= count initial)
+        (and (plusp thereafter)
+             (zerop (mod count thereafter))))))
+
+(defun maybe-reset-window (wc now)
+  "Reset window if expired. CAS ensures only one thread resets."
+  (let ((ws (windowed-counter-window-start wc)))
+    (when (>= (- now ws) (windowed-counter-window-ticks wc))
+      (when (atomics:cas (windowed-counter-window-start wc) ws now)
+        (setf (windowed-counter-count wc) 0)))))
+
+;;; --- Logger ---
+
+(defun noop (logger message &rest fields)
+  "No-op log function for disabled levels."
+  (declare (ignore logger message fields))
+  (values))
+
+(defstruct (logger (:constructor %make-logger))
+  "A bark logger instance."
+  (root-p          nil   :type boolean :read-only t)
+  (level           +info+ :type fixnum)
+  (chindings       ""    :type string :read-only t)
+  (raw-bindings    nil   :type list :read-only t)
+  (formatter       nil   :type (or null function))
+  (output          nil   :type t)
+  (level-sampler   nil   :type (or null simple-vector))
+  (consistent      nil   :type (or null consistent-sampler))
+  (field-transform nil   :type (or null function))
+  (trace-fn        #'noop :type function)
+  (debug-fn        #'noop :type function)
+  (info-fn         #'noop :type function)
+  (warn-fn         #'noop :type function)
+  (error-fn        #'noop :type function)
+  (fatal-fn        #'noop :type function))
+
+(defvar *logger* nil "The current bark logger.")
+
+(defvar *log-context* nil "Dynamic context bindings for the current log scope.")
+
+(defun apply-field-transform-plist (transform plist)
+  "Apply TRANSFORM to each key-value pair in PLIST. Returns a new plist with
+   transformed values. Pairs where TRANSFORM returns NIL as second value are dropped."
+  (declare (type function transform))
+  (let (new-val drop-p)
+    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+             (setf new-val val
+                   drop-p (and keep-supplied-p (not keep-p)))))
+      (declare (dynamic-extent #'receive))
+      (loop for (k v) on plist by #'cddr
+            do (multiple-value-call #'receive (funcall transform k v))
+            unless drop-p collect k and collect new-val))))
+
+(defun apply-field-transform-alist (transform alist)
+  "Apply TRANSFORM to each pair in ALIST (dynamic context). Returns a new alist.
+   Pairs where TRANSFORM returns NIL as second value are dropped."
+  (declare (type function transform))
+  (let (new-val drop-p)
+    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+             (setf new-val val
+                   drop-p (and keep-supplied-p (not keep-p)))))
+      (declare (dynamic-extent #'receive))
+      (loop for (k . v) in alist
+            do (multiple-value-call #'receive (funcall transform k v))
+            unless drop-p collect (cons k new-val)))))
+
+(defun compose-field-transforms (outer inner)
+  "Compose two field transforms. INNER runs first, then OUTER on the result.
+   If either is NIL, returns the other."
+  (cond
+    ((null outer) inner)
+    ((null inner) outer)
+    (t (lambda (key value)
+         (let (inner-val drop-p)
+           (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+                    (setf inner-val val
+                          drop-p (and keep-supplied-p (not keep-p)))))
+             (declare (dynamic-extent #'receive))
+             (multiple-value-call #'receive (funcall inner key value)))
+           (if drop-p
+               (values nil nil)
+               (funcall outer key inner-val)))))))
+
+(declaim (ftype (function (fixnum) (values function &optional)) make-log-fn))
+
+(defun make-log-fn (level-value)
+  "Create a log function for LEVEL-VALUE."
+  (declare (optimize (speed 3) (safety 1))
+           (type fixnum level-value))
+  (let ((level-index level-value))
+    (lambda (lgr message &rest fields)
+      (declare (ignorable lgr) (dynamic-extent fields))
+      (block log-fn
+        (block sampling
+          ;; 1. Consistent sampler
+          (let ((cs (logger-consistent lgr)))
+            (when cs
+              (let ((key (funcall (consistent-sampler-key-fn cs)
+                                  (logger-raw-bindings lgr))))
+                (when key
+                  (if (consistent-hash-keep-p key (consistent-sampler-rate cs))
+                      (return-from sampling)
+                      (return-from log-fn (values)))))))
+          ;; 2. Windowed counter
+          (let ((ls (logger-level-sampler lgr)))
+            (when ls
+              (let ((wc (aref ls level-index)))
+                (when wc
+                  (let ((count (atomics:atomic-incf (windowed-counter-count wc))))
+                    (when (zerop (logand count (1- +window-check-interval+)))
+                      (maybe-reset-window wc (get-internal-real-time)))
+                    (unless (windowed-allow-p count wc)
+                      (return-from log-fn (values)))))))))
+        (let ((output (logger-output lgr))
+              (transform (logger-field-transform lgr)))
+          (when output
+            (let ((ctx (if transform
+                           (apply-field-transform-alist transform *log-context*)
+                           *log-context*))
+                  (flds (if transform
+                            (apply-field-transform-plist transform fields)
+                            fields)))
+              (dispatch-to-output output (logger-formatter lgr)
+                                  level-value
+                                  (logger-chindings lgr) (logger-raw-bindings lgr)
+                                  ctx message flds))))
+        (values)))))
+
+(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
+                                (:context list) (:field-transform (or null function))
+                                (:capacity fixnum) (:on-drop (or null function))
+                                (:blocking boolean) (:block-timeout t)
+                                (:on-block-timeout (or null function))
+                                (:level-sampler (or null simple-vector))
+                                (:consistent (or null consistent-sampler)))
+                          (values logger &optional)) make-logger))
+
+(defun make-logger (&key output (level :info) (formatter #'json-formatter)
+                         context field-transform
+                         (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
+                         level-sampler consistent)
+  "Create a new logger. OUTPUT determines async vs sync behavior:
+   - Stream or NIL: wrapped in async-output (background thread + ring buffer).
+   - Function: called synchronously — no thread, no buffer.
+   - tee-output: used as-is (already contains async-outputs).
+   CONTEXT, when provided, is a plist of static context fields.
+   Async-specific parameters (CAPACITY, ON-DROP, BLOCKING, BLOCK-TIMEOUT,
+   ON-BLOCK-TIMEOUT) are silently ignored for function outputs.
+   Passing them with a tee-output signals an error."
+  (when (and (tee-output-p output)
+             (or blocking on-block-timeout block-timeout-supplied-p
+                 (/= capacity +default-buffer-capacity+)
+                 (not (eq on-drop #'default-on-drop))))
+    (cl:error "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
+               :block-timeout, :on-block-timeout) with a tee-output. ~
+               Configure these per-destination in bark:tee."))
+  (let* ((actual-output (cond
+                          ((functionp output) output)
+                          ((tee-output-p output) output)
+                          ((or (streamp output) (null output))
+                           (make-async-output (or output *error-output*)
+                                              :capacity capacity
+                                              :formatter formatter
+                                              :on-drop on-drop
+                                              :blocking blocking
+                                              :block-timeout block-timeout
+                                              :on-block-timeout on-block-timeout))
+                          (t (cl:error "Invalid :output for make-logger: ~a ~
+                                        (expected stream, function, tee-output, or NIL)" output))))
+         (effective-context (if (and context field-transform)
+                                (apply-field-transform-plist field-transform context)
+                                context))
+         (chindings (if effective-context (serialize-bindings effective-context) ""))
+         (raw-bindings effective-context)
+         (lgr (%make-logger
+               :root-p t
+               :chindings chindings
+               :raw-bindings raw-bindings
+               :formatter formatter
+               :output actual-output
+               :field-transform field-transform
+               :level-sampler level-sampler
+               :consistent consistent)))
+    (set-level lgr level)
+    lgr))
+
+(declaim (ftype (function (logger (or fixnum keyword)) *) set-level))
+
+(defun wire-level-fns (logger threshold make-fn)
+  "Set all six level function slots on LOGGER. Levels at or above THRESHOLD
+   get functions from (funcall MAKE-FN level); levels below get #'noop."
+  (flet ((slot-fn (level) (if (< level threshold) #'noop (funcall make-fn level))))
+    (setf (logger-trace-fn logger) (slot-fn +trace+))
+    (setf (logger-debug-fn logger) (slot-fn +debug+))
+    (setf (logger-info-fn logger)  (slot-fn +info+))
+    (setf (logger-warn-fn logger)  (slot-fn +warn+))
+    (setf (logger-error-fn logger) (slot-fn +error+))
+    (setf (logger-fatal-fn logger) (slot-fn +fatal+)))
+  (values))
+
+(defun set-level (logger level)
+  "Set the minimum log level for LOGGER. Swaps function slots."
+  (let ((level-val (etypecase level
+                     (fixnum level)
+                     (keyword (level-from-keyword level)))))
+    (setf (logger-level logger) level-val)
+    (wire-level-fns logger level-val #'make-log-fn)))
+
+;;; --- Sampling API ---
+
+(defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))
+  "Create a windowed counter. INITIAL messages per window always pass, then 1-in-THEREAFTER.
+   THEREAFTER=0 means hard cap (drop all after initial burst)."
+  (let ((ticks (round (* window-seconds internal-time-units-per-second))))
+    (when (> ticks most-positive-fixnum)
+      (cl:error "window-seconds ~A produces ~A ticks, exceeding fixnum range"
+                window-seconds ticks))
+    (%make-windowed-counter :initial initial
+                            :thereafter thereafter
+                            :window-ticks ticks
+                            :window-start (get-internal-real-time))))
+
+(defun make-level-sampler (&key trace debug info warn error fatal)
+  "Create a level-sampler vector. Each argument must be a windowed-counter or nil."
+  (flet ((check (name val)
+           (when (and val (not (windowed-counter-p val)))
+             (cl:error "~A must be a windowed-counter or nil, got ~A" name (type-of val)))))
+    (check :trace trace) (check :debug debug) (check :info info)
+    (check :warn warn) (check :error error) (check :fatal fatal))
+  (vector nil trace debug info warn error fatal))
+
+(defun make-consistent-sampler (&key key-fn (rate 1))
+  "Create a consistent sampler. KEY-FN extracts a key from raw-bindings. RATE is 1-in-N."
+  (check-type key-fn function)
+  (when (< rate 1)
+    (cl:error "consistent-sampler rate must be >= 1, got ~A" rate))
+  (%make-consistent-sampler :key-fn key-fn :rate rate))
+
+(defun set-level-sampling (logger level windowed-counter)
+  "Set sampling for LEVEL to WINDOWED-COUNTER on LOGGER (nil to remove).
+   Thread-safe via CAS on nil->vector transition."
+  (let ((level-index (etypecase level
+                      (fixnum level)
+                      (keyword (level-from-keyword level)))))
+    (loop
+      (let ((ls (logger-level-sampler logger)))
+        (cond
+          (ls
+           (setf (aref ls level-index) windowed-counter)
+           (return))
+          (t
+           (let ((new-ls (make-array +level-slot-count+ :initial-element nil)))
+             (setf (aref new-ls level-index) windowed-counter)
+             (when (atomics:cas (logger-level-sampler logger) nil new-ls)
+               (return)))))))))
+
+(defun set-consistent (logger consistent-sampler)
+  "Set/replace the consistent sampler on LOGGER (nil to remove)."
+  (setf (logger-consistent logger) consistent-sampler))
+
+(declaim (ftype (function (logger list &key (:level (or null fixnum keyword))
+                                            (:field-transform (or null function)))
+                          (values logger &optional)) make-child))
+
+(defun make-child (parent context &key level field-transform)
+  "Create a child logger from PARENT with CONTEXT (a plist) pre-serialized.
+   Inherits the parent's formatter, output, level-sampler, and consistent slots
+   (snapshots at creation time). LEVEL overrides the inherited level; when omitted,
+   the child inherits the parent's current level. FIELD-TRANSFORM composes with the
+   parent's transform (child runs after parent)."
+  (let* ((parent-transform (logger-field-transform parent))
+         (composed-transform (compose-field-transforms field-transform parent-transform))
+         (effective-bindings (if (and context composed-transform)
+                                 (apply-field-transform-plist composed-transform context)
+                                 context))
+         (new-chindings (concatenate 'string
+                                      (logger-chindings parent)
+                                      (serialize-bindings effective-bindings)))
+         (new-raw-bindings (append (logger-raw-bindings parent) effective-bindings))
+         (child-level (cond
+                        ((null level) (logger-level parent))
+                        ((keywordp level) (level-from-keyword level))
+                        (t level)))
+         (child (%make-logger
+                 :level child-level
+                 :chindings new-chindings
+                 :raw-bindings new-raw-bindings
+                 :formatter (logger-formatter parent)
+                 :output (logger-output parent)
+                 :level-sampler (logger-level-sampler parent)
+                 :consistent (logger-consistent parent)
+                 :field-transform composed-transform)))
+    (set-level child child-level)
+    child))
+
+(defmethod print-object ((ao async-output) stream)
+  "Print async-output without descending into stream/thread slots."
+  (print-unreadable-object (ao stream :type t :identity t)
+    (let ((ring (async-output-ring ao)))
+      (format stream "~:[stopped~;running~] ~D pending ~D dropped"
+              (async-output-running ao)
+              (if ring (- (ring-buffer-head ring) (ring-buffer-tail ring)) 0)
+              (if ring (ring-buffer-dropped ring) 0)))))
+
+(defmethod print-object ((lgr logger) stream)
+  "Print logger showing level and kind."
+  (print-unreadable-object (lgr stream :type t)
+    (format stream "~A~@[ ~A~]" (level-name (logger-level lgr))
+            (unless (logger-root-p lgr) "child"))))
+
+;;; --- Lifecycle ---
+
+(defun do-async-outputs (output fn)
+  "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).
+   No-op when OUTPUT is nil or not an async-based output."
+  (cond
+    ((and output (tee-output-p output))
+     (loop for group across (tee-output-groups output)
+           do (loop for dest across (formatter-group-destinations group)
+                    do (funcall fn (destination-async-output dest)))))
+    ((and output (async-output-p output))
+     (funcall fn output))))
+
+(defun flush (&optional (logger *logger*))
+  "Flush LOGGER, blocking until all pending messages are written.
+Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async output."
+  (when logger
+    (do-async-outputs (logger-output logger) #'flush-async-output)))
+
+(defun stop (logger)
+  "Stop writer threads for LOGGER. Idempotent — calling stop on an already-stopped
+   or sync logger is a no-op. Passing NIL is a no-op. Signals an error if LOGGER
+   is a child (children share the parent's output)."
+  (when logger
+    (unless (logger-root-p logger)
+      (cl:error "Cannot stop a child logger — it shares the parent's output. ~
+                 Stop the root logger instead."))
+    (do-async-outputs (logger-output logger) #'stop-async-output))
+  nil)
+
+;;; --- Context ---
+
+(defmacro with-context ((&rest pairs) &body body)
+  "Bind dynamic log context fields for the duration of BODY."
+  `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
+                                       collect `(cons ,k ,v))
+                               *log-context*)))
+     ,@body))
+
+;;; --- Utilities ---
+
+(defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
+  "Execute BODY with a test logger that captures log output.
+   Binds VAR to a function that returns the list of logged strings.
+   FORMATTER defaults to #'json-formatter but can be any formatter function."
+  `(multiple-value-bind (collector results-fn) (make-list-collector)
+     (let* ((*logger* (make-logger :level :trace
+                                   :formatter ,formatter :output collector
+                                   :context '(:name "test"))))
+       (let ((,var results-fn))
+         ,@body))))
+
+(defvar *compile-time-max-level* 0
+  "When positive, log calls for levels below this are eliminated at compile time.")
+
+(declaim (ftype (function nil (values function function &optional)) make-list-collector))
+
+(defun make-list-collector ()
+  "Create a list-collecting output function and its result accessor.
+   Returns (values collector-fn get-results-fn)."
+  (let ((results nil))
+    (values
+     (lambda (line) (push line results))
+     (lambda () (nreverse results)))))
+
+;;; --- Convenience API ---
+
+(macrolet ((define-log-macro (name accessor)
+             `(defmacro ,name (&rest args)
+                "Log at the appropriate level. First arg can be a logger, a message string,
+                 or a keyword (starting a fields-only plist with no message)."
+                (when args
+                  (if (keywordp (car args))
+                      ;; Compile-time: literal keyword first → fields-only, use *logger*
+                      `(when *logger*
+                         (funcall (,',accessor *logger*) *logger* nil ,@args))
+                      ;; First arg needs runtime dispatch
+                      (let ((g (gensym "FIRST"))
+                            (rest-forms (cdr args)))
+                        ;; Pre-compute the logger branch outside the template
+                        (let ((logger-branch
+                                (cond
+                                  ((null rest-forms)
+                                   `(funcall (,',accessor ,g) ,g nil))
+                                  ((keywordp (car rest-forms))
+                                   `(funcall (,',accessor ,g) ,g nil ,@rest-forms))
+                                  (t
+                                   (let ((g2 (gensym "ARG")))
+                                     `(let ((,g2 ,(car rest-forms)))
+                                        (if (keywordp ,g2)
+                                            (funcall (,',accessor ,g) ,g nil ,g2 ,@(cdr rest-forms))
+                                            (funcall (,',accessor ,g) ,g ,g2 ,@(cdr rest-forms)))))))))
+                          `(let ((,g ,(car args)))
+                             (cond
+                               ((logger-p ,g) ,logger-branch)
+                               ((keywordp ,g)
+                                (when *logger*
+                                  (funcall (,',accessor *logger*) *logger* nil ,g ,@rest-forms)))
+                               (t
+                                (when *logger*
+                                  (funcall (,',accessor *logger*) *logger* ,g ,@rest-forms))))))))))))
+  (define-log-macro trace logger-trace-fn)
+  (define-log-macro debug logger-debug-fn)
+  (define-log-macro info  logger-info-fn)
+  (define-log-macro warn  logger-warn-fn)
+  (define-log-macro error logger-error-fn)
+  (define-log-macro fatal logger-fatal-fn))

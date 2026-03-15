@@ -14,7 +14,17 @@
   ((:file "packages")
    (:module "src"
     :components
-    ((:file "bark")
+    ((:file "levels")
+     (:file "conditions")
+     (:file "timestamps")
+     (:file "format-util")
+     (:file "json")
+     (:file "logfmt")
+     (:file "pretty")
+     (:file "ring-buffer")
+     (:file "writer")
+     (:file "output")
+     (:file "logger")
      (:file "buffer")))))
 
 (asdf:defsystem #:cl-bark/tests
