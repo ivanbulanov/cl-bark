@@ -2,6 +2,10 @@
 
 High-performance structured logger for Common Lisp. Inspired by [Pino](https://github.com/pinojs/pino) (Node.js), [zerolog](https://github.com/rs/zerolog) (Go), and [slog](https://pkg.go.dev/log/slog) (Go).
 
+## Status
+
+**Beta (0.1.0).** The library has been reviewed and tested with automated tests but has been used only by the author so far. Real-world applicability is not yet proven. The API is not expected to change, but no stability guarantee is made until 1.0.
+
 ## Philosophy
 
 Do nothing in the hot path. Pre-compute everything at logger creation time, serialize in the caller thread, do I/O in a background thread. A disabled log call is a function pointer to `noop` — no branch, no allocation.
