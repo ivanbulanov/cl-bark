@@ -84,7 +84,7 @@
     (5am:is-true (not (null (bark::logger-level-sampler lgr))))
     ;; Verify: all 6 level slots have their windowed-counter (no silent overwrites)
     (let ((ls (bark::logger-level-sampler lgr)))
-      (5am:is (= bark:+level-slot-count+ (length ls)))
+      (5am:is (= bark::+level-slot-count+ (length ls)))
       (dotimes (idx 6)
         (let ((slot (aref ls (1+ idx))))
           (5am:is-true (eq slot (aref counters (1+ idx)))

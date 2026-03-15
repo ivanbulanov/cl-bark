@@ -6,7 +6,6 @@
   (:export
    ;; levels
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
-   #:+level-slot-count+
    ;; conditions
    #:capture
    #:captured-error #:captured-error-p
@@ -15,10 +14,6 @@
    #:current-log-timestamp-ms
    ;; json
    #:*max-json-depth* #:*max-json-length* #:*max-json-stack-frames*
-   #:emit-json-value #:emit-json-key #:emit-json-fields
-   #:write-json-escaped-string #:serialize-bindings
-   ;; logfmt
-   #:emit-logfmt-value #:emit-logfmt-key
    ;; pretty
    #:*max-pretty-depth* #:*max-pretty-length* #:*max-pretty-stack-frames*
    ;; formatters
