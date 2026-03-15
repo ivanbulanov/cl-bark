@@ -43,3 +43,23 @@
   ((:module "tests"
     :components
     ((:file "sampling-concurrency-tests")))))
+
+(asdf:defsystem #:cl-bark/bench
+  :description "Internal microbenchmarks for cl-bark"
+  :depends-on (#:cl-bark #:trivial-benchmark #:trivial-garbage #:bordeaux-threads)
+  :serial t
+  :components
+  ((:module "bench"
+    :components
+    ((:file "packages")
+     (:file "harness")
+     (:file "internal")))))
+
+(asdf:defsystem #:cl-bark/bench-comparative
+  :description "Comparative benchmarks: cl-bark vs other CL loggers"
+  :depends-on (#:cl-bark/bench)
+  :serial t
+  :components
+  ((:module "bench"
+    :components
+    ((:file "comparative")))))

@@ -573,6 +573,24 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **Compile-time elimination:** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` eliminates debug calls, they cannot be retroactively surfaced.
 
+## Benchmarks
+
+Run the benchmark suite on your hardware:
+
+```lisp
+(asdf:load-system "cl-bark/bench")
+(bark-bench:run)
+```
+
+For comparison against other CL loggers:
+
+```lisp
+(asdf:load-system "cl-bark/bench-comparative")
+(bark-bench:run :suite :comparative)
+```
+
+See [sample results](bench/results/sample.txt) for reference numbers.
+
 ## Usage Examples
 
 ### Mirror: Console + File
@@ -822,21 +840,19 @@ Every log call formats the message to a finished string in the caller's thread, 
 
 **4. Shared formatter optimization requires formatting before fan-out.** With tee, destinations are grouped by formatter identity (`eq`). The message is formatted once per group, then the same string is pushed to all passing destinations' ring buffers. If formatting were deferred to writer threads, each writer would format independently — duplicating work when destinations share a formatter.
 
-**Trade-off: per-call latency.** The caller pays ~500ns–2μs for formatting. This is bounded by `*max-json-depth*`, `*max-json-length*`, and `*max-json-stack-frames*`. Pre-serialized `chindings` on child loggers eliminate per-call cost for static context. Sampling skips formatting entirely for sampled-out messages.
+**Trade-off: per-call latency.** Formatting dominates caller-thread latency. This is bounded by `*max-json-depth*`, `*max-json-length*`, and `*max-json-stack-frames*`. Pre-serialized `chindings` on child loggers eliminate per-call cost for static context. Sampling skips formatting entirely for sampled-out messages.
 
 ### Performance Characteristics
 
 | Operation | Cost |
 |-----------|------|
-| Log call (level disabled) | ~2ns (indirect call to `noop`) |
-| Log call (level enabled, async) | ~500ns-2us (formatting) + ~30ns (CAS + semaphore signal) |
-| Log call (level enabled, tee, N dest) | ~500ns-2us per unique formatter + ~30ns x N (push + signal) |
-| Log call (buffer full, drop) | ~20ns (atomic-incf dropped) — formatting skipped |
-| Writer drain (per message) | ~50ns (pop + write-string) |
-| Explicit logger dispatch | ~1ns (struct type tag check on first argument) |
-| Field transform (per field) | ~10ns (funcall) — only when transform is non-nil |
+| Log call (level disabled) | One indirect call to `noop` |
+| Log call (level enabled, async) | Formatting + CAS + semaphore signal |
+| Log call (buffer full, drop) | One `atomic-incf` -- formatting skipped |
+| Writer drain (per message) | `write-string` + `force-output` |
+| Field transform (per field) | One `funcall` when non-nil |
 
-Formatting dominates the hot path. The ring buffer overhead (CAS + semaphore) is <5% of total log call time. The shared formatter optimization reduces tee overhead when destinations share a formatter.
+Run `(bark-bench:run :suite :internal)` to measure on your hardware.
 
 ## Globals
 

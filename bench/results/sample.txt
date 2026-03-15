@@ -1,0 +1,122 @@
+Sample results — run on your hardware for your numbers
+Machine: X86-64
+CL: SBCL 2.6.2
+cl-bark: 0.1.0
+Date: 2026-03-15
+Iterations: 1000 (reduced for sample; default is 10000)
+
+cl-bark internal benchmarks
+SBCL 2.6.2, X86-64
+Sink: discard (framework overhead only, not real-world throughput)
+Note: p99 includes GC pauses and OS scheduling jitter
+
+disabled-level (batch: 100000 calls)
+  per-call: < 10ns
+  bytes: 0
+
+simple-message
+  p50=0ns, mean=3.0us, p99=0ns, bytes=751
+
+message-5-fields
+  p50=0ns, mean=1000ns, p99=0ns, bytes=2093
+
+message-10-fields
+  p50=0ns, mean=4.0us, p99=0ns, bytes=3209
+
+child-no-context
+  p50=0ns, mean=1000ns, p99=0ns, bytes=784
+
+child-with-context
+  p50=0ns, mean=3.0us, p99=0ns, bytes=1584
+
+dynamic-context
+  p50=0ns, mean=2.0us, p99=0ns, bytes=1531
+
+field-transform
+  p50=0ns, mean=5.0us, p99=0ns, bytes=2125
+
+formatter-json
+  p50=0ns, mean=6.0us, p99=0ns, bytes=2091
+formatter-logfmt
+  p50=0ns, mean=4.0us, p99=0ns, bytes=2084
+formatter-pretty
+  p50=0ns, mean=7.0us, p99=0ns, bytes=1528
+
+tee-2-destinations
+  p50=0ns, mean=9.0us, p99=0ns, bytes=4160
+
+tee-shared-formatter
+  p50=0ns, mean=6.0us, p99=0ns, bytes=1895
+
+buffer-full-drop (batch: 100000 calls)
+  per-call: 1.2us (p50=118.0ms, mean=118.5ms, p99=132.0ms per batch)
+  bytes: 768
+
+async-large-buffer
+  p50=0ns, mean=2.0us, p99=0ns, bytes=750
+
+concurrent-1-thread (1 threads, 1000 total messages, 0.004s)
+  throughput: 250000. msg/sec
+
+concurrent-8-threads (8 threads, 8000 total messages, 0.009s)
+  throughput: 888889. msg/sec
+
+blocking-mode
+  p50=0ns, mean=5.0us, p99=0ns, bytes=2124
+
+cl-bark comparative benchmarks
+SBCL 2.6.2, X86-64
+Sink: discard (framework overhead only, not real-world throughput)
+Note: p99 includes GC pauses and OS scheduling jitter
+
+comparative: disabled-level (discard sink, batch-measured)
+
+  logger                   p50       mean      p99       bytes   
+  ------------------------ ---       ---       ---       ---     
+  cl-bark (blocking)       0ns       4ns       10ns              
+
+
+comparative: simple-message (discard sink)
+Note: all loggers synchronous except verbose (has async pipeline)
+
+  logger                   p50       mean      p99       bytes   
+  ------------------------ ---       ---       ---       ---     
+  cl-bark (blocking)       0ns       3.0us     0ns       784     
+
+comparative: message-5-fields (discard sink)
+Note: all loggers synchronous except verbose (has async pipeline)
+
+  logger                   p50       mean      p99       bytes   
+  ------------------------ ---       ---       ---       ---     
+  cl-bark (blocking)       0ns       5.0us     0ns       1700    
+
+comparative: message-10-fields (discard sink)
+Note: all loggers synchronous except verbose (has async pipeline)
+
+  logger                   p50       mean      p99       bytes   
+  ------------------------ ---       ---       ---       ---     
+  cl-bark (blocking)       0ns       5.0us     0ns       3243    
+
+comparative: with-child-context (discard sink)
+Note: all loggers synchronous except verbose (has async pipeline)
+
+  logger                   p50       mean      p99       bytes   
+  ------------------------ ---       ---       ---       ---     
+  cl-bark (blocking)       0ns       2.0us     0ns       1592    
+
+comparative: concurrent-1-thread (discard sink)
+
+cl-bark (blocking) (1 threads, 1000 total messages, 0.005s)
+  throughput: 200000. msg/sec
+
+comparative: concurrent-8-threads (discard sink)
+
+cl-bark (blocking) (8 threads, 8000 total messages, 0.008s)
+  throughput: 1000000. msg/sec
+
+comparative: raw-baseline (discard sink)
+String-building floor (including string allocation), not a logger
+
+raw-baseline
+  p50=0ns, mean=3.0us, p99=0ns, bytes=1678
+
