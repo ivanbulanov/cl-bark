@@ -69,6 +69,55 @@
       *available-loggers*)
 
 ;;; ============================================================
+;;; cl-bark adapter (blocking, logfmt formatter)
+;;; ============================================================
+;;; Same as above but with logfmt output instead of JSON.
+;;; logfmt produces key=value pairs — less escaping overhead than JSON.
+
+(defvar *bark-logfmt-logger* nil)
+(defvar *bark-logfmt-child* nil)
+
+(defun bark-logfmt-setup ()
+  (setf *bark-logfmt-logger*
+        (bark:make-logger :level :trace :output *discard-stream*
+                          :blocking t :formatter #'bark:logfmt-formatter))
+  (setf *bark-logfmt-child*
+        (bark:make-child *bark-logfmt-logger* *bench-context*)))
+
+(defun bark-logfmt-log-message ()
+  (bark:info *bark-logfmt-logger* *bench-message*))
+
+(defun bark-logfmt-log-fields-5 ()
+  (bark:info *bark-logfmt-logger* *bench-message*
+    :method "POST" :path "/api/v2/users" :status 201
+    :duration-ms 42.0d0 :authenticated t))
+
+(defun bark-logfmt-log-fields-10 ()
+  (bark:info *bark-logfmt-logger* *bench-message*
+    :method "POST" :path "/api/v2/users" :status 201
+    :duration-ms 42.0d0 :authenticated t
+    :request-id "req-7f3a-4b2c-9d1e" :user-id 10042
+    :remote-addr "192.168.1.100" :bytes-sent 1247 :cached nil))
+
+(defun bark-logfmt-log-with-context ()
+  (bark:info *bark-logfmt-child* *bench-message*))
+
+(defun bark-logfmt-teardown ()
+  (when *bark-logfmt-logger*
+    (bark:stop *bark-logfmt-logger*)
+    (setf *bark-logfmt-logger* nil
+          *bark-logfmt-child* nil)))
+
+(push (list "cl-bark (logfmt)"
+            #'bark-logfmt-setup
+            #'bark-logfmt-log-message
+            #'bark-logfmt-log-fields-5
+            #'bark-logfmt-log-fields-10
+            #'bark-logfmt-log-with-context
+            #'bark-logfmt-teardown)
+      *available-loggers*)
+
+;;; ============================================================
 ;;; log4cl adapter
 ;;; ============================================================
 ;;; Configuration: fixed-stream-appender to discard stream with simple-layout.
