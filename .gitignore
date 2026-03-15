@@ -1,0 +1,5 @@
+*.fasl
+*~
+\#*\#
+.qlot/
+docs/plans/
