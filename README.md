@@ -379,22 +379,22 @@ Built-in formatters:
 
 | Type | JSON | logfmt | pretty |
 |------|------|--------|--------|
-| `string` | `"escaped"` | `bare` or `"quoted"` | as-is |
-| `integer` | `123` | `123` | as-is |
-| `float` | `3.14` | `3.14` | as-is |
-| `ratio` | `0.333` | `0.333` | as-is |
-| `t` | `true` | bare key (no `=value`) | as-is |
-| `nil` | `null` | `null` | as-is |
-| `symbol` | `"lowercase"` | `lowercase` | as-is |
-| `list` | `["a","b"]` | `<cons>` | as-is |
-| `vector` | `[1,2,3]` | `<simple-vector>` | as-is |
-| `hash-table` | `{"k":"v"}` | `<hash-table>` | as-is |
-| `pathname` | `"/var/log/app.jsonl"` | `/var/log/app.jsonl` | as-is |
+| `string` | `"escaped"` | `bare` or `"quoted"` | unquoted |
+| `integer` | `123` | `123` | `123` |
+| `float` | `3.14` | `3.14` | `3.14` |
+| `ratio` | `0.333` | `0.333` | `1/3` |
+| `t` | `true` | bare key (no `=value`) | `T` |
+| `nil` | `null` | `null` | `NIL` |
+| `symbol` | `"lowercase"` | `lowercase` | `UPPERCASE` |
+| `list` | `["a","b"]` | `<cons>` | `princ` (bounded) |
+| `vector` | `[1,2,3]` | `<simple-vector>` | `princ` (bounded) |
+| `hash-table` | `{"k":"v"}` | `<hash-table>` | `princ` (bounded) |
+| `pathname` | `"/var/log/app.jsonl"` | `/var/log/app.jsonl` | namestring |
 | `condition` | `{"type":"...","msg":"..."}` | `"type: msg"` | type: msg |
 | `captured-error` | `{"type":"...","msg":"...","stack":[...]}` | `"type: msg"` | type: msg + stack |
-| everything else | `"<type>"` | `<type>` | as-is |
+| everything else | `"<type>"` | `<type>` | `princ` |
 
-All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`). Boolean `t` in logfmt emits a bare key with no `=value` (logfmt convention for flags). The JSON fallback for unsupported types is a `"<type>"` placeholder string. Specialize `print-object` on your classes to control the type name shown.
+All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`). Boolean `t` in logfmt emits a bare key with no `=value` (logfmt convention for flags). The JSON fallback for unsupported types is a `"<type>"` placeholder string. Specialize `print-object` on your classes to control the type name shown. Collection depth and length are bounded by formatter-specific limits — see [Tuning](#tuning) for details.
 
 #### Formatter Factories
 
@@ -530,9 +530,11 @@ To capture and assert on log output:
 
 Buffer log calls and decide at scope exit which to emit. The default: on success, emit entries at or above the logger's configured level. On failure (unhandled condition), emit everything — including debug and trace.
 
+`with-log-buffer` takes a logger argument, binds it to `*logger*` as a buffer-logger for the body's dynamic extent, and flushes through the original logger on exit. Only implicit log calls (through `*logger*`) are buffered; explicit logger arguments bypass the buffer — this is intentional, as buffering is a request-scoped concern while explicit loggers are structural.
+
 ```lisp
-;; Zero config — capture at :trace, emit based on exit status
-(bark:with-log-buffer ()
+;; Buffer a per-request child logger
+(bark:with-log-buffer ((bark:make-child root-logger :context (list :request-id id)))
   (bark:debug "parsing body" :content-type ct)
   (bark:info "processing" :path path)
   (process request))
@@ -541,17 +543,18 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **Parameters:**
 
+- **`logger`** (required) — the logger to buffer and flush through.
 - **`level`** — capture threshold (default `:trace`). The logger's level is lowered to this inside the scope.
 - **`on-flush`** — optional `(lambda (entries condition normal-exit-p) ...)`. Returns a sequence of entries to emit.
 
 ```lisp
 ;; Custom: emit debug logs only for slow requests
-(bark:with-log-buffer
-    (:on-flush (lambda (entries condition normal-exit-p)
-                 (declare (ignore condition normal-exit-p))
-                 (if (> elapsed-ms 500) entries
-                     (remove-if (lambda (e) (< (bark:buffer-entry-level e) bark:+info+))
-                                entries))))
+(bark:with-log-buffer (request-logger
+    :on-flush (lambda (entries condition normal-exit-p)
+                (declare (ignore condition normal-exit-p))
+                (if (> elapsed-ms 500) entries
+                    (remove-if (lambda (e) (< (bark:buffer-entry-level e) bark:+info+))
+                               entries))))
   ...)
 ```
 

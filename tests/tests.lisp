@@ -839,7 +839,7 @@
       ;; With buffer: everything captured (sampling bypassed)
       (let ((bark:*logger* lgr)
             (bark:*root-logger* nil))
-        (bark:with-log-buffer (:level :debug)
+        (bark:with-log-buffer (bark:*logger* :level :debug)
           (dotimes (i 10)
             (bark:debug "buffered"))))
       ;; Buffer flushes at original level (:debug), all 10 should pass
@@ -2616,7 +2616,7 @@
   "Normal exit filters to entries >= logger's configured level."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:debug "hidden")
       (bark:info "visible"))
     (let ((result (get-output-stream-string out)))
@@ -2628,7 +2628,7 @@
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (ignore-errors
-      (with-log-buffer ()
+      (with-log-buffer (*logger*)
         (bark:debug "debug-trail")
         (bark:info "info-msg")
         (cl:error "boom")))
@@ -2640,13 +2640,13 @@
   "with-log-buffer returns the value of the body."
   (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                                :output (make-string-output-stream))))
-    (5am:is (= 42 (with-log-buffer () 42)))))
+    (5am:is (= 42 (with-log-buffer (*logger*) 42)))))
 
 (5am:test test-with-log-buffer-returns-multiple-values
   "with-log-buffer preserves multiple return values."
   (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
                                :output (make-string-output-stream))))
-    (multiple-value-bind (a b) (with-log-buffer () (values 1 2))
+    (multiple-value-bind (a b) (with-log-buffer (*logger*) (values 1 2))
       (5am:is (= 1 a))
       (5am:is (= 2 b)))))
 
@@ -2654,7 +2654,7 @@
   "Error caught inside body = normal exit, debug discarded."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:debug "pre-error")
       (handler-case (cl:error "handled")
         (cl:error () (bark:info "recovered"))))
@@ -2667,7 +2667,7 @@
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (block outer
-      (with-log-buffer ()
+      (with-log-buffer (*logger*)
         (bark:debug "hidden-debug")
         (bark:info "shown-info")
         (return-from outer 99)))
@@ -2680,7 +2680,7 @@
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (ignore-errors
-      (with-log-buffer (:level :debug)
+      (with-log-buffer (*logger* :level :debug)
         (bark:trace "trace-hidden")
         (bark:debug "debug-visible")
         (cl:error "force flush")))
@@ -2692,7 +2692,7 @@
   "on-flush callback controls emission."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+    (with-log-buffer (*logger* :on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore condition normal-exit-p))
                                   ;; Only emit entries with :audit in fields
                                   (remove-if-not (lambda (e)
@@ -2708,7 +2708,7 @@
   "Dynamic context is captured at log time, not flush time."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (with-context (:req "r1")
         (bark:info "inside-ctx"))
       ;; Context gone here, but entry captured it
@@ -2724,7 +2724,7 @@
   "Each entry retains its own timestamp from log time."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "msg1")
       (bark:info "msg2"))
     (let* ((result (get-output-stream-string out))
@@ -2745,7 +2745,7 @@
          (*logger* (make-logger :context '(:name "buf") :level :info :formatter #'json-formatter :output (sync-output buf-out)))
          (direct-lgr (make-logger :context '(:name "direct") :level :info :formatter #'json-formatter
                                   :output (sync-output direct-out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "buffered")
       (bark:info direct-lgr "direct"))
     ;; "buffered" goes through buffer → buf-out
@@ -2757,7 +2757,7 @@
   "with-log-buffer with *logger* nil is a no-op (body still runs)."
   (let ((*logger* nil)
         (ran nil))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (setf ran t))
     (5am:is-true ran)))
 
@@ -2767,9 +2767,9 @@
   "Inner buffer flushes directly to root logger output."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "outer-1")
-      (with-log-buffer ()
+      (with-log-buffer (*logger*)
         (bark:info "inner-1"))
       (bark:info "outer-2"))
     ;; All three should appear in output (all are info level, normal exit)
@@ -2782,11 +2782,11 @@
   "Inner failure dumps inner debug; outer still filters normally."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:debug "outer-debug")
       (bark:info "outer-info")
       (handler-case
-          (with-log-buffer ()
+          (with-log-buffer (*logger*)
             (bark:debug "inner-debug")
             (cl:error "inner boom"))
         (cl:error () nil))
@@ -2805,9 +2805,9 @@
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     ;; Three levels deep — all should flush to same root
-    (with-log-buffer ()
-      (with-log-buffer ()
-        (with-log-buffer ()
+    (with-log-buffer (*logger*)
+      (with-log-buffer (*logger*)
+        (with-log-buffer (*logger*)
           (bark:info "deep"))))
     (5am:is-true (search "deep" (get-output-stream-string out)))))
 
@@ -2817,7 +2817,7 @@
   "on-flush returning nil suppresses all output."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+    (with-log-buffer (*logger* :on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore entries condition normal-exit-p))
                                   nil))
       (bark:info "suppressed"))
@@ -2828,7 +2828,7 @@
   (let* ((out (make-string-output-stream))
          (parent (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
          (*logger* (make-child parent :context '(:component "auth"))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "login"))
     (let* ((result (get-output-stream-string out))
            (json (yason:parse (string-trim '(#\Newline) result))))
@@ -2840,7 +2840,7 @@
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                   (if (eq key :token) "****" value)))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "login" :token "secret-abc"))
     (let* ((result (get-output-stream-string out))
            (json (yason:parse (string-trim '(#\Newline) result))))
@@ -2852,7 +2852,7 @@
                                 :output (make-string-output-stream)))
          (seen-condition nil)
          (seen-normal-exit-p nil))
-    (with-log-buffer (:on-flush (lambda (entries condition normal-exit-p)
+    (with-log-buffer (*logger* :on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore entries))
                                   (setf seen-condition condition
                                         seen-normal-exit-p normal-exit-p)
@@ -2869,7 +2869,7 @@
   "Buffer works with logfmt formatter."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'logfmt-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "hello" :key "val"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "msg=hello" result))
@@ -2879,7 +2879,7 @@
   "Buffer works with pretty formatter."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "test") :level :info :formatter #'pretty-formatter :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info "hello"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "hello" result)))))
@@ -3002,7 +3002,7 @@
   "Buffer captures and flushes entries with nil message."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "test") :level :info :output (sync-output out))))
-    (with-log-buffer ()
+    (with-log-buffer (*logger*)
       (bark:info :event "buffered"))
     (let ((result (get-output-stream-string out)))
       (5am:is-false (search "\"msg\"" result))
