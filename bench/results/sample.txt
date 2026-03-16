@@ -1,9 +1,10 @@
 Sample results — run on your hardware for your numbers
-Machine: X86-64
+Machine: x86_64
 CL: SBCL 2.6.2
-cl-bark: 0.1.0
-Date: 2026-03-15
+Date: 2026-03-16
 Iterations: 1000 (reduced for sample; default is 10000)
+Sample batch size: 100 (per-call estimates derived from 100-call batches)
+Timer: CFFI clock_gettime(CLOCK_MONOTONIC), nanosecond resolution
 
 cl-bark internal benchmarks
 SBCL 2.6.2, X86-64
@@ -15,54 +16,54 @@ disabled-level (batch: 100000 calls)
   bytes: 0
 
 simple-message
-  p50=0ns, mean=3.0us, p99=0ns, bytes=718
+  p50=1.3us, mean=1.3us, p99=1.7us, bytes=768
 
 message-5-fields
-  p50=0ns, mean=3.0us, p99=0ns, bytes=2027
+  p50=2.7us, mean=2.9us, p99=3.6us, bytes=2064
 
 message-10-fields
-  p50=0ns, mean=6.0us, p99=0ns, bytes=3276
+  p50=4.1us, mean=4.3us, p99=5.5us, bytes=3392
 
 child-no-context
-  p50=0ns, mean=2.0us, p99=0ns, bytes=783
+  p50=1.3us, mean=1.4us, p99=1.7us, bytes=768
 
 child-with-context
-  p50=0ns, mean=2.0us, p99=0ns, bytes=1586
+  p50=1.4us, mean=1.6us, p99=2.2us, bytes=1553
 
 dynamic-context
-  p50=0ns, mean=6.0us, p99=0ns, bytes=1533
+  p50=2.3us, mean=2.5us, p99=3.2us, bytes=1648
 
 field-transform
-  p50=0ns, mean=5.0us, p99=0ns, bytes=2158
+  p50=2.8us, mean=3.1us, p99=5.0us, bytes=2224
 
 formatter-json
-  p50=0ns, mean=2.0us, p99=0ns, bytes=2062
+  p50=2.8us, mean=3.0us, p99=3.9us, bytes=2064
 formatter-logfmt
-  p50=0ns, mean=4.0us, p99=0ns, bytes=2085
+  p50=2.3us, mean=2.5us, p99=3.3us, bytes=2048
 formatter-pretty
-  p50=0ns, mean=4.0us, p99=0ns, bytes=1527
+  p50=2.4us, mean=2.5us, p99=3.0us, bytes=1488
 
 tee-2-destinations
-  p50=0ns, mean=9.0us, p99=0ns, bytes=4160
+  p50=5.1us, mean=5.5us, p99=7.3us, bytes=4143
 
 tee-shared-formatter
-  p50=0ns, mean=7.0us, p99=0ns, bytes=2124
+  p50=3.6us, mean=3.7us, p99=4.5us, bytes=2096
 
 buffer-full-drop (batch: 100000 calls)
-  per-call: 1.2us (p50=119.0ms, mean=119.2ms, p99=132.0ms per batch)
+  per-call: 1.2us (p50=120.0ms, mean=120.5ms, p99=133.4ms per batch)
   bytes: 768
 
 async-large-buffer
-  p50=0ns, mean=1000ns, p99=0ns, bytes=816
+  p50=1.4us, mean=1.4us, p99=1.7us, bytes=768
 
-concurrent-1-thread (1 threads, 1000 total messages, 0.004s)
-  throughput: 250000. msg/sec
+concurrent-1-thread (1 threads, 10000 total messages, 0.036s)
+  throughput: 275755. msg/sec
 
-concurrent-8-threads (8 threads, 8000 total messages, 0.009s)
-  throughput: 888691. msg/sec
+concurrent-8-threads (8 threads, 80000 total messages, 0.083s)
+  throughput: 962550. msg/sec
 
 blocking-mode
-  p50=0ns, mean=7.0us, p99=0ns, bytes=1926
+  p50=2.7us, mean=2.9us, p99=3.9us, bytes=2064
 
 cl-bark comparative benchmarks
 SBCL 2.6.2, X86-64
@@ -73,76 +74,74 @@ comparative: disabled-level (discard sink, batch-measured)
 
   logger                   p50       mean      p99       bytes   
   ------------------------ ---       ---       ---       ---     
-  cl-bark (blocking)       0ns       4ns       10ns              
-  log4cl                   0ns       4ns       10ns              
-  vom                      10ns      10ns      20ns              
-
-
+  cl-bark (blocking)       5ns       5ns       6ns               
+  log4cl                   4ns       4ns       5ns               
+  vom                      10ns      10ns      13ns              
 comparative: simple-message (discard sink)
 Note: all loggers synchronous except verbose (has async pipeline)
 
   logger                   p50       mean      p99       bytes   
   ------------------------ ---       ---       ---       ---     
-  cl-bark (blocking)       0ns       4.0us     0ns       784     
-  cl-bark (logfmt)         0ns       2.0us     0ns       784     
-  log4cl                   0ns       3.0us     0ns       0       
-  vom                      0ns       4.0us     0ns       1757    
+  cl-bark (blocking)       1.1us     1.0us     1.3us     770     
+  cl-bark (logfmt)         1.1us     1.0us     1.6us     764     
+  log4cl                   210ns     212ns     267ns     0       
+  vom                      2.0us     2.3us     3.5us     1984    
 
 comparative: message-5-fields (discard sink)
 Note: all loggers synchronous except verbose (has async pipeline)
 
   logger                   p50       mean      p99       bytes   
   ------------------------ ---       ---       ---       ---     
-  cl-bark (blocking)       0ns       6.0us     0ns       2126    
-  cl-bark (logfmt)         0ns       3.0us     0ns       2086    
-  log4cl                   0ns       2.0us     0ns       425     
-  vom                      0ns       5.0us     0ns       3657    
+  cl-bark (blocking)       2.8us     3.0us     3.8us     2064    
+  cl-bark (logfmt)         2.4us     2.5us     3.4us     2048    
+  log4cl                   830ns     841ns     1.0us     464     
+  vom                      3.3us     3.6us     5.0us     3675    
 
 comparative: message-10-fields (discard sink)
 Note: all loggers synchronous except verbose (has async pipeline)
 
   logger                   p50       mean      p99       bytes   
   ------------------------ ---       ---       ---       ---     
-  cl-bark (blocking)       0ns       8.0us     0ns       3210    
-  cl-bark (logfmt)         0ns       5.0us     0ns       3370    
-  log4cl                   0ns       1000ns    0ns       393     
-  vom                      0ns       7.0us     0ns       6108    
+  cl-bark (blocking)       3.7us     4.0us     5.7us     3392    
+  cl-bark (logfmt)         3.1us     3.4us     5.1us     3392    
+  log4cl                   933ns     944ns     1.1us     464     
+  vom                      4.9us     5.3us     15.3us    6108    
 
 comparative: with-child-context (discard sink)
 Note: all loggers synchronous except verbose (has async pipeline)
 
   logger                   p50       mean      p99       bytes   
   ------------------------ ---       ---       ---       ---     
-  cl-bark (blocking)       0ns       3.0us     0ns       1524    
-  cl-bark (logfmt)         0ns       5.0us     0ns       1500    
-  log4cl                   0ns       2.0us     0ns       0       
-  vom                      0ns       2.0us     0ns       3488    
+  cl-bark (blocking)       948ns     1.2us     2.0us     1553    
+  cl-bark (logfmt)         1.6us     1.8us     2.6us     1520    
+  log4cl                   210ns     212ns     267ns     0       
+  vom                      2.8us     3.1us     4.4us     3566    
 
 comparative: concurrent-1-thread (discard sink)
 
-cl-bark (blocking) (1 threads, 1000 total messages, 0.005s)
-  throughput: 200000. msg/sec
-cl-bark (logfmt) (1 threads, 1000 total messages, 0.004s)
-  throughput: 250000. msg/sec
-log4cl (1 threads, 1000 total messages, 0.001s)
-  throughput: 1000000. msg/sec
-vom (1 threads, 1000 total messages, 0.006s)
-  throughput: 166639. msg/sec
+cl-bark (blocking) (1 threads, 10000 total messages, 0.035s)
+  throughput: 283753. msg/sec
+cl-bark (logfmt) (1 threads, 10000 total messages, 0.032s)
+  throughput: 314976. msg/sec
+log4cl (1 threads, 10000 total messages, 0.009s)
+  throughput: 1099150. msg/sec
+vom (1 threads, 10000 total messages, 0.050s)
+  throughput: 198186. msg/sec
 
 comparative: concurrent-8-threads (discard sink)
 
-cl-bark (blocking) (8 threads, 8000 total messages, 0.008s)
-  throughput: 1000000. msg/sec
-cl-bark (logfmt) (8 threads, 8000 total messages, 0.007s)
-  throughput: 1142857. msg/sec
-log4cl (8 threads, 8000 total messages, 0.011s)
-  throughput: 727273. msg/sec
-vom (8 threads, 8000 total messages, 0.007s)
-  throughput: 1142857. msg/sec
+cl-bark (blocking) (8 threads, 80000 total messages, 0.073s)
+  throughput: 1092699. msg/sec
+cl-bark (logfmt) (8 threads, 80000 total messages, 0.071s)
+  throughput: 1126344. msg/sec
+log4cl (8 threads, 80000 total messages, 0.111s)
+  throughput: 721401. msg/sec
+vom (8 threads, 80000 total messages, 0.075s)
+  throughput: 1063067. msg/sec
 
 comparative: raw-baseline (discard sink)
 String-building floor (including string allocation), not a logger
 
 raw-baseline
-  p50=0ns, mean=3.0us, p99=0ns, bytes=1679
+  p50=535ns, mean=739ns, p99=1.4us, bytes=1728
 

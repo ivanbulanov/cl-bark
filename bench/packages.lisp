@@ -10,12 +10,13 @@
    #:*default-iterations*
    #:*default-warmup*
    #:*default-threads*
+   #:*default-sample-batch-size*
+   #:*default-concurrent-iterations*
    #:*batch-size*
-   #:run-scenario
    #:run-batch-scenario
    #:run-concurrent-scenario
    #:print-header
-   #:print-scenario-result
+   #:print-sampled-result
    #:print-batch-result
    #:print-throughput-result
    #:print-comparative-row

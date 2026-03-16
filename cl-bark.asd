@@ -46,7 +46,7 @@
 
 (asdf:defsystem #:cl-bark/bench
   :description "Internal microbenchmarks for cl-bark"
-  :depends-on (#:cl-bark #:trivial-benchmark #:trivial-garbage #:bordeaux-threads)
+  :depends-on (#:cl-bark #:trivial-benchmark #:trivial-garbage #:bordeaux-threads #:cffi)
   :serial t
   :components
   ((:module "bench"

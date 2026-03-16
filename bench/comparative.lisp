@@ -272,45 +272,49 @@
 (defun run-comparative-scenario (scenario-name getter
                                  &key batch-p)
   "Run a single comparative scenario across all available loggers.
-   GETTER: :message, :fields-5, :fields-10, :with-context"
+   GETTER: :message, :fields-5, :fields-10, :with-context
+   All scenarios use batch measurement.  BATCH-P selects large batches
+   (sub-microsecond ops) vs sampled batches (normal ops)."
   (format t "~&comparative: ~a (discard sink)~%" scenario-name)
   (format t "Note: all loggers synchronous except verbose (has async pipeline)~%~%")
   (print-comparative-header)
   (dolist (adapter (reverse *available-loggers*))
     (destructuring-bind (name setup-fn log-msg log-5 log-10 log-ctx teardown-fn) adapter
       (declare (ignore log-msg log-5 log-10 log-ctx))
-      (let ((fn (adapter-getter adapter getter)))
+      (let ((fn (adapter-getter adapter getter))
+            (bs (if batch-p *batch-size* *default-sample-batch-size*)))
         (funcall setup-fn)
         (unwind-protect
-            (if batch-p
-                (multiple-value-bind (timer _name batch-size)
-                    (run-batch-scenario name fn)
-                  (declare (ignore _name))
-                  (multiple-value-bind (p50 mean p99)
-                      (compute-stats timer 'org.shirakumo.trivial-benchmark:real-time)
-                    (print-comparative-row name
-                      (/ p50 batch-size) (/ mean batch-size) (/ p99 batch-size)
-                      nil)))
-                (multiple-value-bind (timer _name)
-                    (run-scenario name fn)
-                  (declare (ignore _name))
-                  (multiple-value-bind (p50 mean p99)
-                      (compute-stats timer 'org.shirakumo.trivial-benchmark:real-time)
-                    (let ((bytes
-                            (handler-case
-                                (let* ((samples (org.shirakumo.trivial-benchmark:samples
-                                                timer 'org.shirakumo.trivial-benchmark:bytes-consed))
-                                       (total (org.shirakumo.trivial-benchmark:compute :total samples))
-                                       (n (length (org.shirakumo.trivial-benchmark:samples
-                                                  timer 'org.shirakumo.trivial-benchmark:real-time))))
-                                  (/ total n))
-                              (error () nil))))
-                      (print-comparative-row name p50 mean p99 bytes)))))
+            (multiple-value-bind (time-samples bytes-timer _name batch-size)
+                (run-batch-scenario name fn :batch-size bs)
+              (declare (ignore _name))
+              (let* ((n (length time-samples))
+                     (per-call (map '(simple-array double-float (*))
+                                    (lambda (s) (/ s batch-size))
+                                    time-samples)))
+                (multiple-value-bind (p50 mean-val p99)
+                    (compute-sample-stats per-call)
+                  (let ((bytes
+                          (unless batch-p
+                            (bytes-per-call bytes-timer n batch-size))))
+                    (print-comparative-row name p50 mean-val p99 bytes)))))
           (funcall teardown-fn))))))
 
 ;;; ============================================================
 ;;; Register comparative scenarios
 ;;; ============================================================
+
+(defun disabled-level-row (label thunk)
+  "Run a disabled-level batch scenario and print one comparative row."
+  (multiple-value-bind (time-samples _bytes-timer _name batch-size)
+      (run-batch-scenario label thunk)
+    (declare (ignore _bytes-timer _name))
+    (let ((per-call (map '(simple-array double-float (*))
+                         (lambda (s) (/ s batch-size))
+                         time-samples)))
+      (multiple-value-bind (p50 mean-val p99)
+          (compute-sample-stats per-call)
+        (print-comparative-row label p50 mean-val p99 nil)))))
 
 (register-comparative-scenario "disabled-level"
   (lambda ()
@@ -320,14 +324,8 @@
     ;; cl-bark blocking — set level to :warn, call :debug (disabled)
     (let ((logger (bark:make-logger :level :warn :output *discard-stream* :blocking t)))
       (unwind-protect
-          (multiple-value-bind (timer _name batch-size)
-              (run-batch-scenario "cl-bark (blocking)"
-                (lambda () (bark:debug logger *bench-message*)))
-            (declare (ignore _name))
-            (multiple-value-bind (p50 mean p99)
-                (compute-stats timer 'org.shirakumo.trivial-benchmark:real-time)
-              (print-comparative-row "cl-bark (blocking)"
-                (/ p50 batch-size) (/ mean batch-size) (/ p99 batch-size) nil)))
+          (disabled-level-row "cl-bark (blocking)"
+            (lambda () (bark:debug logger *bench-message*)))
         (bark:stop logger)))
     #+bark-bench/log4cl
     (progn
@@ -339,28 +337,16 @@
                        :layout (make-instance 'log4cl:simple-layout)))
       (log4cl:set-log-level log4cl:*root-logger* log4cl:+log-level-warn+)
       (unwind-protect
-          (multiple-value-bind (timer _name batch-size)
-              (run-batch-scenario "log4cl"
-                (lambda () (log:debug "user authentication completed")))
-            (declare (ignore _name))
-            (multiple-value-bind (p50 mean p99)
-                (compute-stats timer 'org.shirakumo.trivial-benchmark:real-time)
-              (print-comparative-row "log4cl"
-                (/ p50 batch-size) (/ mean batch-size) (/ p99 batch-size) nil)))
+          (disabled-level-row "log4cl"
+            (lambda () (log:debug "user authentication completed")))
         (log4cl:remove-all-appenders log4cl:*root-logger*)))
     #+bark-bench/vom
     (progn
       ;; vom — set level to :warn, call vom:debug (disabled)
       (vom:config t :warn)
       (unwind-protect
-          (multiple-value-bind (timer _name batch-size)
-              (run-batch-scenario "vom"
-                (lambda () (vom:debug "user authentication completed")))
-            (declare (ignore _name))
-            (multiple-value-bind (p50 mean p99)
-                (compute-stats timer 'org.shirakumo.trivial-benchmark:real-time)
-              (print-comparative-row "vom"
-                (/ p50 batch-size) (/ mean batch-size) (/ p99 batch-size) nil)))
+          (disabled-level-row "vom"
+            (lambda () (vom:debug "user authentication completed")))
         (vom:config t :info)))
     (terpri)))
 
@@ -409,6 +395,7 @@
   (lambda ()
     (format t "~&comparative: raw-baseline (discard sink)~%")
     (format t "String-building floor (including string allocation), not a logger~%~%")
-    (multiple-value-bind (timer name)
-        (run-scenario "raw-baseline" #'raw-baseline-fields-5)
-      (print-scenario-result timer name))))
+    (multiple-value-bind (time-samples bytes-timer name batch-size)
+        (run-batch-scenario "raw-baseline" #'raw-baseline-fields-5
+          :batch-size *default-sample-batch-size*)
+      (print-sampled-result time-samples bytes-timer name batch-size))))
