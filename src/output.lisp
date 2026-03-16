@@ -109,6 +109,8 @@ Specifying both :level and :filter is an error."
             (deliver-line (destination-async-output dest) line))))))
   (values))
 
+(declaim (ftype (function (t string) (values &optional)) deliver-line))
+
 (defun deliver-line (output line)
   "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
   (if (async-output-p output)
@@ -120,6 +122,9 @@ Specifying both :level and :filter is an error."
       (etypecase output
         (stream (write-string line output) (terpri output) (force-output output))
         (function (funcall output line)))))
+
+(declaim (ftype (function (t function fixnum string list list (or null string) list) (values &optional))
+                dispatch-to-output))
 
 (defun dispatch-to-output (output formatter level chindings raw-bindings ctx message flds)
   "Format and deliver a log event. Routes to tee or single output."

@@ -66,6 +66,8 @@
           (setf (svref slots (logand head mask)) value)
           (return t))))))
 
+(declaim (ftype (function (ring-buffer t) (values boolean &optional)) ring-buffer-push ring-buffer-offer))
+
 (defun ring-buffer-push (rb value)
   "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
   (%ring-buffer-try-push rb value t))
