@@ -28,9 +28,8 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
   (bark:warn "slow query" :duration-ms 1500))
 
 ;; Static context (pre-serialized, fixed for the logger's lifetime)
-(let ((auth-logger (bark:make-child bark:*logger* '(:component "auth"))))
-  (let ((bark:*logger* auth-logger))
-    (bark:info "token verified")))
+(let ((auth-logger (bark:make-child bark:*logger* :context '(:component "auth"))))
+  (bark:info auth-logger "token verified"))
 
 ;; Stop (flushes and joins writer thread)
 (bark:stop bark:*logger*)
@@ -107,7 +106,7 @@ Detection is compile-time for literal keywords, runtime (`keywordp`) for variabl
                              level-sampler consistent))
 
 ;; Create child logger with static context (pre-serialized fields)
-(bark:make-child parent context &key field-transform level)
+(bark:make-child parent &key context field-transform level)
 
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
@@ -116,10 +115,13 @@ Detection is compile-time for literal keywords, runtime (`keywordp`) for variabl
 (bark:set-sampling logger level rate)
 
 ;; Flush pending messages (blocks until written)
-(bark:flush &optional logger)  ; defaults to *logger*
+(bark:flush logger)
 
-;; Stop and flush all writer threads (NIL is a no-op)
+;; Stop and flush all writer threads (blocks until drained, idempotent)
 (bark:stop logger)
+
+;; Register automatic cleanup on image exit (stop is idempotent, safe with explicit stop)
+(bark:register-exit-hook logger)
 ```
 
 `bark:make-logger` is the main entry point. It creates a logger and returns it — assign it to `bark:*logger*` or any other variable. The output type determines whether async I/O is used:
@@ -137,9 +139,11 @@ Detection is compile-time for literal keywords, runtime (`keywordp`) for variabl
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
 
-`bark:stop` flushes and joins all writer threads for the given logger. Passing NIL is a no-op. Calling on a child logger signals an error — always stop the root logger.
+`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent — stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals an error — always stop the root logger.
 
-`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. When called with no argument, flushes `*logger*`. Handles both single-output and tee-output loggers. No-op when the logger is nil.
+`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals an error if the logger has been stopped.
+
+`bark:register-exit-hook` registers a logger for automatic `bark:stop` on Lisp image exit. Safe to combine with an explicit `bark:stop` call (stop is idempotent). Supports SBCL, CCL, ECL, ABCL, and CLISP.
 
 ### Multi-Output
 
@@ -201,13 +205,13 @@ Log output includes fields from three sources, merged in this order:
 
 ```lisp
 ;; Static context — lives on the logger
-(let ((bark:*logger* (bark:make-child bark:*logger* '(:component "auth"))))
+(let ((auth-logger (bark:make-child bark:*logger* :context '(:component "auth"))))
 
   ;; Dynamic context — scoped to this body
   (bark:with-context (:request-id "req-123")
 
     ;; Per-call fields
-    (bark:info "token verified" :user-id 42)))
+    (bark:info auth-logger "token verified" :user-id 42)))
 ;; Output merges all three: component, request-id, user-id
 ```
 
@@ -217,7 +221,7 @@ Log output includes fields from three sources, merged in this order:
 
 ```lisp
 ;; Fixed for this component — every log carries :component automatically
-(defvar *db-log* (bark:make-child bark:*logger* '(:component "database" :pool-size 10)))
+(defvar *db-log* (bark:make-child bark:*logger* :context '(:component "database" :pool-size 10)))
 (bark:info *db-log* "connection acquired")
 ```
 
@@ -246,7 +250,7 @@ With child loggers alone, you'd need to create a new child of each logger per re
 
 ```lisp
 (dotimes (i pool-size)
-  (let ((log (bark:make-child bark:*logger* (list :worker-id i))))
+  (let ((log (bark:make-child bark:*logger* :context (list :worker-id i))))
     (spawn-worker log)))
 ```
 
@@ -337,13 +341,12 @@ The transform applies to **all three field sources**:
                                                         (values nil nil)
                                                         value))))
        ;; Child adds token masking on top of parent's secret dropping
-       (child (bark:make-child parent '(:component "auth")
+       (child (bark:make-child parent :context '(:component "auth")
                                :field-transform (lambda (key value)
                                                   (if (eq key :token)
                                                       "****"
                                                       value)))))
-  (let ((bark:*logger* child))
-    (bark:info "login" :user "alice" :secret "pw" :token "xyz")))
+  (bark:info child "login" :user "alice" :secret "pw" :token "xyz"))
 ;; => :secret dropped (parent), :token masked (child)
 ```
 

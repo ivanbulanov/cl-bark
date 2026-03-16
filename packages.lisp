@@ -34,7 +34,7 @@
    #:windowed-counter-window-ticks
    #:make-consistent-sampler #:set-consistent
    #:consistent-sampler-key-fn #:consistent-sampler-rate
-   #:flush #:stop
+   #:flush #:stop #:register-exit-hook
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
    ;; buffer

@@ -301,12 +301,14 @@
   "Set/replace the consistent sampler on LOGGER (nil to remove)."
   (setf (logger-consistent logger) consistent-sampler))
 
-(declaim (ftype (function (logger list &key (:level (or null fixnum keyword))
+(declaim (ftype (function (logger &key (:context list)
+                                            (:level (or null fixnum keyword))
                                             (:field-transform (or null function)))
                           (values logger &optional)) make-child))
 
-(defun make-child (parent context &key level field-transform)
-  "Create a child logger from PARENT with CONTEXT (a plist) pre-serialized.
+(defun make-child (parent &key context level field-transform)
+  "Create a child logger from PARENT.
+   CONTEXT, when provided, is a plist of static fields pre-serialized at creation time.
    Inherits the parent's formatter, output, level-sampler, and consistent slots
    (snapshots at creation time). LEVEL overrides the inherited level; when omitted,
    the child inherits the parent's current level. FIELD-TRANSFORM composes with the
@@ -364,22 +366,43 @@
     ((and output (async-output-p output))
      (funcall fn output))))
 
-(defun flush (&optional (logger *logger*))
+(defun flush (logger)
   "Flush LOGGER, blocking until all pending messages are written.
-Defaults to the global *logger*. Does nothing if LOGGER is nil or has no async output."
-  (when logger
-    (do-async-outputs (logger-output logger) #'flush-async-output)))
+   Signals an error if any async output has been stopped."
+  (let ((has-stopped nil))
+    (flet ((flush-one (ao)
+             (if (async-output-running ao)
+                 (flush-async-output ao)
+                 (setf has-stopped t))))
+      (do-async-outputs (logger-output logger) #'flush-one))
+    (when has-stopped
+      (cl:error "Cannot flush a stopped logger."))))
 
 (defun stop (logger)
-  "Stop writer threads for LOGGER. Idempotent — calling stop on an already-stopped
-   or sync logger is a no-op. Passing NIL is a no-op. Signals an error if LOGGER
-   is a child (children share the parent's output)."
+  "Stop writer threads for LOGGER. Blocks until pending messages are drained and
+   threads have exited. Idempotent — calling stop on an already-stopped or sync
+   logger is a no-op. Passing NIL is a no-op. Signals an error if LOGGER is a
+   child (children share the parent's output)."
   (when logger
     (unless (logger-root-p logger)
       (cl:error "Cannot stop a child logger — it shares the parent's output. ~
                  Stop the root logger instead."))
     (do-async-outputs (logger-output logger) #'stop-async-output))
   nil)
+
+(defun register-exit-hook (logger)
+  "Register LOGGER for automatic cleanup on Lisp image exit.
+   Calls bark:stop on the logger when the implementation's exit hook fires.
+   Safe to combine with an explicit bark:stop call (stop is idempotent)."
+  (let ((fn (lambda () (stop logger))))
+    #+sbcl      (push fn sb-ext:*exit-hooks*)
+    #+ccl       (push fn ccl:*lisp-cleanup-functions*)
+    #+ecl       (push fn ext:*exit-hooks*)
+    #+abcl      (push fn ext:*exit-hooks*)
+    #+clisp     (push fn custom:*fini-hooks*)
+    #-(or sbcl ccl ecl abcl clisp)
+    (cl:warn "cl-bark: no exit-hook support on this implementation"))
+  (values))
 
 ;;; --- Context ---
 

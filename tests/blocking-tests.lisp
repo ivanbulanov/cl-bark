@@ -366,7 +366,7 @@
     (unwind-protect
          (progn
            (bark:info "blocking-e2e")
-           (bark:flush)
+           (bark:flush *logger*)
            (5am:is (search "blocking-e2e" (get-output-stream-string out))))
       (stop *logger*))))
 

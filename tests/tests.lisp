@@ -406,8 +406,8 @@
 (5am:test test-child-logger
   "Create parent with chindings, create child with more bindings, verify concatenation."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))
-         (parent-with-bindings (make-child parent '(:service "web")))
-         (ch (make-child parent-with-bindings '(:request-id "abc"))))
+         (parent-with-bindings (make-child parent :context '(:service "web")))
+         (ch (make-child parent-with-bindings :context '(:request-id "abc"))))
     (5am:is-true (search "service" (logger-chindings ch)))
     (5am:is-true (search "web" (logger-chindings ch)))
     (5am:is-true (search "request-id" (logger-chindings ch)))
@@ -418,8 +418,8 @@
 (5am:test test-child-raw-bindings
   "Create parent with raw-bindings, create child, verify raw-bindings are appended."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))
-         (p1 (make-child parent '(:a 1 :b 2)))
-         (ch (make-child p1 '(:c 3))))
+         (p1 (make-child parent :context '(:a 1 :b 2)))
+         (ch (make-child p1 :context '(:c 3))))
     (let ((rb (logger-raw-bindings ch)))
       (5am:is-true (not (null rb)))
       (5am:is (= 1 (getf rb :a)))
@@ -588,7 +588,7 @@
   "Full flow: create logger, set level, log with context + child + fields."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (let* ((lgr (make-logger :context '(:name "e2e") :level :trace :output collector))
-           (ch (make-child lgr '(:service "api"))))
+           (ch (make-child lgr :context '(:service "api"))))
       (let ((*log-context* (list (cons :trace-id "t-999"))))
         (funcall (logger-info-fn ch) ch "request handled" :status 200 :duration 42))
       (let* ((logs (funcall results-fn))
@@ -747,7 +747,7 @@
                                          :key-fn (lambda (bindings)
                                                    (getf bindings :rid))
                                          :rate 1))))
-      (let ((child-lgr (make-child lgr '(:rid "test-key"))))
+      (let ((child-lgr (make-child lgr :context '(:rid "test-key"))))
         (let ((fn (logger-debug-fn child-lgr)))
           (dotimes (i 50)
             (funcall fn child-lgr "msg"))))
@@ -815,7 +815,7 @@
         (dotimes (i 50)
           (funcall fn lgr "keyless")))
       ;; Keyed messages: consistent rate=1 → keep all (bypass windowed)
-      (let* ((keyed-lgr (make-child lgr '(:rid "test-key")))
+      (let* ((keyed-lgr (make-child lgr :context '(:rid "test-key")))
              (fn (logger-debug-fn keyed-lgr)))
         (dotimes (i 50)
           (funcall fn keyed-lgr "keyed")))
@@ -851,7 +851,7 @@
                            :level-sampler (make-level-sampler
                                            :debug (make-windowed-counter
                                                    :initial 5 :thereafter 100))))
-         (ch (make-child lgr '(:component "child"))))
+         (ch (make-child lgr :context '(:component "child"))))
     ;; Same vector object
     (5am:is (eq (bark::logger-level-sampler lgr) (bark::logger-level-sampler ch)))
     ;; In-place mutation via set-level-sampling on parent visible to child
@@ -864,7 +864,7 @@
   (let* ((cs (make-consistent-sampler
               :key-fn (lambda (b) (getf b :rid)) :rate 10))
          (lgr (make-logger :context '(:name "par") :level :debug :consistent cs))
-         (ch (make-child lgr '(:component "child"))))
+         (ch (make-child lgr :context '(:component "child"))))
     (5am:is (eq cs (bark::logger-consistent ch)))
     ;; Replace on parent
     (set-consistent lgr nil)
@@ -902,7 +902,7 @@
     (unwind-protect
          (let ((fn (logger-debug-fn bark:*logger*)))
            (dotimes (i 10) (funcall fn bark:*logger* "msg"))
-           (bark:flush)
+           (bark:flush bark:*logger*)
            (let* ((output (get-output-stream-string out))
                   (lines (remove "" (uiop:split-string output :separator '(#\Newline))
                                  :test #'string=)))
@@ -1075,7 +1075,7 @@
 (5am:test test-child-logger-fields
   "CHILD logger pre-attaches fields to every message it emits."
   (bark:with-captured-logs (logs)
-    (let ((child (bark:make-child bark:*logger* '(:component "db" :pool 5))))
+    (let ((child (bark:make-child bark:*logger* :context '(:component "db" :pool 5))))
       (bark:info "parent msg")
       (funcall (bark::logger-info-fn child) child "child msg" :query "SELECT 1"))
     (let* ((entries (mapcar #'yason:parse (funcall logs)))
@@ -1684,7 +1684,7 @@
                (s2 :formatter #'json-formatter))))
     (unwind-protect
          (let* ((parent (make-logger :context '(:name "parent") :level :info :output tee))
-                (ch (make-child parent '(:component "auth"))))
+                (ch (make-child parent :context '(:component "auth"))))
            (let ((*logger* ch))
              (bark:info "token verified" :user-id 42))
            (stop-tee tee)
@@ -1802,7 +1802,7 @@
     (setf bark:*logger* (bark:make-logger :level :info :output out))
     (dotimes (i 10)
       (bark:info (format nil "msg-~d" i)))
-    (bark:flush)
+    (bark:flush bark:*logger*)
     (let ((result (get-output-stream-string out)))
       (5am:is (= 10 (count #\Newline result))
               "Expected 10 lines after flush, got ~d" (count #\Newline result)))
@@ -1817,7 +1817,7 @@
                                                    (s1 :formatter #'json-formatter)
                                                    (s2 :formatter #'json-formatter))))
     (bark:info "tee-flush-msg")
-    (bark:flush)
+    (bark:flush bark:*logger*)
     (5am:is-true (search "tee-flush-msg" (get-output-stream-string s1)))
     (5am:is-true (search "tee-flush-msg" (get-output-stream-string s2)))
     (bark:stop bark:*logger*)))
@@ -1832,10 +1832,12 @@
     (5am:is-true (search "explicit-msg" (get-output-stream-string out)))
     (bark:stop lgr)))
 
-(5am:test test-flush-without-logger
-  "bark:flush is a no-op when no logger is active."
-  (let ((*logger* nil))
-    (5am:finishes (bark:flush))))
+(5am:test test-flush-stopped-logger-signals-error
+  "bark:flush signals an error on a stopped logger."
+  (let* ((out (make-string-output-stream))
+         (lgr (bark:make-logger :level :info :output out)))
+    (bark:stop lgr)
+    (5am:signals error (bark:flush lgr))))
 
 ;;; --- Multi-Output: Error Recovery ---
 
@@ -2198,7 +2200,7 @@
    Child bindings are pre-serialized into chindings at child creation time."
   (bark:with-captured-logs (get-logs #'json-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
+           (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let* ((parsed (yason:parse (first (funcall get-logs))))
@@ -2211,7 +2213,7 @@
    raw-bindings carry the live condition object, serialized at log time."
   (bark:with-captured-logs (get-logs #'logfmt-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
+           (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let ((line (first (funcall get-logs))))
@@ -2222,7 +2224,7 @@
    raw-bindings carry the live condition object, serialized at log time."
   (bark:with-captured-logs (get-logs #'pretty-formatter)
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
-           (child-logger (bark:make-child bark:*logger* (list :boot-err c))))
+           (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
         (bark:info "started")
         (let ((line (first (funcall get-logs))))
@@ -2306,7 +2308,7 @@
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:make-child parent '(:component "auth" :secret "key-abc"))))
+           (ch (bark:make-child parent :context '(:component "auth" :secret "key-abc"))))
       (funcall (logger-info-fn ch) ch "hello"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "\"component\":\"auth\"" result))
@@ -2330,7 +2332,7 @@
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:make-child parent '(:component "db"))))
+           (ch (bark:make-child parent :context '(:component "db"))))
       (funcall (logger-info-fn ch) ch "query" :sql "SELECT 1" :secret "pw"))
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "\"sql\":\"SELECT 1\"" result))
@@ -2344,7 +2346,7 @@
                                                    (if (eq key :secret)
                                                        (values nil nil)
                                                        value))))
-           (ch (bark:make-child parent '(:component "auth")
+           (ch (bark:make-child parent :context '(:component "auth")
                                         :field-transform (lambda (key value)
                                                            (if (eq key :token)
                                                                "****"
@@ -2442,7 +2444,7 @@
 (5am:test test-make-buffer-logger-preserves-identity
   "Buffer logger preserves chindings and raw-bindings from original."
   (let* ((parent (make-logger :context '(:name "app") :level :info :output *standard-output*))
-         (original (make-child parent '(:component "auth")))
+         (original (make-child parent :context '(:component "auth")))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (string= (logger-chindings original) (logger-chindings buf-lgr)))
@@ -2825,7 +2827,7 @@
   "Buffer scope with child logger preserves static context in output."
   (let* ((out (make-string-output-stream))
          (parent (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
-         (*logger* (make-child parent '(:component "auth"))))
+         (*logger* (make-child parent :context '(:component "auth"))))
     (with-log-buffer ()
       (bark:info "login"))
     (let* ((result (get-output-stream-string out))

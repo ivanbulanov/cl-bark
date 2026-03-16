@@ -81,7 +81,7 @@
 (register-internal-scenario "child-no-context"
   (lambda ()
     (let* ((root (make-bench-logger))
-           (child (bark:make-child root '())))
+           (child (bark:make-child root)))
       (unwind-protect
           (multiple-value-bind (time-samples bytes-timer name batch-size)
               (run-batch-scenario "child-no-context"
@@ -96,7 +96,7 @@
 (register-internal-scenario "child-with-context"
   (lambda ()
     (let* ((root (make-bench-logger))
-           (child (bark:make-child root *bench-context*)))
+           (child (bark:make-child root :context *bench-context*)))
       (unwind-protect
           (multiple-value-bind (time-samples bytes-timer name batch-size)
               (run-batch-scenario "child-with-context"
@@ -128,7 +128,7 @@
   (lambda ()
     (let ((logger (make-bench-logger)))
       (let ((xform-logger
-              (bark:make-child logger '()
+              (bark:make-child logger
                 :field-transform (lambda (key value)
                                    (declare (ignore key))
                                    value))))

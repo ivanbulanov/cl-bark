@@ -111,7 +111,7 @@
             (push (bt:make-thread
                    (lambda ()
                      (let* ((lgr2 (if use-key
-                                      (make-child lgr (list :rid (format nil "req-~d" tid)))
+                                      (make-child lgr :context (list :rid (format nil "req-~d" tid)))
                                       lgr))
                             (fn (logger-debug-fn lgr2)))
                        (dotimes (i 5000)

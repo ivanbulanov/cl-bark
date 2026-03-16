@@ -33,7 +33,7 @@
   (setf *bark-blocking-logger*
         (bark:make-logger :level :trace :output *discard-stream* :blocking t))
   (setf *bark-blocking-child*
-        (bark:make-child *bark-blocking-logger* *bench-context*)))
+        (bark:make-child *bark-blocking-logger* :context *bench-context*)))
 
 (defun bark-blocking-log-message ()
   (bark:info *bark-blocking-logger* *bench-message*))
@@ -82,7 +82,7 @@
         (bark:make-logger :level :trace :output *discard-stream*
                           :blocking t :formatter #'bark:logfmt-formatter))
   (setf *bark-logfmt-child*
-        (bark:make-child *bark-logfmt-logger* *bench-context*)))
+        (bark:make-child *bark-logfmt-logger* :context *bench-context*)))
 
 (defun bark-logfmt-log-message ()
   (bark:info *bark-logfmt-logger* *bench-message*))
