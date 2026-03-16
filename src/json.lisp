@@ -242,7 +242,7 @@
     (lambda (level chindings raw-bindings context message fields)
       (declare (optimize (speed 3) (safety 1)))
       (declare (ignore raw-bindings))
-      (with-output-to-string (s)
+      (with-format-stream (s)
         (write-char #\{ s)
         (let ((wrote nil))
           ;; Level

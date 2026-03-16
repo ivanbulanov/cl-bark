@@ -33,6 +33,7 @@ load:
 
 clean:
 	find . -name '*.fasl' -delete
+	rm -rf $(HOME)/.cache/common-lisp/sbcl-*/$(CURDIR)/
 
 # --- Benchmarks ---
 

@@ -60,7 +60,7 @@
         (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
     (lambda (level chindings raw-bindings context message fields)
       (declare (ignore chindings))
-      (with-output-to-string (s)
+      (with-format-stream (s)
         (let* ((*print-level* *max-pretty-depth*)
                (*print-length* *max-pretty-length*)
                (*print-circle* t)

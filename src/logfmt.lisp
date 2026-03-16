@@ -79,7 +79,7 @@
         (msg-prefix-first (format nil "~a=" message-key)))
     (lambda (level chindings raw-bindings context message fields)
       (declare (ignore chindings))
-      (with-output-to-string (s)
+      (with-format-stream (s)
         (let ((wrote nil))
           (when level-prefix
             (write-string level-prefix s)
