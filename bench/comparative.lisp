@@ -59,7 +59,7 @@
     (setf *bark-blocking-logger* nil
           *bark-blocking-child* nil)))
 
-(push (list "cl-bark (blocking)"
+(push (list "cl-bark (blocking, json)"
             #'bark-blocking-setup
             #'bark-blocking-log-message
             #'bark-blocking-log-fields-5
@@ -108,7 +108,7 @@
     (setf *bark-logfmt-logger* nil
           *bark-logfmt-child* nil)))
 
-(push (list "cl-bark (logfmt)"
+(push (list "cl-bark (blocking, logfmt)"
             #'bark-logfmt-setup
             #'bark-logfmt-log-message
             #'bark-logfmt-log-fields-5
@@ -324,7 +324,7 @@
     ;; cl-bark blocking — set level to :warn, call :debug (disabled)
     (let ((logger (bark:make-logger :level :warn :output *discard-stream* :blocking t)))
       (unwind-protect
-          (disabled-level-row "cl-bark (blocking)"
+          (disabled-level-row "cl-bark (blocking, json)"
             (lambda () (bark:debug logger *bench-message*)))
         (bark:stop logger)))
     #+bark-bench/log4cl
