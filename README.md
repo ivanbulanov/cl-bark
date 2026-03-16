@@ -373,7 +373,7 @@ JSON-oriented formatters use `chindings` (pre-serialized, zero per-call cost) an
 Built-in formatters:
 - `bark:json-formatter` — JSON Lines (default, production)
 - `bark:logfmt-formatter` — `key=value` pairs
-- `bark:pretty-formatter` — ANSI-colored for REPL
+- `bark:pretty-formatter` — colored terminal output for REPL/development
 
 **Supported field value types:**
 
@@ -394,11 +394,24 @@ Built-in formatters:
 | `captured-error` | `{"type":"...","msg":"...","stack":[...]}` | `"type: msg"` | type: msg + stack |
 | everything else | `"<type>"` | `<type>` | `princ` |
 
-All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`. For JSON: lists serialize as arrays (including dotted pairs), pathnames as strings, vectors as arrays, hash-tables as objects. For logfmt: collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`). Boolean `t` in logfmt emits a bare key with no `=value` (logfmt convention for flags). The JSON fallback for unsupported types is a `"<type>"` placeholder string. Specialize `print-object` on your classes to control the type name shown. Collection depth and length are bounded by formatter-specific limits — see [Tuning](#tuning) for details.
+All types are accepted — no log call ever signals `type-error`. Ratios are coerced to `double-float`.
+
+**JSON:**
+- Lists serialize as arrays (including dotted pairs)
+- Vectors as arrays, hash-tables as objects, pathnames as strings
+- Unsupported types fall back to a `"<type>"` placeholder string
+
+**logfmt:**
+- Collections and unsupported types emit an unquoted `<type>` placeholder (e.g., `<cons>`, `<hash-table>`)
+- Boolean `t` emits a bare key with no `=value` (logfmt convention for flags)
+
+**pretty:** Values are printed via `princ`, bounded by `*print-level*` and `*print-length*`.
+
+**Customization:** Specialize `print-object` on your classes to control the type name shown in placeholders. Collection depth and length are bounded by formatter-specific limits — see [Tuning](#tuning).
 
 #### Formatter Factories
 
-The built-in formatters use fixed defaults (string levels, `"level"`/`"ts"`/`"msg"` keys, Unix millisecond timestamps). Formatter factories return closures with the same signature, but with configurable keys, level formats, and timestamp formats. Everything is pre-computed at factory time — no per-call overhead.
+The built-in formatters (`json-formatter`, `logfmt-formatter`, `pretty-formatter`) are zero-config convenience functions with fixed defaults. When you need to match an external system's expected format — different field names, timestamp format, or level encoding — use the corresponding factory function to create a customized formatter. Factories return closures with the same signature as the built-ins, with all configuration pre-computed at creation time (no per-call overhead). You can also write an entirely custom formatter — any function with the signature `(level chindings raw-bindings context message fields)` that returns a string works as a `:formatter`.
 
 **`make-json-formatter`**
 
@@ -468,14 +481,15 @@ The standard `pretty-formatter` omits timestamps (REPL use). The factory adds op
 
 ### Sampling
 
-```lisp
-;; Log 1 in 100 debug messages
-(bark:set-sampling bark:*logger* :debug 100)
-```
+See [docs/sampling.md](docs/sampling.md) for windowed counters, consistent sampling, and configuration.
 
 ### Backpressure
 
-The async writer uses a bounded ring buffer per destination. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
+**Async mode (default).** Each destination has a bounded ring buffer. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
+
+**Blocking mode** (`:blocking t` on `make-logger`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes.
+
+**Async drop handling:**
 
 ```json
 {"level":"warn","ts":1740600000123,"msg":"bark: dropped 153 log messages (output too slow)"}
@@ -530,7 +544,7 @@ To capture and assert on log output:
 
 Buffer log calls and decide at scope exit which to emit. The default: on success, emit entries at or above the logger's configured level. On failure (unhandled condition), emit everything — including debug and trace.
 
-`with-log-buffer` takes a logger argument, binds it to `*logger*` as a buffer-logger for the body's dynamic extent, and flushes through the original logger on exit. Only implicit log calls (through `*logger*`) are buffered; explicit logger arguments bypass the buffer — this is intentional, as buffering is a request-scoped concern while explicit loggers are structural.
+`with-log-buffer` takes a logger argument, binds it to `*logger*` as a buffer-logger for the body's dynamic extent, and flushes through the original logger on exit. Only implicit log calls (through `*logger*`) are buffered; log calls that pass an explicit logger argument bypass the buffer, because they don't go through `*logger*`.
 
 ```lisp
 ;; Buffer a per-request child logger
@@ -844,8 +858,9 @@ All conditions are signaled at configuration time. Logging macros never signal �
 | `tee` | `simple-error` | Same, at macro expansion time |
 | `make-logger` | `simple-error` | `:output` is not a stream, function, `tee-output`, or `nil` |
 | `stop` | `simple-error` | Called on a child logger |
+| `flush` | `simple-error` | Called on a stopped logger |
 
-Writer thread stream errors (`file-error`, `stream-error`, etc.) are caught internally. When `:on-error` is provided, it receives the original condition — see [Error Recovery](#error-recovery). Otherwise the error is logged to `*error-output*` and the writer exits.
+Writer thread stream errors (`file-error`, `stream-error`, etc.) are caught internally. When `:on-error` is provided, it receives the original condition — see [Error Recovery](#error-recovery). Otherwise the error is logged to `*error-output*` and the writer exits. If the `:on-error` handler itself signals, or an `:on-block-timeout` callback signals, those errors are also caught and written to `*error-output*` — the writer thread never propagates exceptions to the caller.
 
 ## Architecture
 
