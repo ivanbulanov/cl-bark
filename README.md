@@ -575,21 +575,62 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 ## Benchmarks
 
-Run the benchmark suite on your hardware:
+### Running
 
-```lisp
-(asdf:load-system "cl-bark/bench")
-(bark-bench:run)
+```bash
+make bench              # both suites, default parameters
+make bench-quick        # smoke test (1000 iterations)
+make bench-full         # publication quality (50000 iterations)
+make bench-internal     # internal suite only
+make bench-comparative  # comparative suite only
+make bench-update-sample  # regenerate bench/results/sample.txt
 ```
 
-For comparison against other CL loggers:
+Override parameters on the command line:
+
+```bash
+make bench ITERATIONS=50000 THREADS=16 SCENARIO=simple-message
+```
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ITERATIONS` | 10000 | Measurement samples per scenario |
+| `WARMUP` | 10000 | Warmup iterations before measurement |
+| `THREADS` | 8 | Thread count for concurrent scenarios |
+| `CONCURRENT_ITERATIONS` | 100000 | Messages per thread for throughput scenarios |
+| `SUITE` | (both) | `internal` or `comparative` |
+| `SCENARIO` | (all) | Run a single named scenario |
+
+Or from the REPL:
 
 ```lisp
 (asdf:load-system "cl-bark/bench-comparative")
-(bark-bench:run :suite :comparative)
+(bark-bench:run :suite :internal :iterations 50000)
 ```
 
-See [sample results](bench/results/sample.txt) for reference numbers.
+See [sample results](bench/results/sample.txt) for reference numbers on one machine.
+
+### Methodology
+
+All benchmarks write to a discard stream (`(make-broadcast-stream)`) — a portable `/dev/null`. This isolates framework overhead from I/O. Real-world throughput will be lower due to actual disk or network writes.
+
+**Timing.** Per-call latency uses CFFI `clock_gettime(CLOCK_MONOTONIC)` for nanosecond resolution. Each sample measures a batch of 100 calls; per-call estimates are derived by division. This gives ~10ns effective resolution while amortizing the clock read overhead. Sub-microsecond scenarios (disabled-level) use larger batches of 100,000. Throughput scenarios measure wall-clock elapsed time across 100,000+ messages.
+
+**Allocation.** Bytes-consed per call is tracked via `trivial-benchmark` (uses SBCL's `sb-ext:get-bytes-consed` where available). The `&rest` field plist is `(declare (dynamic-extent fields))` and stack-allocated — it does not contribute to bytes-consed. The reported bytes are dominated by the formatter's result string, which is the one unavoidable allocation per log call (it goes on the ring buffer). A per-thread reusable string stream eliminates the stream object allocation.
+
+### Reading the Comparative Results
+
+The comparative suite benchmarks cl-bark against log4cl and vom. These loggers have fundamentally different designs, so the numbers require context.
+
+**Structured vs. text logging.** cl-bark is a structured logger: it serializes typed key-value fields into JSON or logfmt. log4cl and vom are text loggers: they pass format strings to `cl:format`. Structured serialization (escaping strings, printing numbers, building JSON objects) is inherently more expensive than `format` with a few directives. This is the primary reason log4cl is faster per-call on simple messages — it does less work.
+
+**Blocking vs. async.** The comparative suite runs cl-bark in blocking mode to make a fair synchronous comparison against log4cl and vom, which are both synchronous. In production, cl-bark normally runs in async mode: the caller pushes a formatted string onto a lock-free ring buffer and returns immediately, with a background writer thread draining to the stream. Async mode decouples caller latency from I/O latency entirely.
+
+**Allocation gap.** log4cl reports 0 bytes for simple messages and ~465 bytes for structured fields. cl-bark reports ~650-1200 bytes depending on the formatter. The difference is structural: cl-bark builds a complete JSON/logfmt line as a string (the ring buffer payload), while log4cl writes directly to the destination stream with no intermediate string. This is the cost of caller-thread formatting — see [Caller-Thread Formatting](#caller-thread-formatting) for why this trade-off exists.
+
+**Where cl-bark wins.** Multi-threaded throughput: at 8 threads, cl-bark reaches ~1.1M msg/sec vs log4cl's ~730K. cl-bark's lock-free MPSC ring buffer scales with producer threads, while log4cl's appender writes serialize on a lock. This is the scenario that matters in production — multiple application threads logging concurrently.
+
+**Logfmt is faster than JSON.** logfmt output (`key=value` pairs) avoids JSON's escaping and quoting overhead. The difference is ~15-20% on structured fields. If you don't need JSON, logfmt is the better default for performance.
 
 ## Usage Examples
 
