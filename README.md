@@ -565,7 +565,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 - Non-condition unwind (`return-from`, `throw`): treated as normal exit.
 - Handled errors (caught by `handler-case` inside body): normal exit.
 - Explicit logger args (`(bark:info *audit-logger* "msg")`) bypass the buffer.
-- Nested scopes flush independently to the root (outermost non-buffer) logger.
+- **Nesting is a no-op.** If already inside a `with-log-buffer` scope, inner scopes run their body directly with no additional buffering. The outermost scope controls capture level and flush policy. This prevents bugs with wrong flush targets, lost context, and out-of-order output that would arise from independent nested buffers.
 
 **Buffer entries** are structs with accessors for `on-flush` callbacks:
 

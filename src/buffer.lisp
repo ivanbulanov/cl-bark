@@ -66,8 +66,9 @@
 ;;; --- Root logger tracking ---
 
 (defvar *root-logger* nil
-  "The non-buffer logger that all buffer scopes flush through.
-   Bound by the outermost with-log-buffer; inner scopes read but don't rebind.")
+  "The non-buffer logger that the buffer scope flushes through.
+   Bound by with-log-buffer. When non-nil, signals that we are inside a buffer
+   scope and nested with-log-buffer calls become no-ops.")
 
 ;;; --- with-log-buffer ---
 
@@ -76,40 +77,46 @@
    LOGGER is evaluated once and bound to *logger* as a buffer-logger for the body's
    dynamic extent. Only implicit log calls (through *logger*) are buffered; explicit
    logger arguments bypass the buffer.
+   Nesting is a no-op: if already inside a buffer scope, BODY runs directly with no
+   additional buffering. The outermost scope controls capture level and flush policy.
    LEVEL is the capture threshold (default :trace). ON-FLUSH, if provided, is called
    as (funcall on-flush entries condition normal-exit-p) to select entries to emit."
   (let ((source-lgr (gensym "SOURCE-LGR"))
         (buffer (gensym "BUFFER"))
         (condition (gensym "CONDITION"))
         (normal-exit-p (gensym "NORMAL-EXIT-P"))
-        (root (gensym "ROOT"))
         (original-level (gensym "ORIG-LEVEL"))
         (buf-lgr (gensym "BUF-LGR"))
         (on-flush-fn (gensym "ON-FLUSH"))
         (buffer-level (gensym "BUF-LEVEL")))
     `(let ((,source-lgr ,logger))
-       (if (null ,source-lgr)
-           ;; No logger — just run body
-           (progn ,@body)
-           (let* ((,buffer-level (level-from-keyword ,level))
-                  (,original-level (logger-level ,source-lgr))
-                  (,buffer (make-array 32 :adjustable t :fill-pointer 0))
-                  (,on-flush-fn ,on-flush)
-                  (,root (or *root-logger* ,source-lgr))
-                  (,buf-lgr (make-buffer-logger ,source-lgr ,buffer-level ,buffer))
-                  (,condition nil)
-                  (,normal-exit-p nil))
-             (let ((*root-logger* ,root))
-               (unwind-protect
-                   (handler-bind ((serious-condition
-                                    (lambda (c)
-                                      (unless ,condition (setf ,condition c)))))
-                     (multiple-value-prog1
-                         (let ((*logger* ,buf-lgr))
-                           ,@body)
-                       (setf ,normal-exit-p t)))
-                 (flush-buffer ,buffer ,root ,normal-exit-p ,condition
-                               ,on-flush-fn ,original-level))))))))
+       (cond
+         ;; No logger — just run body
+         ((null ,source-lgr)
+          (progn ,@body))
+         ;; Already inside a buffer scope — no-op, run body directly
+         (*root-logger*
+          (progn ,@body))
+         ;; Outermost buffer scope — set up buffering
+         (t
+          (let* ((,buffer-level (level-from-keyword ,level))
+                 (,original-level (logger-level ,source-lgr))
+                 (,buffer (make-array 32 :adjustable t :fill-pointer 0))
+                 (,on-flush-fn ,on-flush)
+                 (,buf-lgr (make-buffer-logger ,source-lgr ,buffer-level ,buffer))
+                 (,condition nil)
+                 (,normal-exit-p nil))
+            (let ((*root-logger* ,source-lgr))
+              (unwind-protect
+                  (handler-bind ((serious-condition
+                                   (lambda (c)
+                                     (unless ,condition (setf ,condition c)))))
+                    (multiple-value-prog1
+                        (let ((*logger* ,buf-lgr))
+                          ,@body)
+                      (setf ,normal-exit-p t)))
+                (flush-buffer ,buffer *root-logger* ,normal-exit-p ,condition
+                              ,on-flush-fn ,original-level)))))))))
 
 (defun flush-buffer (buffer root-logger normal-exit-p condition on-flush original-level)
   "Flush BUFFER entries through ROOT-LOGGER. Selection logic:

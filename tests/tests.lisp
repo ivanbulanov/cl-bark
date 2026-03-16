@@ -2763,8 +2763,8 @@
 
 ;;; --- Nested buffering ---
 
-(5am:test test-nested-buffer-inner-flushes-to-root
-  "Inner buffer flushes directly to root logger output."
+(5am:test test-nested-buffer-is-noop
+  "Nested with-log-buffer is a no-op — all entries go to outermost buffer."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer (*logger*)
@@ -2772,14 +2772,14 @@
       (with-log-buffer (*logger*)
         (bark:info "inner-1"))
       (bark:info "outer-2"))
-    ;; All three should appear in output (all are info level, normal exit)
+    ;; All three in outermost buffer, filtered to >= :info on normal exit
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "outer-1" result))
       (5am:is-true (search "inner-1" result))
       (5am:is-true (search "outer-2" result)))))
 
-(5am:test test-nested-buffer-inner-failure-outer-success
-  "Inner failure dumps inner debug; outer still filters normally."
+(5am:test test-nested-buffer-inner-error-handled-by-outer
+  "Nested scope is a no-op; handled error inside is normal exit for outer."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
     (with-log-buffer (*logger*)
@@ -2792,19 +2792,17 @@
         (cl:error () nil))
       (bark:info "outer-continues"))
     (let ((result (get-output-stream-string out)))
-      ;; Inner debug visible (inner scope errored)
-      (5am:is-true (search "inner-debug" result))
-      ;; Outer debug hidden (outer scope succeeded)
+      ;; Error was handled → normal exit → debug entries filtered out
       (5am:is-false (search "outer-debug" result))
-      ;; Both outer infos visible
+      (5am:is-false (search "inner-debug" result))
+      ;; Info entries visible
       (5am:is-true (search "outer-info" result))
       (5am:is-true (search "outer-continues" result)))))
 
-(5am:test test-nested-buffer-root-logger-preserved
-  "*root-logger* is set by outermost scope and preserved through nesting."
+(5am:test test-nested-buffer-deeply-nested-noop
+  "Deeply nested with-log-buffer scopes are all no-ops except the outermost."
   (let* ((out (make-string-output-stream))
          (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
-    ;; Three levels deep — all should flush to same root
     (with-log-buffer (*logger*)
       (with-log-buffer (*logger*)
         (with-log-buffer (*logger*)
