@@ -249,6 +249,14 @@
     (setf (logger-level logger) level-val)
     (wire-level-fns logger level-val #'make-log-fn)))
 
+(defun level-enabled-p (logger level)
+  "Return T if LEVEL is enabled on LOGGER. NIL when LOGGER is nil.
+Checks the level threshold only — does not account for sampling,
+per-destination filters, or compile-time elimination."
+  (and logger
+       (>= (level-from-keyword level)
+           (logger-level logger))))
+
 ;;; --- Sampling API ---
 
 (defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))

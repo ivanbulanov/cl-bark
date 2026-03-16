@@ -403,6 +403,35 @@
     (5am:is (eq #'noop (logger-error-fn lgr)))
     (5am:is (eq #'noop (logger-fatal-fn lgr)))))
 
+;;; --- Level Predicate ---
+
+(5am:test test-level-enabled-p-basic
+  "level-enabled-p returns T for enabled levels, NIL for disabled."
+  (let ((lgr (make-logger :level :info)))
+    (5am:is-true (bark:level-enabled-p lgr :info))
+    (5am:is-true (bark:level-enabled-p lgr :warn))
+    (5am:is-true (bark:level-enabled-p lgr :error))
+    (5am:is-true (bark:level-enabled-p lgr :fatal))
+    (5am:is-false (bark:level-enabled-p lgr :debug))
+    (5am:is-false (bark:level-enabled-p lgr :trace))))
+
+(5am:test test-level-enabled-p-nil-logger
+  "level-enabled-p returns NIL when logger is nil."
+  (5am:is-false (bark:level-enabled-p nil :info))
+  (5am:is-false (bark:level-enabled-p nil :debug)))
+
+(5am:test test-level-enabled-p-reflects-set-level
+  "level-enabled-p reflects runtime level changes via set-level."
+  (let ((lgr (make-logger :level :info)))
+    (5am:is-false (bark:level-enabled-p lgr :debug))
+    (bark:set-level lgr :debug)
+    (5am:is-true (bark:level-enabled-p lgr :debug))))
+
+(5am:test test-level-enabled-p-invalid-level
+  "level-enabled-p signals type-error for invalid level keyword."
+  (let ((lgr (make-logger :level :info)))
+    (5am:signals type-error (bark:level-enabled-p lgr :bogus))))
+
 (5am:test test-child-logger
   "Create parent with chindings, create child with more bindings, verify concatenation."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))

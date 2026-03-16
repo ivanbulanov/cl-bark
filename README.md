@@ -94,6 +94,23 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 
 Detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
 
+### Level Predicate
+
+```lisp
+(bark:level-enabled-p logger level) -> boolean
+```
+
+Returns `t` if a log call at `level` would be dispatched (not noop'd) on `logger`. Use it to guard expensive argument computation:
+
+```lisp
+(when (bark:level-enabled-p *logger* :debug)
+  (bark:debug "state dump" :snapshot (expensive-serialize state)))
+```
+
+When `logger` is `nil`, returns `nil` — consistent with the logging macros.
+
+Checks the level threshold only. Does not account for sampling, per-destination filters, or compile-time elimination.
+
 ### Lifecycle
 
 ```lisp

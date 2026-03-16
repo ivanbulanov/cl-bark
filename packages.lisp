@@ -27,7 +27,7 @@
    ;; logger
    #:*logger* #:*log-context* #:*compile-time-max-level*
    #:logger #:logger-p
-   #:make-logger #:make-child #:set-level
+   #:make-logger #:make-child #:set-level #:level-enabled-p
    #:compose-field-transforms
    #:make-windowed-counter #:make-level-sampler #:set-level-sampling
    #:windowed-counter-initial #:windowed-counter-thereafter
