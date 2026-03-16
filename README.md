@@ -893,7 +893,7 @@ Every log call formats the message to a finished string in the caller's thread, 
 | Writer drain (per message) | `write-string` + `force-output` |
 | Field transform (per field) | One `funcall` when non-nil |
 
-Run `(bark-bench:run :suite :internal)` to measure on your hardware.
+See [Benchmarks](#benchmarks) to measure on your hardware.
 
 ## Globals
 
