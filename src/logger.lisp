@@ -198,7 +198,9 @@ hash decision."
                          (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
                          blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                          level-sampler consistent)
-  "Create a new root logger.
+  "Create a root logger. Multiple root loggers can coexist — each owns its own
+output and writer thread(s). Assign to *logger* for implicit use by logging
+macros, or pass explicitly as the first argument to bark:info etc.
 
 OUTPUT (stream, function, tee-output, or NIL):
   Stream/NIL — wrapped in async-output (background writer thread + ring buffer).
