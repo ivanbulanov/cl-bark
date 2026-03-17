@@ -5,12 +5,20 @@
 ;;; --- Buffer entry ---
 
 (defstruct (buffer-entry (:constructor make-buffer-entry))
-  "A single buffered log entry, captured for deferred emission."
-  (level     0   :type fixnum)
-  (message   nil :type (or null string))
-  (fields    nil :type list)
-  (context   nil :type list)
-  (timestamp 0   :type (integer 0)))
+  "A single buffered log entry, captured for deferred emission.
+   Slots: LEVEL (fixnum), MESSAGE (string or nil), FIELDS (plist of per-call fields),
+   CONTEXT (alist snapshot of dynamic context), TIMESTAMP (millisecond unix timestamp)."
+  (level     0   :type fixnum          :read-only t)
+  (message   nil :type (or null string) :read-only t)
+  (fields    nil :type list            :read-only t)
+  (context   nil :type list            :read-only t)
+  (timestamp 0   :type (integer 0)     :read-only t))
+
+(setf (documentation 'buffer-entry-level 'function) "Numeric log level of the buffered entry."
+      (documentation 'buffer-entry-message 'function) "Log message string, or nil."
+      (documentation 'buffer-entry-fields 'function) "Per-call fields plist (the &rest args passed to bark:info etc.)."
+      (documentation 'buffer-entry-context 'function) "Alist snapshot of dynamic context at capture time."
+      (documentation 'buffer-entry-timestamp 'function) "Millisecond unix timestamp from the original log call.")
 
 ;;; --- Buffer logger ---
 

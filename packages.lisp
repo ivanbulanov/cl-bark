@@ -2,6 +2,7 @@
 
 (defpackage #:bark
   (:use #:cl)
+  (:documentation "High-performance structured logger for Common Lisp. Async I/O via lock-free ring buffers, JSON/logfmt/pretty formatters, multi-output fan-out, child loggers with pre-serialized context, sampling, and request-scoped buffering.")
   (:shadow #:debug #:error #:trace #:warn)
   (:export
    ;; levels
@@ -21,8 +22,7 @@
    #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
    ;; ring-buffer
    #:+min-ring-capacity+ #:+default-buffer-capacity+
-   ;; writer / output
-   #:async-output
+   ;; output
    #:make-tee #:tee
    ;; logger
    #:*logger* #:*log-context* #:*compile-time-max-level*
@@ -41,5 +41,4 @@
    #:*root-logger*
    #:with-log-buffer
    #:buffer-entry #:buffer-entry-level #:buffer-entry-message
-   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
-   #:make-buffer-entry))
+   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp))

@@ -9,6 +9,10 @@
   (condition nil :type condition :read-only t)
   (stack     nil :type list     :read-only t))
 
+(setf (documentation 'captured-error-p 'function) "Return T if OBJECT is a captured-error."
+      (documentation 'captured-error-condition 'function) "The original condition object."
+      (documentation 'captured-error-stack 'function) "List of stack frames captured at snapshot time.")
+
 (defun internal-frame-p (frame)
   "Return T if FRAME belongs to BARK or DISSECT internals."
   (let ((call (dissect:call frame)))

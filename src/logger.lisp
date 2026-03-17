@@ -21,6 +21,13 @@
   (key-fn nil :type function    :read-only t)
   (rate     1 :type (integer 1) :read-only t))
 
+(setf (documentation 'windowed-counter-initial 'function) "Number of messages always passed at the start of each window."
+      (documentation 'windowed-counter-thereafter 'function) "After INITIAL, pass 1-in-THEREAFTER messages. 0 means drop all after initial."
+      (documentation 'windowed-counter-window-ticks 'function) "Window duration in internal-time-units.")
+
+(setf (documentation 'consistent-sampler-key-fn 'function) "Function (lambda (raw-bindings) ...) returning a hashable key, or nil to skip."
+      (documentation 'consistent-sampler-rate 'function) "Keep 1-in-RATE messages with matching key hash.")
+
 (declaim (inline mix-hash consistent-hash-keep-p windowed-allow-p))
 
 (defun mix-hash (h)
@@ -75,6 +82,8 @@
   (warn-fn         #'noop :type function)
   (error-fn        #'noop :type function)
   (fatal-fn        #'noop :type function))
+
+(setf (documentation 'logger-p 'function) "Return T if OBJECT is a logger.")
 
 (defvar *logger* nil "The current bark logger.")
 
