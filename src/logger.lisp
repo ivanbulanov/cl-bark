@@ -198,14 +198,43 @@ hash decision."
                          (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
                          blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                          level-sampler consistent)
-  "Create a new logger. OUTPUT determines async vs sync behavior:
-   - Stream or NIL: wrapped in async-output (background thread + ring buffer).
-   - Function: called synchronously — no thread, no buffer.
-   - tee-output: used as-is (already contains async-outputs).
-   CONTEXT, when provided, is a plist of static context fields.
-   Async-specific parameters (CAPACITY, ON-DROP, BLOCKING, BLOCK-TIMEOUT,
-   ON-BLOCK-TIMEOUT) are only valid for stream outputs. Passing them with a
-   function or tee-output signals an error."
+  "Create a new root logger.
+
+OUTPUT (stream, function, tee-output, or NIL):
+  Stream/NIL — wrapped in async-output (background writer thread + ring buffer).
+  NIL defaults to *error-output*. Function — called synchronously, no thread.
+  tee-output — from bark:tee or bark:make-tee, used as-is.
+
+LEVEL (keyword or fixnum, default :info):
+  Minimum log level. One of :trace :debug :info :warn :error :fatal.
+
+FORMATTER (function, default #'json-formatter):
+  Formatting function with signature (level chindings raw-bindings context
+  message fields) -> string. Use make-json-formatter, make-logfmt-formatter,
+  or make-pretty-formatter for customization.
+
+CONTEXT (plist or NIL):
+  Static context fields attached to every log entry, e.g. '(:name \"myapp\").
+  Pre-serialized at creation time — zero per-call cost.
+
+FIELD-TRANSFORM (function or NIL):
+  Function (lambda (key value) ...) applied to every field before serialization.
+  Return the (possibly modified) value, or (values nil nil) to drop the field.
+
+CAPACITY (fixnum, default 8192): Ring buffer size in messages. Stream output only.
+ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
+  dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
+BLOCKING (boolean): When T, callers block on a full buffer instead of dropping.
+BLOCK-TIMEOUT (real, default 5.0): Seconds to wait when blocking before giving up.
+ON-BLOCK-TIMEOUT (function or NIL): Called when block-timeout expires.
+
+LEVEL-SAMPLER (simple-vector or NIL): From make-level-sampler — per-level
+  windowed counters for rate limiting.
+CONSISTENT (consistent-sampler or NIL): From make-consistent-sampler —
+  deterministic hash-based sampling.
+
+Async parameters (CAPACITY through ON-BLOCK-TIMEOUT) are only valid with stream
+output. Passing them with a function or tee-output signals an error."
   (when (and (or (functionp output) (tee-output-p output))
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
