@@ -518,12 +518,8 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
 
 (macrolet ((define-log-macro (name accessor)
              `(defmacro ,name (&rest args)
-                "Log at the appropriate level. Three call forms:
-  (bark:info \"msg\" :key value)        — log through *logger*
-  (bark:info logger \"msg\" :key value) — log through explicit logger
-  (bark:info :key value)               — fields only, no message, through *logger*
-When *logger* is NIL (or explicit logger is NIL), the call is a no-op.
-Calls below *compile-time-max-level* are eliminated at compile time."
+                ,(format nil "Log at ~A level. See bark:info for call forms and semantics."
+                         (string-upcase name))
                 (when args
                   (if (keywordp (car args))
                       ;; Compile-time: literal keyword first → fields-only, use *logger*
@@ -560,3 +556,19 @@ Calls below *compile-time-max-level* are eliminated at compile time."
   (define-log-macro warn  logger-warn-fn)
   (define-log-macro error logger-error-fn)
   (define-log-macro fatal logger-fatal-fn))
+
+(setf (documentation 'info 'function)
+      "Log at INFO level. All six logging macros (trace, debug, info, warn, error,
+fatal) share the same calling convention:
+
+  (bark:info \"msg\" :key value ...)       — log through *logger*
+  (bark:info logger \"msg\" :key value ...) — log through an explicit logger
+  (bark:info :key value ...)               — fields only, no message, via *logger*
+
+The first argument is dispatched at runtime: if it satisfies logger-p, it is
+used as the logger; if it is a keyword, it starts a fields-only plist with no
+message; otherwise it is the message string.
+
+When *logger* is NIL (or the explicit logger is NIL), the call is a no-op —
+logging macros never signal. Calls below *compile-time-max-level* are
+eliminated entirely at compile time.")
