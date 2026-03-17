@@ -101,5 +101,9 @@
 
 (let ((fmt (make-logfmt-formatter)))
   (defun logfmt-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry as logfmt (key=value pairs). Default keys: level/ts/msg."
+    "Format a log entry as a logfmt line (key=value pairs) with default settings.
+Equivalent to (funcall (make-logfmt-formatter) ...) with no customization.
+Field values: strings, numbers, symbols, pathnames, and conditions serialize
+as scalars. Boolean T emits a bare key (no =value). Collections and other
+types produce a \"<type>\" placeholder. See docs/value-serialization.md."
     (funcall fmt level chindings raw-bindings context message fields)))

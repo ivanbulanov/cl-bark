@@ -101,5 +101,9 @@
 
 (let ((fmt (make-pretty-formatter)))
   (defun pretty-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry with ANSI colors for REPL/development use."
+    "Format a log entry as colored human-readable text for REPL/development use.
+Equivalent to (funcall (make-pretty-formatter) ...) with no customization.
+Field values are printed via PRINC with *print-level*/*print-length* bound to
+*max-pretty-depth*/*max-pretty-length*. Conditions and captured-errors get
+special formatting with type, message, and stack traces."
     (funcall fmt level chindings raw-bindings context message fields)))

@@ -285,5 +285,9 @@
 
 (let ((fmt (make-json-formatter)))
   (defun json-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry as a JSON line. Default keys: level/ts/msg, numeric level, unix-ms."
+    "Format a log entry as a single JSON line with default settings.
+Equivalent to (funcall (make-json-formatter) ...) with no customization.
+Field values: strings, numbers, booleans, symbols, pathnames, lists, vectors,
+hash-tables, conditions, and captured-errors serialize to JSON natively.
+Unsupported types produce a \"<type>\" placeholder. See docs/value-serialization.md."
     (funcall fmt level chindings raw-bindings context message fields)))
