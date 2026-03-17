@@ -24,10 +24,10 @@
 (declaim (ftype (function nil (values integer &optional)) current-log-timestamp-ms))
 
 (defun current-log-timestamp-ms ()
-  "Return the effective log timestamp in milliseconds.
-   During buffer replay, returns the captured timestamp from the original log call.
-   Otherwise, returns the current wall-clock time.
-   User-defined formatters should call this for correct timestamps during buffer replay."
+  "Return the effective log timestamp in milliseconds since Unix epoch.
+Custom formatters MUST call this instead of computing their own timestamp.
+During with-log-buffer replay, this returns the original log-call timestamp;
+a raw clock read would incorrectly return the flush time instead."
   (get-unix-timestamp-ms))
 
 (defun emit-timestamp (format stream)

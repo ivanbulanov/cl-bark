@@ -428,7 +428,7 @@ All types are accepted — no log call ever signals `type-error`. Ratios are coe
 
 #### Formatter Factories
 
-The built-in formatters (`json-formatter`, `logfmt-formatter`, `pretty-formatter`) are zero-config convenience functions with fixed defaults. When you need to match an external system's expected format — different field names, timestamp format, or level encoding — use the corresponding factory function to create a customized formatter. Factories return closures with the same signature as the built-ins, with all configuration pre-computed at creation time (no per-call overhead). You can also write an entirely custom formatter — any function with the signature `(level chindings raw-bindings context message fields)` that returns a string works as a `:formatter`.
+The built-in formatters (`json-formatter`, `logfmt-formatter`, `pretty-formatter`) are zero-config convenience functions with fixed defaults. When you need to match an external system's expected format — different field names, timestamp format, or level encoding — use the corresponding factory function to create a customized formatter. Factories return closures with the same signature as the built-ins, with all configuration pre-computed at creation time (no per-call overhead). You can also write an entirely custom formatter — any function with the signature `(level chindings raw-bindings context message fields)` that returns a string works as a `:formatter`. Custom formatters must call `bark:current-log-timestamp-ms` for timestamps instead of reading the clock directly — during `with-log-buffer` replay, this function returns the original log-call timestamp rather than the flush time.
 
 **`make-json-formatter`**
 
