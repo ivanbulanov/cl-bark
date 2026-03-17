@@ -290,7 +290,10 @@ per-destination filters, or compile-time elimination."
                             :window-start (get-internal-real-time))))
 
 (defun make-level-sampler (&key trace debug info warn error fatal)
-  "Create a level-sampler vector. Each argument must be a windowed-counter or nil."
+  "Create a level-sampler vector for per-level windowed sampling.
+Each keyword argument corresponds to a log level and accepts a windowed-counter
+(from make-windowed-counter) or NIL (no sampling at that level). Levels without
+a counter pass all messages. Pass to :level-sampler on make-logger."
   (flet ((check (name val)
            (when (and val (not (windowed-counter-p val)))
              (cl:error "~A must be a windowed-counter or nil, got ~A" name (type-of val)))))
