@@ -37,8 +37,7 @@ docs:
 	  --eval '(ql:quickload "staple" :silent t)' \
 	  --eval '(asdf:load-system :cl-bark)' \
 	  --eval '(staple:generate :cl-bark :output-directory #p"docs/api/" :if-exists :supersede :subsystems nil)'
-	@sed -i 's|<title>Cl Bark</title>|<title>cl-bark</title>|;s|<h1>cl bark</h1>|<h1>cl-bark</h1>|' docs/api/index.html
-	@python3 -c 'import re,sys;h=open(sys.argv[1]).read();h=re.sub(r"<li>\s*<article[^>]*id=\"SOURCE-TRANSFORM[^\"]*\".*?</article>\s*</li>","",h,flags=re.DOTALL);open(sys.argv[1],"w").write(h)' docs/api/index.html
+	@python3 docs/fix-staple.py docs/api/index.html
 	@echo "Generated docs/api/index.html"
 
 clean:
