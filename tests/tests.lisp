@@ -33,7 +33,7 @@
    #:noop #:make-list-collector
    #:current-log-timestamp-ms #:*override-timestamp*
    ;; Buffer entry
-   #:buffer-entry #:make-buffer-entry
+   #:make-buffer-entry
    #:buffer-entry-level #:buffer-entry-message
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
    #:make-buffer-logger

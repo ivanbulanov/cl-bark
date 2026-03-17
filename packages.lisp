@@ -9,8 +9,7 @@
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
    ;; conditions
    #:capture
-   #:captured-error #:captured-error-p
-   #:captured-error-condition #:captured-error-stack
+   #:captured-error-p #:captured-error-condition #:captured-error-stack
    ;; timestamps
    #:current-log-timestamp-ms
    ;; json
@@ -39,5 +38,5 @@
    #:with-context #:with-captured-logs
    ;; buffer
    #:with-log-buffer
-   #:buffer-entry #:buffer-entry-level #:buffer-entry-message
+   #:buffer-entry-level #:buffer-entry-message
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp))
