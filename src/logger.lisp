@@ -291,7 +291,8 @@ output. Passing them with a function or tee-output signals an error."
   (values))
 
 (defun set-level (logger level)
-  "Set the minimum log level for LOGGER. Swaps function slots."
+  "Set the minimum log level for LOGGER. Accepts a keyword (:trace through :fatal)
+or a fixnum level constant. Takes effect immediately."
   (let ((level-val (etypecase level
                      (fixnum level)
                      (keyword (level-from-keyword level)))))
@@ -309,8 +310,12 @@ per-destination filters, or compile-time elimination."
 ;;; --- Sampling API ---
 
 (defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))
-  "Create a windowed counter. INITIAL messages per window always pass, then 1-in-THEREAFTER.
-   THEREAFTER=0 means hard cap (drop all after initial burst)."
+  "Create a windowed counter for rate-limiting log messages.
+INITIAL (fixnum, default 5): messages always passed at the start of each window.
+THEREAFTER (fixnum, default 100): after INITIAL, pass 1-in-THEREAFTER. 0 means
+  hard cap (drop all after initial burst).
+WINDOW-SECONDS (real, default 1): window duration in seconds. Counter resets when
+  the window expires."
   (let ((ticks (round (* window-seconds internal-time-units-per-second))))
     (when (> ticks most-positive-fixnum)
       (cl:error "window-seconds ~A produces ~A ticks, exceeding fixnum range"
@@ -362,7 +367,8 @@ consistent sampling and fall through to the windowed counter."
                (return)))))))))
 
 (defun set-consistent (logger consistent-sampler)
-  "Set/replace the consistent sampler on LOGGER (nil to remove)."
+  "Set or replace the consistent sampler on LOGGER.
+CONSISTENT-SAMPLER is a sampler from make-consistent-sampler, or NIL to disable."
   (setf (logger-consistent logger) consistent-sampler))
 
 (declaim (ftype (function (logger &key (:context list)
@@ -371,12 +377,17 @@ consistent sampling and fall through to the windowed counter."
                           (values logger &optional)) make-child))
 
 (defun make-child (parent &key context level field-transform)
-  "Create a child logger from PARENT.
-   CONTEXT, when provided, is a plist of static fields pre-serialized at creation time.
-   Inherits the parent's formatter, output, level-sampler, and consistent slots
-   (snapshots at creation time). LEVEL overrides the inherited level; when omitted,
-   the child inherits the parent's current level. FIELD-TRANSFORM composes with the
-   parent's transform (child runs after parent)."
+  "Create a child logger that shares PARENT's output and formatter.
+
+PARENT (logger): the root or child logger to derive from.
+CONTEXT (plist or NIL): static fields pre-serialized at creation time, appended
+  to the parent's context. Zero per-call cost.
+LEVEL (keyword, fixnum, or NIL): minimum log level. NIL inherits from parent.
+FIELD-TRANSFORM (function or NIL): composes with parent's transform (parent runs
+  first, then child). Applied to CONTEXT fields at creation time.
+
+Inherits the parent's formatter, output, level-sampler, and consistent sampler
+(snapshots at creation time — later changes to the parent are not reflected)."
   (let* ((parent-transform (logger-field-transform parent))
          (composed-transform (compose-field-transforms field-transform parent-transform))
          (effective-bindings (if (and context composed-transform)
@@ -507,8 +518,12 @@ consistent sampling and fall through to the windowed counter."
 
 (macrolet ((define-log-macro (name accessor)
              `(defmacro ,name (&rest args)
-                "Log at the appropriate level. First arg can be a logger, a message string,
-                 or a keyword (starting a fields-only plist with no message)."
+                "Log at the appropriate level. Three call forms:
+  (bark:info \"msg\" :key value)        — log through *logger*
+  (bark:info logger \"msg\" :key value) — log through explicit logger
+  (bark:info :key value)               — fields only, no message, through *logger*
+When *logger* is NIL (or explicit logger is NIL), the call is a no-op.
+Calls below *compile-time-max-level* are eliminated at compile time."
                 (when args
                   (if (keywordp (car args))
                       ;; Compile-time: literal keyword first → fields-only, use *logger*

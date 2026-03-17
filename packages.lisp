@@ -19,8 +19,6 @@
    ;; formatters
    #:json-formatter #:logfmt-formatter #:pretty-formatter
    #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
-   ;; ring-buffer
-   #:+min-ring-capacity+ #:+default-buffer-capacity+
    ;; output
    #:make-tee #:tee
    ;; logger

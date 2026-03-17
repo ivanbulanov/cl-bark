@@ -32,7 +32,10 @@
 
 (defun capture (condition)
   "Snapshot CONDITION with the current stack trace for structured logging.
-   Call inside HANDLER-BIND for a meaningful trace (stack still live).
-   In HANDLER-CASE the trace reflects the handler's stack, not the error origin."
+Returns an opaque captured-error (testable with captured-error-p, readable
+with captured-error-condition and captured-error-stack). Pass the result as
+a log field value — formatters serialize it with type, message, and stack.
+Call inside HANDLER-BIND for a meaningful trace (stack still live).
+In HANDLER-CASE the trace reflects the handler's stack, not the error origin."
   (%make-captured-error :condition condition
                         :stack (strip-internal-frames (dissect:stack))))
