@@ -150,7 +150,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 | `tee-output` | Used as-is (already contains async-outputs internally) |
 | NIL | Defaults to `*error-output*`, wrapped in async-output |
 
-`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL.
+`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals an error.
 
 `:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields. Use `:context '(:name "myapp")` instead of the old `:name` parameter.
 
@@ -610,6 +610,38 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **Compile-time elimination:** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` eliminates debug calls, they cannot be retroactively surfaced.
 
+### Feature Interactions
+
+#### Disabled by design
+
+**Buffering disables sampling.** Inside `with-log-buffer`, both windowed counters and consistent samplers are bypassed. The buffer captures every log call at or above the capture level. Sampling during capture would lose entries that the `on-flush` callback or error-triggered flush might need. See [docs/sampling.md](docs/sampling.md) for details on the two sampling strategies.
+
+**Nested buffering is a no-op.** If already inside a `with-log-buffer` scope, inner scopes run their body directly. The outermost scope controls capture level and flush policy.
+
+#### Incompatible — signals error
+
+**`:level` + `:filter` on the same tee destination.** `:level` is shorthand for a level-threshold filter. Specify one or the other.
+
+**Async parameters with function or tee output.** `:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, and `:on-block-timeout` on `make-logger` are only valid with stream output. Function outputs are synchronous (no ring buffer or writer thread). Tee outputs configure these per-destination.
+
+#### Contradictory intent
+
+**Sampling + blocking mode.** Blocking mode (`:blocking t`) exists to prevent message loss — audit trails, compliance logs, billing events. Sampling intentionally drops messages. Do not configure both on the same logger: sampling defeats the guarantee blocking mode provides.
+
+#### Behavioral notes
+
+**Compile-time elimination limits buffering.** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` strips debug/trace calls at compile time, the buffer cannot retroactively surface them at runtime.
+
+**Compile-time elimination is invisible to `level-enabled-p`.** The predicate checks the runtime level threshold only. It can return true for a level whose log calls were eliminated at compile time. If you use both, ensure `*compile-time-max-level*` and your runtime level are consistent.
+
+**Tee filters do not see context.** Per-destination `:filter` functions receive the log level (integer) and per-call fields only — not static context (child logger bindings) or dynamic context (`with-context`). Context is part of formatting, not routing. To route based on identity, use separate loggers.
+
+**Sampling runs before field transforms.** A sampled-out message never reaches the field transform. This means transforms cannot influence sampling decisions — sampling is based solely on the consistent hash and windowed count.
+
+**Sampling runs before tee filters.** A message dropped by sampling never reaches any tee destination's filter. Tee filters cannot recover sampled-out messages.
+
+**Buffer `on-flush` sees untransformed fields.** The buffer captures raw field values. The root logger's field transform is applied after `on-flush` selects which entries to emit, during the actual flush to output. Write `on-flush` callbacks against raw field names and values.
+
 ## Benchmarks
 
 ### Running
@@ -874,6 +906,7 @@ All conditions are signaled at configuration time. Logging macros never signal �
 | `make-tee` | `simple-error` | Both `:filter` and `:level` on the same destination |
 | `tee` | `simple-error` | Same, at macro expansion time |
 | `make-logger` | `simple-error` | `:output` is not a stream, function, `tee-output`, or `nil` |
+| `make-logger` | `simple-error` | Async parameters with a function or `tee-output` |
 | `stop` | `simple-error` | Called on a child logger |
 | `flush` | `simple-error` | Called on a stopped logger |
 

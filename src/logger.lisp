@@ -188,15 +188,17 @@
    - tee-output: used as-is (already contains async-outputs).
    CONTEXT, when provided, is a plist of static context fields.
    Async-specific parameters (CAPACITY, ON-DROP, BLOCKING, BLOCK-TIMEOUT,
-   ON-BLOCK-TIMEOUT) are silently ignored for function outputs.
-   Passing them with a tee-output signals an error."
-  (when (and (tee-output-p output)
+   ON-BLOCK-TIMEOUT) are only valid for stream outputs. Passing them with a
+   function or tee-output signals an error."
+  (when (and (or (functionp output) (tee-output-p output))
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
                  (not (eq on-drop #'default-on-drop))))
     (cl:error "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
-               :block-timeout, :on-block-timeout) with a tee-output. ~
-               Configure these per-destination in bark:tee."))
+               :block-timeout, :on-block-timeout) with a ~:[function~;tee-output~]. ~
+               ~:*~:[Function outputs are synchronous — async parameters do not apply.~;~
+               Configure these per-destination in bark:tee.~]"
+              (tee-output-p output)))
   (let* ((actual-output (cond
                           ((functionp output) output)
                           ((tee-output-p output) output)
