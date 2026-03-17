@@ -299,7 +299,11 @@ per-destination filters, or compile-time elimination."
   (vector nil trace debug info warn error fatal))
 
 (defun make-consistent-sampler (&key key-fn (rate 1))
-  "Create a consistent sampler. KEY-FN extracts a key from raw-bindings. RATE is 1-in-N."
+  "Create a consistent sampler. RATE is 1-in-N (keep one, drop N-1).
+KEY-FN is (lambda (raw-bindings) ...) where RAW-BINDINGS is the logger's
+static context plist (set via :context on make-logger/make-child). It should
+return a string, symbol, or number for deterministic hashing, or NIL to skip
+consistent sampling and fall through to the windowed counter."
   (check-type key-fn function)
   (when (< rate 1)
     (cl:error "consistent-sampler rate must be >= 1, got ~A" rate))
