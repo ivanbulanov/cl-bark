@@ -38,7 +38,6 @@
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
    ;; buffer
-   #:*root-logger*
    #:with-log-buffer
    #:buffer-entry #:buffer-entry-level #:buffer-entry-message
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp))

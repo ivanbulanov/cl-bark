@@ -38,7 +38,7 @@
    #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
    #:make-buffer-logger
    #:flush-buffer
-   #:with-log-buffer #:*root-logger*
+   #:with-log-buffer
    ;; Field transform
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
@@ -867,7 +867,7 @@
       (5am:is (= 0 (length (funcall results-fn))))
       ;; With buffer: everything captured (sampling bypassed)
       (let ((bark:*logger* lgr)
-            (bark:*root-logger* nil))
+            (bark::*root-logger* nil))
         (bark:with-log-buffer (bark:*logger* :level :debug)
           (dotimes (i 10)
             (bark:debug "buffered"))))

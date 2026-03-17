@@ -979,7 +979,6 @@ See [Benchmarks](#benchmarks) to measure on your hardware.
 | `bark:*max-pretty-length*` | `20` | Bound as `*print-length*` in pretty-formatter (nil = unlimited) |
 | `bark:*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output (nil = unlimited) |
 | `bark:*max-pretty-stack-frames*` | `20` | Max stack frames in pretty condition output (nil = unlimited) |
-| `bark:*root-logger*` | `nil` | Root logger for buffer scopes (managed by `with-log-buffer`) |
 
 ## Dependencies
 
