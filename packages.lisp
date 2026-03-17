@@ -29,10 +29,7 @@
    #:make-logger #:make-child #:set-level #:level-enabled-p
    #:compose-field-transforms
    #:make-windowed-counter #:make-level-sampler #:set-level-sampling
-   #:windowed-counter-initial #:windowed-counter-thereafter
-   #:windowed-counter-window-ticks
    #:make-consistent-sampler #:set-consistent
-   #:consistent-sampler-key-fn #:consistent-sampler-rate
    #:flush #:stop #:register-exit-hook
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
