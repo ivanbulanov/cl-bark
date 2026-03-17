@@ -27,7 +27,6 @@
    #:*logger* #:*log-context* #:*compile-time-max-level*
    #:logger-p
    #:make-logger #:make-child #:set-level #:level-enabled-p
-   #:compose-field-transforms
    #:make-windowed-counter #:make-level-sampler #:set-level-sampling
    #:make-consistent-sampler #:set-consistent
    #:flush #:stop #:register-exit-hook
