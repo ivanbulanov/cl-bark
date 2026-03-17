@@ -25,7 +25,14 @@
       (documentation 'windowed-counter-thereafter 'function) "After INITIAL, pass 1-in-THEREAFTER messages. 0 means drop all after initial."
       (documentation 'windowed-counter-window-ticks 'function) "Window duration in internal-time-units.")
 
-(setf (documentation 'consistent-sampler-key-fn 'function) "Function (lambda (raw-bindings) ...) returning a hashable key, or nil to skip."
+(setf (documentation 'consistent-sampler-key-fn 'function)
+      "Function (lambda (raw-bindings) ...) that extracts a sampling key from the
+logger's static bindings plist. Return a string, symbol, or number for
+deterministic sampling (passed to SXHASH; these types are stable across SBCL
+sessions). Return NIL to skip consistent sampling and fall through to the
+windowed counter. Do not return 0 or the empty string as a \"no key\" sentinel —
+they are valid keys that will produce a deterministic (and likely always-keep)
+hash decision."
       (documentation 'consistent-sampler-rate 'function) "Keep 1-in-RATE messages with matching key hash.")
 
 (declaim (inline mix-hash consistent-hash-keep-p windowed-allow-p))
