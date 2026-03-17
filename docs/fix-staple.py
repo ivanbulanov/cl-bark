@@ -34,4 +34,27 @@ def dedent_pre(m):
 
 html = re.sub(r"<pre>(.*?)</pre>", dedent_pre, html, flags=re.DOTALL)
 
+# Rename SBCL's generic "INSTANCE" parameter to the struct name for accessors.
+# defstruct generates accessors with (INSTANCE) — replace with the struct name.
+STRUCT_PREFIXES = {
+    "BUFFER-ENTRY-": "ENTRY",
+    "CAPTURED-ERROR-": "CAPTURED-ERROR",
+    "WINDOWED-COUNTER-": "COUNTER",
+    "CONSISTENT-SAMPLER-": "SAMPLER",
+}
+
+def fix_accessor_param(m):
+    article = m.group(0)
+    func_id = m.group(1)
+    for prefix, param_name in STRUCT_PREFIXES.items():
+        if prefix in func_id:
+            return article.replace(
+                '<li class="argument">INSTANCE</li>',
+                f'<li class="argument">{param_name}</li>')
+    return article
+
+html = re.sub(
+    r'<article class="definition function callable" id="(FUNCTION BARK:[^"]+)".*?</article>',
+    fix_accessor_param, html, flags=re.DOTALL)
+
 open(path, "w").write(html)
