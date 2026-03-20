@@ -120,6 +120,26 @@
                   (write-json-escaped-string (format nil "col1~ccol2" #\Tab) s))))
     (5am:is-true (search "\\t" result))))
 
+(5am:test test-json-escape-non-simple-string
+  "Non-simple strings (adjustable, fill-pointer) must not signal type errors.
+Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
+  (let* ((adjustable (make-array 10 :element-type 'character
+                                    :adjustable t :fill-pointer 0))
+         (_ (loop for c across "hello" do (vector-push-extend c adjustable)))
+         (result (with-output-to-string (s)
+                   (write-json-escaped-string adjustable s))))
+    (declare (ignore _))
+    (5am:is (string= "hello" result))))
+
+(5am:test test-emit-json-value-non-simple-string
+  "Non-simple strings passed through emit-json-value must work end-to-end."
+  (let* ((adjustable (make-array 10 :element-type 'character
+                                    :adjustable t :fill-pointer 0))
+         (_ (loop for c across "test" do (vector-push-extend c adjustable)))
+         (r (with-output-to-string (s) (emit-json-value s adjustable))))
+    (declare (ignore _))
+    (5am:is (string= "\"test\"" r))))
+
 (5am:test test-emit-json-value-types
   "Test emit-json-value for string, integer, float, boolean, null, symbol, vector."
   (let ((r (with-output-to-string (s) (emit-json-value s "hello"))))
@@ -3253,6 +3273,17 @@
                   (bark::logfmt-write-bare-or-quoted s "back\\slash"))))
     ;; Backslash should appear in output (exact form depends on whether we escape)
     (5am:is-true (search "\\" result))))
+
+(5am:test test-logfmt-bare-or-quoted-non-simple-string
+  "Non-simple strings (adjustable, fill-pointer) must not signal type errors.
+Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
+  (let* ((adjustable (make-array 10 :element-type 'character
+                                    :adjustable t :fill-pointer 0))
+         (_ (loop for c across "hello" do (vector-push-extend c adjustable)))
+         (result (with-output-to-string (s)
+                   (bark::logfmt-write-bare-or-quoted s adjustable))))
+    (declare (ignore _))
+    (5am:is (string= "hello" result))))
 
 (5am:test test-logfmt-value-newline-in-string
   "logfmt values containing newlines are quoted and newlines escaped."

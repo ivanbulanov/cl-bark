@@ -21,8 +21,9 @@
 
 (defun write-json-escaped-string (string stream)
   "Write STRING to STREAM with JSON escaping."
-  (declare (optimize (speed 3) (safety 1))
-           (type simple-string string))
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((string (coerce string 'simple-string)))
+    (declare (type simple-string string))
   (loop for c of-type character across string do
     (case c
       (#\" (write-string "\\\"" stream))
@@ -32,7 +33,7 @@
       (#\Tab (write-string "\\t" stream))
       (t (if (< (char-code c) 32)
              (format stream "\\u~4,'0X" (char-code c))
-             (write-char c stream))))))
+             (write-char c stream)))))))
 
 (declaim (inline write-json-string))
 (defun write-json-string (stream string)

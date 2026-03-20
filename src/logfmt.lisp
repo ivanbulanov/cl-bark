@@ -12,26 +12,27 @@
 (defun logfmt-write-bare-or-quoted (stream string)
   "Write STRING to STREAM, quoting if it contains space, quote, equals, backslash,
    or control characters. Escapes quotes, backslashes, newlines, returns, and tabs."
-  (declare (optimize (speed 3) (safety 1))
-           (type simple-string string))
-  (let ((needs-quoting nil))
-    (loop for c of-type character across string
-          when (or (char= c #\Space) (char= c #\") (char= c #\=)
-                   (char= c #\\) (< (char-code c) 32))
-            do (setf needs-quoting t) (loop-finish))
-    (if needs-quoting
-        (progn
-          (write-char #\" stream)
-          (loop for c of-type character across string do
-            (case c
-              (#\" (write-string "\\\"" stream))
-              (#\\ (write-string "\\\\" stream))
-              (#\Newline (write-string "\\n" stream))
-              (#\Return (write-string "\\r" stream))
-              (#\Tab (write-string "\\t" stream))
-              (t (write-char c stream))))
-          (write-char #\" stream))
-        (write-string string stream))))
+  (declare (optimize (speed 3) (safety 1)))
+  (let ((string (coerce string 'simple-string)))
+    (declare (type simple-string string))
+    (let ((needs-quoting nil))
+      (loop for c of-type character across string
+            when (or (char= c #\Space) (char= c #\") (char= c #\=)
+                     (char= c #\\) (< (char-code c) 32))
+              do (setf needs-quoting t) (loop-finish))
+      (if needs-quoting
+          (progn
+            (write-char #\" stream)
+            (loop for c of-type character across string do
+              (case c
+                (#\" (write-string "\\\"" stream))
+                (#\\ (write-string "\\\\" stream))
+                (#\Newline (write-string "\\n" stream))
+                (#\Return (write-string "\\r" stream))
+                (#\Tab (write-string "\\t" stream))
+                (t (write-char c stream))))
+            (write-char #\" stream))
+          (write-string string stream)))))
 
 (defun emit-logfmt-condition (stream condition)
   "Write CONDITION as a quoted logfmt value: \"type: message\".
