@@ -5,7 +5,7 @@
 
 ---
 
-## 1. FiveAM Test Detection Intermittent
+- [x] ## 1. FiveAM Test Detection Intermittent
 
 **Symptom:** On first load, `codebase-map` reported `testCount: 0` and `framework: native` despite 314 FiveAM tests across 3 test files. On a subsequent load in the same session, it correctly detected `framework: fiveam` and `testCount: 314`.
 
@@ -13,9 +13,11 @@
 
 **Possible root cause:** FiveAM test registration happens at load time via side effects. If the detection check runs before all test files are fully evaluated, it may miss them. Alternatively, the detection may depend on package state that isn't yet established on first load.
 
+**Resolution:** Fixed in commit `9e116c2` — FiveAM test detection reliability improved.
+
 ---
 
-## 2. `run-tests` Cannot Find Tests Defined via `define` with `test-file`
+- [x] ## 2. `run-tests` Cannot Find Tests Defined via `define` with `test-file`
 
 **Symptom:** After defining a FiveAM test via `define(code: "(5am:test ...)", test-file: "tests.lisp")`, calling `run-tests(name: "test-name")` fails with "No FiveAM test or suite found". However, the test IS registered in FiveAM (verified via `eval` calling `5am:get-test`) and runs correctly when invoked through `5am:run` directly.
 
@@ -23,9 +25,11 @@
 
 **Likely cause:** The `run-tests` name lookup may search the registry or test file index rather than FiveAM's own test registry. Tests defined via `define` with `test-file` are registered in FiveAM but the MCP tool's name resolution doesn't find them until after a save/reload cycle.
 
+**Resolution:** Fixed in commit `9e116c2` — run-tests name lookup improved.
+
 ---
 
-## 3. `define-batch` Without `file` Assigns Conditions to Wrong File
+- [ ] ## 3. `define-batch` Without `file` Assigns Conditions to Wrong File
 
 **Symptom:** When using `define-batch` to define condition types without specifying `file`, the conditions were assigned to `src/levels.lisp` instead of the expected `src/conditions.lisp`. Required a second `define-batch` call with explicit `file` parameter to fix.
 
@@ -35,7 +39,7 @@
 
 ---
 
-## 4. `define-condition` Parent Type Conflicts with Package Shadows
+- [x] ## 4. `define-condition` Parent Type Conflicts with Package Shadows
 
 **Symptom:** `define-condition bark-error (error) ...` failed with "Class not yet defined: ERROR" because BARK shadows `cl:error` with a logging macro. Required `(define-condition bark-error (cl:error) ...)` with explicit CL package prefix.
 
@@ -43,9 +47,11 @@
 
 **Suggestion:** When `define-condition` fails to resolve a parent type, check if the symbol exists but names a non-class (macro/function), and provide a more helpful error message suggesting the fully-qualified name.
 
+**Resolution:** Fixed in commit `93b88b8` — error message now detects shadowed parent types and suggests the fully-qualified CL name.
+
 ---
 
-## 5. `query` Predicate Error on Struct-Generated Functions
+- [ ] ## 5. `query` Predicate Error on Struct-Generated Functions
 
 **Symptom:** The query `(-> (symbols :kind :function) (filter (lambda (s) (let ((sig (signature-parts s))) (> (+ (length (getf sig :required)) (length (getf sig :key))) 6)))))` failed with:
 
@@ -60,7 +66,7 @@ The value 3 is not of type SEQUENCE
 
 ---
 
-## 6. `unused-export-p` Doesn't Consider Macro Expansions
+- [x] ## 6. `unused-export-p` Doesn't Consider Macro Expansions
 
 **Observation:** `unused-export-p` reported 34 of 37 exports as unused. However, many of these (the logging macros `DEBUG`, `ERROR`, `INFO`, etc.) are heavily used — they're invoked as macros, not as direct function calls. The `unused-export-p` predicate appears to check `callers` (who-calls) but not `macro-users` (who-macroexpands).
 
@@ -68,15 +74,41 @@ The value 3 is not of type SEQUENCE
 
 **Suggestion:** `unused-export-p` should also check `macro-users` and `references` (who-references-as-value) in addition to `callers`.
 
+**Resolution:** Fixed in commit `f2f8242` — `effective-callers` now checks `macro-users` for macros and `references` for functions/GFs.
+
+---
+
+- [ ] ## 7. `workspace(action: save)` Emits Method to Wrong File, Breaking Load Order
+
+**Symptom:** After redefining `adapter-find-test-by-name` (a method on `fiveam-adapter`) in the live workspace, `workspace(action: save)` moved the method body from `src/adapters/fiveam.lisp` to `src/test-adapter.lisp` and replaced the `defgeneric` with the method definition. On reload, SBCL fails with `CLASS-NOT-FOUND-ERROR: There is no class named FIVEAM-ADAPTER` because `test-adapter.lisp` is loaded before `adapters/fiveam.lisp` (where the class is defined).
+
+**Impact:** High — a save/reload cycle produces an unloadable project. Required manual `git checkout` to restore the two affected files.
+
+**Root cause:** When a method's GF is defined in file A but the method specializes on a class from file B (loaded later), the save emitter places the method body in file A (with the GF). This breaks when the specializer class doesn't exist yet at file A's load time.
+
+**Suggestion:** Method emission should respect the file where the method was originally defined (or where its specializer class is defined), not the file where the GF lives. The `source-file` slot on `method-entry` should be authoritative for emission target.
+
+---
+
+- [ ] ## 8. `workspace(action: save)` Silently Overwrites Unrelated Files
+
+**Symptom:** Saving after modifying only `effective-callers` in `concept.lisp` also rewrote `test-adapter.lisp` and `adapters/fiveam.lisp` with semantically different content (method moved between files, docstring truncated). The diff showed only `concept.lisp` as a dirty file, but save touched 3 files.
+
+**Impact:** Medium — changes to unrelated files are silently introduced. The user must review `git diff` after every save to catch unexpected mutations. In this case the unrelated changes broke the project's load order.
+
+**Suggestion:** Save should only write files that are actually dirty (i.e., have modified definitions). Files whose definitions haven't changed semantically should not be rewritten.
+
 ---
 
 ## Summary
 
-| # | Severity | Category |
-|---|----------|----------|
-| 1 | Medium | Test detection reliability |
-| 2 | Medium | Test execution for dynamically defined tests |
-| 3 | Low | Default file assignment in define-batch |
-| 4 | Low | Error message quality for define-condition |
-| 5 | Medium | Query robustness with compiler-generated functions |
-| 6 | Medium | Export analysis accuracy for macros |
+| # | Status | Severity | Category |
+|---|--------|----------|----------|
+| 1 | Fixed | Medium | Test detection reliability |
+| 2 | Fixed | Medium | Test execution for dynamically defined tests |
+| 3 | Open | Low | Default file assignment in define-batch |
+| 4 | Fixed | Low | Error message quality for define-condition |
+| 5 | Open | Medium | Query robustness with compiler-generated functions |
+| 6 | Fixed | Medium | Export analysis accuracy for macros |
+| 7 | Open | High | Save emits method to wrong file, breaking load |
+| 8 | Open | Medium | Save silently overwrites unrelated files |
