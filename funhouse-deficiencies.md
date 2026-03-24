@@ -104,13 +104,15 @@ The value 3 is not of type SEQUENCE
 
 ---
 
-- [ ] ## 9. Save Appends Duplicate Test Definitions When Framework Changes
+- [x] ## 9. Save Appends Duplicate Test Definitions When Framework Changes
 
 **Symptom:** Defining tests with `5am:def-test`, then redefining the same-named tests with native `deftest`, then saving — the file contains both the old `5am:def-test` and new `deftest` versions. The old versions are not removed, causing `Package 5AM does not exist` errors on reload.
 
 **Impact:** Medium — test files become corrupted with duplicate definitions. Requires manual file editing to clean up. The file model tracks definitions by name but doesn't recognize that `5am:def-test` and `deftest` create the same logical test.
 
 **Suggestion:** The file model should track test definitions by their logical name across framework-specific macros, or `define` should explicitly untrack the old form when redefining a test with a different macro.
+
+**Resolution:** Fixed — `update-test-file-content` now falls back to name-only matching when the operator-specific search fails. When replacing a test with a different framework macro (e.g. `deftest` → `5am:def-test`), `find-form-span` first tries exact operator match, then retries with name-only if no match. This preserves operator disambiguation for non-switching cases while handling framework switching gracefully.
 
 ---
 
@@ -126,4 +128,4 @@ The value 3 is not of type SEQUENCE
 | 6 | Fixed | Medium | Export analysis accuracy for macros |
 | 7 | Open | High | Save emits method to wrong file, breaking load |
 | 8 | Open | Medium | Save silently overwrites unrelated files |
-| 9 | Open | Medium | Save appends duplicate tests on framework change |
+| 9 | Fixed | Medium | Save appends duplicate tests on framework change |
