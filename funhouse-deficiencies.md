@@ -30,7 +30,7 @@
 
 ---
 
-- [ ] ## 3. New Definitions Without `file` Get Assigned to Wrong File
+- [x] ## 3. New Definitions Without `file` Get Assigned to Wrong File
 
 **Symptom:** When using `define-batch` to define condition types without specifying `file`, the conditions were assigned to `src/levels.lisp` instead of the expected `src/conditions.lisp`. Required a second `define-batch` call with explicit `file` parameter to fix.
 
@@ -38,11 +38,7 @@
 
 **Root cause:** `resolve-target-file` in file-model.lisp picks the first file that has the definition's package in scope. In a multi-file package, this is the first file in load order — which may not be the right file for the definition's kind.
 
-**Suggestion:** This is a file-mapping problem, not a workspace lifecycle problem. Two possible approaches:
-
-1. **Smarter defaults:** `resolve-target-file` could prefer files that already contain definitions of the same kind (e.g., place `define-condition` forms near existing conditions, not near existing functions). This requires inspecting the file model's existing definitions by kind.
-
-2. **Validate before save (preferred):** Instead of guessing the right file at define time, let definitions be unassigned. Before `workspace(action: save)`, check for definitions that lack file associations. If any exist, refuse to save and return a list of unassigned definitions with hints about which files are candidates. This nudges the agent to explicitly organize before persisting, rather than silently guessing wrong. This approach would also prevent #7 (method to wrong file) by making file association explicit.
+**Resolution:** `sync-define` no longer auto-assigns files for new definitions without an explicit `file` parameter. New definitions are left unassigned (no file-model-node). Pre-save validation in `dump-source-handler` catches unassigned definitions and returns `unassignedDefinitions` with candidate files, nudging the agent to assign files explicitly before saving. Redefinitions of existing definitions still inherit their file association.
 
 ---
 
@@ -87,7 +83,7 @@ The value 3 is not of type SEQUENCE
 
 ---
 
-- [ ] ## 7. `workspace(action: save)` Emits Method to Wrong File, Breaking Load Order
+- [x] ## 7. `workspace(action: save)` Emits Method to Wrong File, Breaking Load Order
 
 **Symptom:** After redefining `adapter-find-test-by-name` (a method on `fiveam-adapter`) in the live workspace, `workspace(action: save)` moved the method body from `src/adapters/fiveam.lisp` to `src/test-adapter.lisp` and replaced the `defgeneric` with the method definition. On reload, SBCL fails with `CLASS-NOT-FOUND-ERROR: There is no class named FIVEAM-ADAPTER` because `test-adapter.lisp` is loaded before `adapters/fiveam.lisp` (where the class is defined).
 
@@ -95,23 +91,23 @@ The value 3 is not of type SEQUENCE
 
 **Root cause:** When a method's GF is defined in file A but the method specializes on a class from file B (loaded later), the save emitter places the method body in file A (with the GF). This breaks when the specializer class doesn't exist yet at file A's load time.
 
-**Suggestion:** Two complementary fixes:
+**Resolution:** Two complementary fixes applied:
 
-1. **Use method-entry.file-model-node for emission target.** Each `method-entry` has a `file-model-node` slot that links to the file model node from the original source file. When emitting, the dump code should use this node's file path as the emission target instead of following the GF's file. Fall back to the GF's file only for methods that were defined interactively (no file-model-node). This is the direct fix.
+1. **Method-entry carries file-model-node.** `register-method-definition` now carries over the old method-entry's `file-model-node` when a method is redefined. `update-file-model-for-define` handles methods separately via `update-file-model-for-method`, which marks the method's own node dirty instead of the GF's. This prevents method redefinition from corrupting the GF's source text or moving the method to the wrong file.
 
-2. **Validate file associations before save (as proposed in #3).** If the save process validated that every method has a file association and that the file's load order respects specializer dependencies, it could catch this class of errors before writing broken files. A pre-save validation step that checks: "for each method, are all specializer classes defined in files that load before this method's file?" would prevent the symptom entirely.
+2. **Pre-save validation (shared with #3).** `dump-source-handler` validates that all definitions and methods have file assignments before saving. Methods without file-model-nodes (new methods without explicit `file`) are caught and reported as unassigned.
 
 ---
 
-- [~] ## 8. `workspace(action: save)` Silently Overwrites Unrelated Files
+- [x] ## 8. `workspace(action: save)` Silently Overwrites Unrelated Files
 
 **Symptom:** Saving after modifying only `effective-callers` in `concept.lisp` also rewrote `test-adapter.lisp` and `adapters/fiveam.lisp` with semantically different content (method moved between files, docstring truncated). The diff showed only `concept.lisp` as a dirty file, but save touched 3 files.
 
 **Impact:** Medium — changes to unrelated files are silently introduced. The user must review `git diff` after every save to catch unexpected mutations. In this case the unrelated changes broke the project's load order.
 
-**Partially resolved:** Commit `5adf320` fixed the "stale dirty nodes" issue — after a save, file model nodes are reset so subsequent saves don't re-emit previously modified files. The `*saved-file-models*` table now tracks which files have been saved with their current content, and skip-on-save logic prevents writing unchanged files.
-
-**Remaining issue:** The method-to-wrong-file problem (#7) can still cause save to modify files that the agent didn't intend to touch, because the method's file association is wrong. Fixing #7 would resolve the remaining aspect of this deficiency.
+**Resolution:** Two fixes combined:
+1. Commit `5adf320` fixed the "stale dirty nodes" issue — file model nodes are reset after save, preventing re-emission of previously modified files.
+2. The #7 fix (method-aware file model sync) prevents method redefinition from corrupting GF nodes in unrelated files. Methods now operate on their own file-model-nodes.
 
 ---
 
@@ -133,22 +129,22 @@ The value 3 is not of type SEQUENCE
 |---|--------|----------|----------|
 | 1 | Fixed | Medium | Test detection reliability |
 | 2 | Fixed | Medium | Test execution for dynamically defined tests |
-| 3 | Open | Low | File mapping: default file assignment |
+| 3 | Fixed | Low | File mapping: default file assignment |
 | 4 | Fixed | Low | Error message quality for define-condition |
 | 5 | Fixed | Medium | Query robustness with compiler-generated functions |
 | 6 | Fixed | Medium | Export analysis accuracy for macros |
-| 7 | Open | High | File mapping: method emitted to wrong file |
-| 8 | Partial | Medium | File mapping: save overwrites unrelated files |
+| 7 | Fixed | High | File mapping: method emitted to wrong file |
+| 8 | Fixed | Medium | File mapping: save overwrites unrelated files |
 | 9 | Fixed | Medium | Save appends duplicate tests on framework change |
 
-## Cross-cutting theme: File Mapping
+## Cross-cutting theme: File Mapping (resolved)
 
-Deficiencies #3, #7, and #8 share a root cause: **file association for definitions is implicit and fragile.** The current system guesses which file a definition belongs to, and these guesses can be wrong — especially for methods in multi-file packages.
+Deficiencies #3, #7, and #8 shared a root cause: **file association for definitions was implicit and fragile.** The system guessed which file a definition belonged to, and these guesses were wrong — especially for methods in multi-file packages.
 
-A unified fix would be a **pre-save validation step** that:
-1. Checks every definition has an explicit file association
-2. Validates load-order constraints (specializer classes before methods, macros before expansions)
-3. Refuses to save if violations are found, returning actionable hints
+Fixed with three changes:
+1. **`sync-define` no longer guesses** — new definitions without explicit `file` are left unassigned
+2. **Method-aware file model sync** — method redefinition operates on the method's own file-model-node, not the GF's
+3. **Pre-save validation** — `dump-source-handler` refuses to save if any definitions lack file assignments, returning `unassignedDefinitions` with candidate files
 
 This shifts file organization from "guess at define time" to "validate before persist," which aligns with Funhouse's philosophy of letting the agent experiment freely and only enforcing structure when persisting.
 
