@@ -3478,3 +3478,106 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
 
+(5am:test test-flush-stopped-signals-bark-async-stopped
+  "bark:flush signals bark-async-stopped (not just error) when output is stopped."
+  (let* ((out (make-string-output-stream))
+         (lgr (bark:make-logger :level :info :output out)))
+    (bark:stop lgr)
+    (5am:signals bark:bark-async-stopped (bark:flush lgr))))
+
+(5am:test test-flush-stopped-restart-continue
+  "The continue restart in flush skips stopped outputs."
+  (let* ((out (make-string-output-stream))
+         (lgr (bark:make-logger :level :info :output out)))
+    (bark:stop lgr)
+    ;; invoke continue — should return normally, no error
+    (handler-bind ((bark:bark-async-stopped
+                     (lambda (c)
+                       (declare (ignore c))
+                       (invoke-restart 'continue))))
+      (bark:flush lgr))
+    (5am:pass "continue restart returned normally")))
+(5am:test test-stop-child-signals-bark-child-operation-error
+  "bark:stop on a child signals bark-child-operation-error."
+  (let* ((out (make-string-output-stream))
+         (parent (bark:make-logger :level :info :output out))
+         (child (bark:make-child parent)))
+    (unwind-protect
+         (5am:signals bark:bark-child-operation-error
+           (bark:stop child))
+      (bark:stop parent))))
+
+(5am:test test-stop-child-operation-slot
+  "bark-child-operation-error carries the :stop operation."
+  (let* ((out (make-string-output-stream))
+         (parent (bark:make-logger :level :info :output out))
+         (child (bark:make-child parent)))
+    (unwind-protect
+         (handler-case (bark:stop child)
+           (bark:bark-child-operation-error (c)
+             (5am:is (eq :stop (bark:bark-child-operation-error-operation c)))))
+      (bark:stop parent))))
+
+(5am:test test-stop-child-restart-continue
+  "The continue restart in stop silently ignores stop on child."
+  (let* ((out (make-string-output-stream))
+         (parent (bark:make-logger :level :info :output out))
+         (child (bark:make-child parent)))
+    (unwind-protect
+         (progn
+           (handler-bind ((bark:bark-child-operation-error
+                            (lambda (c)
+                              (declare (ignore c))
+                              (invoke-restart 'continue))))
+             (bark:stop child))
+           ;; parent should still be running
+           (5am:is-true (bark::async-output-running (bark::logger-output parent))))
+      (bark:stop parent))))
+
+(5am:test test-make-logger-async-with-tee-signals-configuration-error
+  "make-logger signals bark-configuration-error for async params with tee."
+  (let* ((s1 (make-string-output-stream))
+         (tee (bark:make-tee (list (list :stream s1)))))
+    (unwind-protect
+         (5am:signals bark:bark-configuration-error
+           (bark:make-logger :output tee :blocking t))
+      (bark:stop (bark:make-logger :output (make-string-output-stream))))))
+
+(5am:test test-make-logger-invalid-output-signals-configuration-error
+  "make-logger signals bark-configuration-error for invalid output type."
+  (5am:signals bark:bark-configuration-error
+    (bark:make-logger :output 42)))
+
+(5am:test test-make-tee-filter-level-conflict-signals-configuration-error
+  "make-tee signals bark-configuration-error for :filter + :level."
+  (let ((s1 (make-string-output-stream)))
+    (5am:signals bark:bark-configuration-error
+      (bark:make-tee
+       (list (list :stream s1
+                   :level :error
+                   :filter (lambda (level fields) (declare (ignore level fields)) t)))))))
+
+(5am:test test-make-consistent-sampler-rate-zero-signals-configuration-error
+  "make-consistent-sampler signals bark-configuration-error for rate < 1."
+  (5am:signals bark:bark-configuration-error
+    (bark:make-consistent-sampler :key-fn (lambda (b) (declare (ignore b)) "k") :rate 0)))
+
+(5am:test test-make-level-sampler-bad-type-signals-configuration-error
+  "make-level-sampler signals bark-configuration-error for non-windowed-counter."
+  (5am:signals bark:bark-configuration-error
+    (bark:make-level-sampler :info 42)))
+
+(5am:test test-configuration-error-detail-slot
+  "bark-configuration-error carries a human-readable detail string."
+  (handler-case (bark:make-logger :output 42)
+    (bark:bark-configuration-error (c)
+      (5am:is (stringp (bark:bark-configuration-error-detail c)))
+      (5am:is (search "Invalid :output" (bark:bark-configuration-error-detail c))))))
+
+(5am:test test-condition-hierarchy
+  "Condition type hierarchy is correct."
+  (5am:is (subtypep 'bark:bark-configuration-error 'bark:bark-error))
+  (5am:is (subtypep 'bark:bark-lifecycle-error 'bark:bark-error))
+  (5am:is (subtypep 'bark:bark-async-stopped 'bark:bark-lifecycle-error))
+  (5am:is (subtypep 'bark:bark-child-operation-error 'bark:bark-lifecycle-error))
+  (5am:is (subtypep 'bark:bark-error 'cl:error)))
