@@ -4,6 +4,7 @@
 
 ;;; --- Buffer entry ---
 
+;;; Log buffer
 (defstruct (buffer-entry (:constructor make-buffer-entry))
   "A single buffered log entry, captured for deferred emission.
    Slots: LEVEL (fixnum), MESSAGE (string or nil), FIELDS (plist of per-call fields),
