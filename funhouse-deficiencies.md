@@ -51,7 +51,7 @@
 
 ---
 
-- [ ] ## 5. `query` Predicate Error on Struct-Generated Functions
+- [x] ## 5. `query` Predicate Error on Struct-Generated Functions
 
 **Symptom:** The query `(-> (symbols :kind :function) (filter (lambda (s) (let ((sig (signature-parts s))) (> (+ (length (getf sig :required)) (length (getf sig :key))) 6)))))` failed with:
 
@@ -63,6 +63,8 @@ The value 3 is not of type SEQUENCE
 **Impact:** Cannot filter functions by parameter count without excluding struct-generated functions. The `signature-parts` combinator returns an integer (arity) instead of a plist for some compiler-generated functions.
 
 **Suggestion:** `signature-parts` should return a consistent plist shape for all function kinds, or `filter` should handle predicate errors gracefully (skip the element with a warning instead of aborting the entire query).
+
+**Resolution:** Fixed — `signature-parts` now returns lists of parameter names instead of integer counts for `:required`, `:optional`, and `:key` slots (e.g. `(:required (A B) :key (X Y) ...)` instead of `(:required 2 :key 2 ...)`). The `(length (getf sig :required))` pattern now works correctly. Also added a `(listp ll)` guard to handle non-list lambda-list values gracefully.
 
 ---
 
@@ -100,6 +102,18 @@ The value 3 is not of type SEQUENCE
 
 ---
 
+---
+
+- [ ] ## 9. Save Appends Duplicate Test Definitions When Framework Changes
+
+**Symptom:** Defining tests with `5am:def-test`, then redefining the same-named tests with native `deftest`, then saving — the file contains both the old `5am:def-test` and new `deftest` versions. The old versions are not removed, causing `Package 5AM does not exist` errors on reload.
+
+**Impact:** Medium — test files become corrupted with duplicate definitions. Requires manual file editing to clean up. The file model tracks definitions by name but doesn't recognize that `5am:def-test` and `deftest` create the same logical test.
+
+**Suggestion:** The file model should track test definitions by their logical name across framework-specific macros, or `define` should explicitly untrack the old form when redefining a test with a different macro.
+
+---
+
 ## Summary
 
 | # | Status | Severity | Category |
@@ -108,7 +122,8 @@ The value 3 is not of type SEQUENCE
 | 2 | Fixed | Medium | Test execution for dynamically defined tests |
 | 3 | Open | Low | Default file assignment in define-batch |
 | 4 | Fixed | Low | Error message quality for define-condition |
-| 5 | Open | Medium | Query robustness with compiler-generated functions |
+| 5 | Fixed | Medium | Query robustness with compiler-generated functions |
 | 6 | Fixed | Medium | Export analysis accuracy for macros |
 | 7 | Open | High | Save emits method to wrong file, breaking load |
 | 8 | Open | Medium | Save silently overwrites unrelated files |
+| 9 | Open | Medium | Save appends duplicate tests on framework change |
