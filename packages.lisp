@@ -40,4 +40,5 @@
    #:bark-configuration-error
    #:bark-configuration-error-detail
    #:bark-error
-   #:bark-lifecycle-error))
+   #:bark-lifecycle-error
+   #:level-name))
