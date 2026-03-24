@@ -150,15 +150,15 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 | `tee-output` | Used as-is (already contains async-outputs internally) |
 | NIL | Defaults to `*error-output*`, wrapped in async-output |
 
-`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals an error.
+`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals `bark-configuration-error`.
 
 `:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields. Use `:context '(:name "myapp")` instead of the old `:name` parameter.
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
 
-`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent — stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals an error — always stop the root logger.
+`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent — stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals `bark-child-operation-error` (a `continue` restart is available to silently ignore). Always stop the root logger.
 
-`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals an error if the logger has been stopped.
+`bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals `bark-async-stopped` if any async output has been stopped (a `continue` restart is available to skip stopped outputs).
 
 `bark:register-exit-hook` registers a logger for automatic `bark:stop` on Lisp image exit. Safe to combine with an explicit `bark:stop` call (stop is idempotent). Supports SBCL, CCL, ECL, ABCL, and CLISP.
 
@@ -210,7 +210,7 @@ Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &
                                         :level :error))
 ```
 
-Specifying both `:level` and `:filter` in the same destination spec is a compile-time error.
+Specifying both `:level` and `:filter` in the same destination spec signals `bark-configuration-error`.
 
 ### Context
 
@@ -897,18 +897,63 @@ These are **intentionally** not supported and won't be added:
 
 ## Conditions
 
-All conditions are signaled at configuration time. Logging macros never signal — a disabled level is a `noop` call, and writer errors are handled internally.
+All bark-specific conditions inherit from `bark:bark-error` (which inherits from `cl:error`):
 
-| Source | Condition | When |
-|--------|-----------|------|
-| `level-from-keyword` | `type-error` | Unknown level keyword (from `ecase`) |
-| `set-level` | `type-error` | Level is neither `fixnum` nor keyword (from `etypecase`) |
-| `make-tee` | `simple-error` | Both `:filter` and `:level` on the same destination |
-| `tee` | `simple-error` | Same, at macro expansion time |
-| `make-logger` | `simple-error` | `:output` is not a stream, function, `tee-output`, or `nil` |
-| `make-logger` | `simple-error` | Async parameters with a function or `tee-output` |
-| `stop` | `simple-error` | Called on a child logger |
-| `flush` | `simple-error` | Called on a stopped logger |
+```
+bark-error                           ; base — all bark errors
+├── bark-configuration-error         ; invalid constructor arguments
+│     slot: detail (string)          ; human-readable explanation
+└── bark-lifecycle-error             ; operation invalid for current state
+    ├── bark-async-stopped           ; flush on stopped async output
+    └── bark-child-operation-error   ; root-only op attempted on child
+          slot: operation (symbol)   ; the attempted operation (e.g. :stop)
+```
+
+Conditions are signaled at configuration time or on lifecycle misuse. Logging macros never signal — a disabled level is a `noop` call, and writer errors are handled internally.
+
+| Source | Condition | Restart | When |
+|--------|-----------|---------|------|
+| `level-from-keyword` | `type-error` | — | Unknown level keyword (from `ecase`) |
+| `set-level` | `type-error` | — | Level is neither `fixnum` nor keyword (from `etypecase`) |
+| `make-tee` | `bark-configuration-error` | — | Both `:filter` and `:level` on the same destination |
+| `tee` | `bark-configuration-error` | — | Same, at macro expansion time |
+| `make-logger` | `bark-configuration-error` | — | `:output` is not a stream, function, `tee-output`, or `nil` |
+| `make-logger` | `bark-configuration-error` | — | Async parameters with a function or `tee-output` |
+| `make-consistent-sampler` | `bark-configuration-error` | — | Rate < 1 |
+| `make-level-sampler` | `bark-configuration-error` | — | Non-windowed-counter value |
+| `make-windowed-counter` | `bark-configuration-error` | — | Window ticks exceed fixnum range |
+| `stop` | `bark-child-operation-error` | `continue` | Called on a child logger |
+| `flush` | `bark-async-stopped` | `continue` | Called on a stopped logger |
+
+### Handling Conditions
+
+Selective handling by condition type:
+
+```lisp
+;; Catch only configuration errors, let lifecycle errors propagate
+(handler-case (bark:make-logger :output 42)
+  (bark:bark-configuration-error (c)
+    (log:warn "Bad logger config: ~A" (bark:bark-configuration-error-detail c))
+    (bark:make-logger)))  ; fall back to defaults
+```
+
+### Using Restarts
+
+`flush` and `stop` offer `continue` restarts for graceful degradation:
+
+```lisp
+;; Flush what you can, skip stopped outputs
+(handler-bind ((bark:bark-async-stopped
+                 (lambda (c) (declare (ignore c)) (invoke-restart 'continue))))
+  (bark:flush logger))
+
+;; Generic cleanup that works on any logger (root or child)
+(handler-bind ((bark:bark-child-operation-error
+                 (lambda (c) (declare (ignore c)) (invoke-restart 'continue))))
+  (bark:stop logger))
+```
+
+### Writer Thread Errors
 
 Writer thread stream errors (`file-error`, `stream-error`, etc.) are caught internally. When `:on-error` is provided, it receives the original condition — see [Error Recovery](#error-recovery). Otherwise the error is logged to `*error-output*` and the writer exits. If the `:on-error` handler itself signals, or an `:on-block-timeout` callback signals, those errors are also caught and written to `*error-output*` — the writer thread never propagates exceptions to the caller.
 
