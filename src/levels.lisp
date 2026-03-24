@@ -54,3 +54,33 @@
   (if (<= +trace+ level +fatal+)
       (svref *level-names* level)
       "unknown"))
+
+;;; Conditions
+
+(define-condition bark-configuration-error (bark-error)
+  ((detail :initarg :detail :reader bark-configuration-error-detail
+           :type string))
+  (:report (lambda (c s) (write-string (bark-configuration-error-detail c) s)))
+  (:documentation "Signaled when constructor arguments are invalid or conflicting.
+Raised by MAKE-LOGGER, MAKE-TEE, MAKE-CONSISTENT-SAMPLER, MAKE-LEVEL-SAMPLER,
+and MAKE-WINDOWED-COUNTER on validation failure."))
+
+(define-condition bark-lifecycle-error (bark-error)
+  ()
+  (:documentation "Signaled when an operation is invalid for the logger's current state."))
+
+(define-condition bark-async-stopped (bark-lifecycle-error)
+  ()
+  (:report "Cannot flush: one or more async outputs have been stopped.")
+  (:documentation "Signaled by FLUSH when an async output has been stopped.
+A CONTINUE restart is available to skip stopped outputs."))
+
+(define-condition bark-child-operation-error (bark-lifecycle-error)
+  ((operation :initarg :operation :reader bark-child-operation-error-operation
+              :type symbol))
+  (:report (lambda (c s)
+             (format s "Cannot ~(~A~) a child logger — it shares the parent's output. ~
+                        ~(~:*~A~) the root logger instead."
+                     (bark-child-operation-error-operation c))))
+  (:documentation "Signaled when a root-only operation is attempted on a child logger.
+A CONTINUE restart is available to silently ignore the operation."))

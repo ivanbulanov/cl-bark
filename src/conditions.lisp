@@ -39,3 +39,9 @@ Call inside HANDLER-BIND for a meaningful trace (stack still live).
 In HANDLER-CASE the trace reflects the handler's stack, not the error origin."
   (%make-captured-error :condition condition
                         :stack (strip-internal-frames (dissect:stack))))
+
+;;; Conditions
+
+(define-condition bark-error (cl:error)
+  ()
+  (:documentation "Base condition for all cl-bark errors."))

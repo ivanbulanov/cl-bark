@@ -25,7 +25,7 @@
   "Create a fan-out output from a list of destination plists.
 Each plist accepts :stream (required), :formatter, :filter, :level, :capacity,
 :on-drop, :on-error, :blocking, :block-timeout, :on-block-timeout.
-Specifying both :level and :filter is an error."
+Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
   (let ((dests
           (mapcar
            (lambda (spec)
@@ -40,7 +40,8 @@ Specifying both :level and :filter is an error."
                    (block-timeout    (getf spec :block-timeout 5.0))
                    (on-block-timeout (getf spec :on-block-timeout)))
                (when (and filter-fn level-kw)
-                 (cl:error "Cannot specify both :filter and :level for a tee destination"))
+                 (cl:error 'bark-configuration-error
+                           :detail "Cannot specify both :filter and :level for a tee destination"))
                (let ((actual-filter
                        (cond
                          (filter-fn filter-fn)

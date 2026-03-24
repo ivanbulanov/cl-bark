@@ -194,10 +194,10 @@ hash decision."
                           (values logger &optional)) make-logger))
 
 (defun make-logger (&key output (level :info) (formatter #'json-formatter)
-                         context field-transform
-                         (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
-                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
-                         level-sampler consistent)
+                        context field-transform
+                        (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                        blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
+                        level-sampler consistent)
   "Create a root logger. Multiple root loggers can coexist — each owns its own
 output and writer thread(s). Assign to *logger* for implicit use by logging
 macros, or pass explicitly as the first argument to bark:info etc.
@@ -236,16 +236,17 @@ CONSISTENT (consistent-sampler or NIL): From make-consistent-sampler —
   deterministic hash-based sampling.
 
 Async parameters (CAPACITY through ON-BLOCK-TIMEOUT) are only valid with stream
-output. Passing them with a function or tee-output signals an error."
+output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ERROR."
   (when (and (or (functionp output) (tee-output-p output))
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
                  (not (eq on-drop #'default-on-drop))))
-    (cl:error "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
+    (cl:error 'bark-configuration-error
+              :detail (format nil "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
                :block-timeout, :on-block-timeout) with a ~:[function~;tee-output~]. ~
                ~:*~:[Function outputs are synchronous — async parameters do not apply.~;~
                Configure these per-destination in bark:tee.~]"
-              (tee-output-p output)))
+                              (tee-output-p output))))
   (let* ((actual-output (cond
                           ((functionp output) output)
                           ((tee-output-p output) output)
@@ -257,8 +258,9 @@ output. Passing them with a function or tee-output signals an error."
                                               :blocking blocking
                                               :block-timeout block-timeout
                                               :on-block-timeout on-block-timeout))
-                          (t (cl:error "Invalid :output for make-logger: ~a ~
-                                        (expected stream, function, tee-output, or NIL)" output))))
+                          (t (cl:error 'bark-configuration-error
+                                       :detail (format nil "Invalid :output for make-logger: ~A ~
+                                        (expected stream, function, tee-output, or NIL)" output)))))
          (effective-context (if (and context field-transform)
                                 (apply-field-transform-plist field-transform context)
                                 context))
@@ -315,11 +317,14 @@ INITIAL (fixnum, default 5): messages always passed at the start of each window.
 THEREAFTER (fixnum, default 100): after INITIAL, pass 1-in-THEREAFTER. 0 means
   hard cap (drop all after initial burst).
 WINDOW-SECONDS (real, default 1): window duration in seconds. Counter resets when
-  the window expires."
+  the window expires.
+Signals BARK-CONFIGURATION-ERROR if window-seconds produces a tick count exceeding
+fixnum range."
   (let ((ticks (round (* window-seconds internal-time-units-per-second))))
     (when (> ticks most-positive-fixnum)
-      (cl:error "window-seconds ~A produces ~A ticks, exceeding fixnum range"
-                window-seconds ticks))
+      (cl:error 'bark-configuration-error
+                :detail (format nil "window-seconds ~A produces ~A ticks, exceeding fixnum range"
+                                window-seconds ticks)))
     (%make-windowed-counter :initial initial
                             :thereafter thereafter
                             :window-ticks ticks
@@ -329,10 +334,12 @@ WINDOW-SECONDS (real, default 1): window duration in seconds. Counter resets whe
   "Create a level-sampler vector for per-level windowed sampling.
 Each keyword argument corresponds to a log level and accepts a windowed-counter
 (from make-windowed-counter) or NIL (no sampling at that level). Levels without
-a counter pass all messages. Pass to :level-sampler on make-logger."
+a counter pass all messages. Pass to :level-sampler on make-logger.
+Signals BARK-CONFIGURATION-ERROR if any value is not a windowed-counter or NIL."
   (flet ((check (name val)
            (when (and val (not (windowed-counter-p val)))
-             (cl:error "~A must be a windowed-counter or nil, got ~A" name (type-of val)))))
+             (cl:error 'bark-configuration-error
+                       :detail (format nil "~A must be a windowed-counter or nil, got ~A" name (type-of val))))))
     (check :trace trace) (check :debug debug) (check :info info)
     (check :warn warn) (check :error error) (check :fatal fatal))
   (vector nil trace debug info warn error fatal))
@@ -342,10 +349,12 @@ a counter pass all messages. Pass to :level-sampler on make-logger."
 KEY-FN is (lambda (raw-bindings) ...) where RAW-BINDINGS is the logger's
 static context plist (set via :context on make-logger/make-child). It should
 return a string, symbol, or number for deterministic hashing, or NIL to skip
-consistent sampling and fall through to the windowed counter."
+consistent sampling and fall through to the windowed counter.
+Signals BARK-CONFIGURATION-ERROR if RATE < 1."
   (check-type key-fn function)
   (when (< rate 1)
-    (cl:error "consistent-sampler rate must be >= 1, got ~A" rate))
+    (cl:error 'bark-configuration-error
+              :detail (format nil "consistent-sampler rate must be >= 1, got ~A" rate)))
   (%make-consistent-sampler :key-fn key-fn :rate rate))
 
 (defun set-level-sampling (logger level windowed-counter)
@@ -443,7 +452,8 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
 
 (defun flush (logger)
   "Flush LOGGER, blocking until all pending messages are written.
-   Signals an error if any async output has been stopped."
+Signals BARK-ASYNC-STOPPED if any async output has been stopped.
+A CONTINUE restart is available to skip stopped outputs."
   (let ((has-stopped nil))
     (flet ((flush-one (ao)
              (if (async-output-running ao)
@@ -451,17 +461,25 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
                  (setf has-stopped t))))
       (do-async-outputs (logger-output logger) #'flush-one))
     (when has-stopped
-      (cl:error "Cannot flush a stopped logger."))))
+      (restart-case
+          (cl:error 'bark-async-stopped)
+        (continue ()
+          :report "Skip stopped outputs."
+          nil)))))
 
 (defun stop (logger)
   "Stop writer threads for LOGGER. Blocks until pending messages are drained and
-   threads have exited. Idempotent — calling stop on an already-stopped or sync
-   logger is a no-op. Passing NIL is a no-op. Signals an error if LOGGER is a
-   child (children share the parent's output)."
+threads have exited. Idempotent — calling stop on an already-stopped or sync
+logger is a no-op. Passing NIL is a no-op.
+Signals BARK-CHILD-OPERATION-ERROR if LOGGER is a child.
+A CONTINUE restart is available to silently ignore the operation."
   (when logger
     (unless (logger-root-p logger)
-      (cl:error "Cannot stop a child logger — it shares the parent's output. ~
-                 Stop the root logger instead."))
+      (restart-case
+          (cl:error 'bark-child-operation-error :operation :stop)
+        (continue ()
+          :report "Ignore stop on child logger."
+          (return-from stop nil))))
     (do-async-outputs (logger-output logger) #'stop-async-output))
   nil)
 

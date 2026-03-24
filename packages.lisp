@@ -33,4 +33,11 @@
    ;; buffer
    #:with-log-buffer
    #:buffer-entry-level #:buffer-entry-message
-   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp))
+   #:buffer-entry-fields #:buffer-entry-context #:buffer-entry-timestamp
+   #:bark-async-stopped
+   #:bark-child-operation-error
+   #:bark-child-operation-error-operation
+   #:bark-configuration-error
+   #:bark-configuration-error-detail
+   #:bark-error
+   #:bark-lifecycle-error))
