@@ -381,8 +381,8 @@ A formatter is a function with signature:
 | Parameter | Type | Purpose |
 |-----------|------|---------|
 | `level` | fixnum | Numeric log level (1-6) |
-| `chindings` | string | Static context pre-serialized as a JSON fragment. Zero per-call cost |
-| `raw-bindings` | plist | Static context as a key-value plist. Same data as `chindings`, different representation |
+| `chindings` | string | Static context pre-serialized as a JSON fragment (e.g. `,"name":"myapp"`). Splice directly into JSON output for zero per-call serialization cost |
+| `raw-bindings` | plist | Static context as a key-value plist (e.g. `(:name "myapp")`). Same data as `chindings` but not pre-serialized — use this in non-JSON formatters |
 | `context` | alist | Dynamic context from `with-context` |
 | `message` | string | The log message |
 | `fields` | plist | Per-call fields from the `&rest` args |
