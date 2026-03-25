@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Serialization Limits ---
-
 ;;; Configuration
 (defvar *max-json-depth* 4
   "Maximum nesting depth for collections in emit-json-value.
@@ -15,8 +13,6 @@
 
 (defvar *max-json-stack-frames* 10
   "Maximum stack frames in JSON condition output. NIL means unlimited.")
-
-;;; --- JSON Output ---
 
 (declaim (ftype (function (string stream) (values null &optional)) write-json-escaped-string))
 

@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Multi-Output ---
-
 (defstruct destination
   "A single output destination within a tee."
   (async-output nil :type async-output)

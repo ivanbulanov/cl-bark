@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Async Output ---
-
 (declaim (ftype (function () (values double-float &optional)) monotonic-seconds))
 
 (defun monotonic-seconds ()

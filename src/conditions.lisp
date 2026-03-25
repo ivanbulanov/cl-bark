@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Condition Capture ---
-
 ;;; Error capture
 (defstruct (captured-error (:constructor %make-captured-error))
   "A condition snapshot with stack trace for structured logging."

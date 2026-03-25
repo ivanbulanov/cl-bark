@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Logfmt Output ---
-
 (defun emit-logfmt-key (stream key)
   "Write a logfmt key to STREAM."
   (declare (optimize (speed 3) (safety 1)))

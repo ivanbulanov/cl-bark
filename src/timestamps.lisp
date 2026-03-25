@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Timestamps ---
-
 ;;; Timestamps
 (defvar *override-timestamp* nil
   "When non-nil, formatters use this value instead of the wall clock.

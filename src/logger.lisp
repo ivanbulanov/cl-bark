@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Sampling ---
-
 (defconstant +window-check-interval+ 64
   "How often the windowed counter reads the clock (in messages).
    Must be power of 2 for bit-and optimization.")
@@ -65,8 +63,6 @@ hash decision."
     (when (>= (- now ws) (windowed-counter-window-ticks wc))
       (when (atomics:cas (windowed-counter-window-start wc) ws now)
         (setf (windowed-counter-count wc) 0)))))
-
-;;; --- Logger ---
 
 (defun noop (logger message &rest fields)
   "No-op log function for disabled levels."
@@ -466,8 +462,6 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
   (print-unreadable-object (lgr stream :type t)
     (format stream "~A~@[ ~A~]" (level-name (logger-level lgr))
             (unless (logger-root-p lgr) "child"))))
-
-;;; --- Lifecycle ---
 
 (defun do-async-outputs (output fn)
   "Apply FN to each async-output reachable from OUTPUT (tee-output or async-output).

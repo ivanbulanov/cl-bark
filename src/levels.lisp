@@ -2,8 +2,6 @@
 
 (in-package #:bark)
 
-;;; --- Levels ---
-
 (defconstant +trace+ 1 "Trace log level.")
 
 (defconstant +debug+ 2 "Debug log level.")

@@ -10,8 +10,6 @@
   "Spin iterations in ring-buffer-pop before yielding to the OS scheduler.
    Prevents unbounded CPU spin when a producer is preempted between CAS and slot write.")
 
-;;; --- Ring Buffer ---
-
 ;;; Data structure
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
   "Lock-free MPSC ring buffer with drop-on-full semantics."
