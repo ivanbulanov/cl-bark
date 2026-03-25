@@ -154,7 +154,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 
 `:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals `bark-configuration-error`.
 
-`:context`, when provided, is a plist of static context fields. The root logger is wrapped in a child with these fields. Use `:context '(:name "myapp")` instead of the old `:name` parameter.
+`:context`, when provided, is a plist of static context fields pre-serialized into the root logger. Zero per-call cost.
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
 
