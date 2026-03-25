@@ -1425,7 +1425,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-async-drop-warning
   "Default on-drop produces a formatted JSON line with level, timestamp, and message."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
+         (fmt (make-json-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 5)
@@ -1435,14 +1436,15 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (let ((result (get-output-stream-string out)))
       ;; Message content preserved
       (5am:is (search "dropped 5 log messages" result))
-      ;; Formatted as JSON with warn level
-      (5am:is (search "\"level\":4" result))
+      ;; Formatted via the formatter with level and msg
+      (5am:is (search "\"level\":" result))
       (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-uses-formatter-config
-  "Drop warnings use the fallback JSON format when no formatter is provided."
+  "Drop warnings use the configured formatter's keys and format."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
+         (fmt (make-json-formatter :timestamp nil :level-key "severity" :message-key "message"))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 3)
@@ -1450,14 +1452,15 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Uses default keys (fallback format)
-      (5am:is (search "\"level\":4" result))
-      (5am:is (search "\"msg\":" result)))))
+      ;; Uses custom keys from formatter
+      (5am:is (search "\"severity\":" result))
+      (5am:is (search "\"message\":" result)))))
 
 (5am:test test-async-drop-with-timestamp
   "Drop warnings include timestamp when formatter is configured with one."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
+         (fmt (make-json-formatter :timestamp :unix-ms))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 2)
@@ -1465,14 +1468,16 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Fallback format has level and msg fields
-      (5am:is (search "\"level\":4" result))
+      ;; Timestamp present in drop warning
+      (5am:is (search "\"ts\":" result))
+      (5am:is (search "\"level\":" result))
       (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-with-logfmt-formatter
-  "Drop warnings use fallback JSON format when no formatter is provided."
+  "Drop warnings use the logfmt formatter when configured."
   (let* ((out (make-string-output-stream))
-         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
+         (fmt (make-logfmt-formatter :timestamp nil))
+         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 4)
@@ -1480,16 +1485,17 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Fallback format uses JSON
-      (5am:is (search "\"level\":4" result))
-      (5am:is (search "\"msg\":" result))
+      ;; Logfmt format
+      (5am:is (search "level=warn" result))
+      (5am:is (search "msg=" result))
       (5am:is (search "dropped 4 log messages" result)))))
 
 (5am:test test-async-custom-on-drop-message-and-fields
   "Custom on-drop returns message + fields via multiple values."
   (let* ((out (make-string-output-stream))
+         (fmt (make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter nil
+               :formatter fmt
                :on-drop (lambda (n) (values (format nil "LOST ~d" n) (list :count n))))))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1498,16 +1504,19 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Custom message in fallback format
+      ;; Custom message preserved
       (5am:is (search "LOST 3" result))
-      ;; Fallback format uses level + msg
-      (5am:is (search "\"level\":4" result)))))
+      ;; Extra field from on-drop
+      (5am:is (search "\"count\":3" result))
+      ;; Formatted via formatter
+      (5am:is (search "\"level\":" result)))))
 
 (5am:test test-async-on-drop-fields-only
   "on-drop returning (values nil fields) emits fields without message."
   (let* ((out (make-string-output-stream))
+         (fmt (make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter nil
+               :formatter fmt
                :on-drop (lambda (n) (values nil (list :dropped n :severity "backpressure"))))))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1516,16 +1525,17 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Fallback format uses level + msg (fields ignored)
-      (5am:is (search "\"level\":4" result))
-      ;; Fallback emits empty msg when message is nil
-      (5am:is (search "\"msg\":\"\"" result)))))
+      ;; Fields appear in output
+      (5am:is (search "\"dropped\":3" result))
+      (5am:is (search "\"severity\":" result))
+      (5am:is (search "backpressure" result)))))
 
 (5am:test test-async-on-drop-nil-suppresses
   "on-drop returning NIL suppresses the warning line entirely."
   (let* ((out (make-string-output-stream))
+         (fmt (make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter nil
+               :formatter fmt
                :on-drop (lambda (n) (declare (ignore n)) nil))))
     (dotimes (i 20)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))

@@ -22,7 +22,7 @@
   (thread            nil   :type (or null bt:thread))
   (stream            nil   :type (or null stream))
   (running           nil   :type boolean)
-  (formatter         nil   :type (or null function))
+  (formatter         nil   :type (or null formatter))
   (on-drop           nil   :type (or null function))
   (on-error          nil   :type (or null function))
   (notify            nil   :type t)
@@ -44,7 +44,7 @@
       (bt:with-lock-held ((async-output-space-lock async-output))
         (sb-thread:condition-broadcast cv)))))
 
-(declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null function))
+(declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null formatter))
                                   (:on-drop (or null function)) (:on-error (or null function))
                                   (:blocking boolean) (:block-timeout t)
                                   (:on-block-timeout (or null function)))
@@ -229,9 +229,9 @@ Atomically resets the counter via CAS. Stream errors are caught internally."
         (return-from emit-drop-warning (values)))
       (multiple-value-bind (message fields) (funcall on-drop actual-dropped)
         (when (or message fields)
-          (let* ((formatter (async-output-formatter async-output))
-                 (line (if formatter
-                          (funcall formatter +warn+ "" nil nil message fields)
+          (let* ((fmt (async-output-formatter async-output))
+                 (line (if (formatter-p fmt)
+                          (funcall (formatter-format-fn fmt) +warn+ "" nil message fields)
                           (format nil "{\"level\":~d,\"msg\":~s}" +warn+ (or message "")))))
             (handler-case
                 (progn (write-string line stream)

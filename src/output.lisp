@@ -59,7 +59,7 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
                  (make-destination
                   :async-output (make-async-output stream
                                                    :capacity capacity
-                                                   :formatter nil
+                                                   :formatter formatter
                                                    :on-drop on-drop
                                                    :on-error on-error
                                                    :blocking blocking

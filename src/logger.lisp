@@ -259,7 +259,7 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
                           ((or (streamp output) (null output))
                            (make-async-output (or output *error-output*)
                                               :capacity capacity
-                                              :formatter nil
+                                              :formatter formatter
                                               :on-drop on-drop
                                               :on-error nil
                                               :blocking blocking
