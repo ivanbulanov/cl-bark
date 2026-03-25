@@ -244,12 +244,17 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
                  (not (eq on-drop #'default-on-drop))))
-    (cl:error 'bark-configuration-error
-              :detail (format nil "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
+    (restart-case
+        (cl:error 'bark-configuration-error
+                  :detail (format nil "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
                :block-timeout, :on-block-timeout) with a ~:[function~;tee-output~]. ~
                ~:*~:[Function outputs are synchronous — async parameters do not apply.~;~
                Configure these per-destination in bark:tee.~]"
-                              (tee-output-p output))))
+                                  (tee-output-p output)))
+      (use-value (value)
+        :report "Supply a replacement logger."
+        :interactive (lambda () (list (make-logger)))
+        (return-from make-logger value))))
   (let* ((actual-output (cond
                           ((functionp output) output)
                           ((tee-output-p output) output)
@@ -258,12 +263,18 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
                                               :capacity capacity
                                               :formatter formatter
                                               :on-drop on-drop
+                                              :on-error nil
                                               :blocking blocking
                                               :block-timeout block-timeout
                                               :on-block-timeout on-block-timeout))
-                          (t (cl:error 'bark-configuration-error
-                                       :detail (format nil "Invalid :output for make-logger: ~A ~
-                                        (expected stream, function, tee-output, or NIL)" output)))))
+                          (t (restart-case
+                                 (cl:error 'bark-configuration-error
+                                           :detail (format nil "Invalid :output for make-logger: ~A ~
+                                        (expected stream, function, tee-output, or NIL)" output))
+                               (use-value (value)
+                                 :report "Supply a replacement logger."
+                                 :interactive (lambda () (list (make-logger)))
+                                 (return-from make-logger value))))))
          (effective-context (if (and context field-transform)
                                 (apply-field-transform-plist field-transform context)
                                 context))
@@ -326,9 +337,14 @@ Signals BARK-CONFIGURATION-ERROR if window-seconds produces a tick count exceedi
 fixnum range."
   (let ((ticks (round (* window-seconds internal-time-units-per-second))))
     (when (> ticks most-positive-fixnum)
-      (cl:error 'bark-configuration-error
-                :detail (format nil "window-seconds ~A produces ~A ticks, exceeding fixnum range"
-                                window-seconds ticks)))
+      (restart-case
+          (cl:error 'bark-configuration-error
+                    :detail (format nil "window-seconds ~A produces ~A ticks, exceeding fixnum range"
+                                    window-seconds ticks))
+        (use-value (value)
+          :report "Supply a replacement windowed-counter."
+          :interactive (lambda () (list (make-windowed-counter)))
+          (return-from make-windowed-counter value))))
     (%make-windowed-counter :initial initial
                             :thereafter thereafter
                             :window-ticks ticks
@@ -342,8 +358,13 @@ a counter pass all messages. Pass to :level-sampler on make-logger.
 Signals BARK-CONFIGURATION-ERROR if any value is not a windowed-counter or NIL."
   (flet ((check (name val)
            (when (and val (not (windowed-counter-p val)))
-             (cl:error 'bark-configuration-error
-                       :detail (format nil "~A must be a windowed-counter or nil, got ~A" name (type-of val))))))
+             (restart-case
+                 (cl:error 'bark-configuration-error
+                           :detail (format nil "~A must be a windowed-counter or nil, got ~A" name (type-of val)))
+               (use-value (value)
+                 :report "Supply a replacement level-sampler."
+                 :interactive (lambda () (list (make-level-sampler)))
+                 (return-from make-level-sampler value))))))
     (check :trace trace) (check :debug debug) (check :info info)
     (check :warn warn) (check :error error) (check :fatal fatal))
   (vector nil trace debug info warn error fatal))
@@ -357,8 +378,13 @@ consistent sampling and fall through to the windowed counter.
 Signals BARK-CONFIGURATION-ERROR if RATE < 1."
   (check-type key-fn function)
   (when (< rate 1)
-    (cl:error 'bark-configuration-error
-              :detail (format nil "consistent-sampler rate must be >= 1, got ~A" rate)))
+    (restart-case
+        (cl:error 'bark-configuration-error
+                  :detail (format nil "consistent-sampler rate must be >= 1, got ~A" rate))
+      (use-value (value)
+        :report "Supply a replacement consistent-sampler."
+        :interactive (lambda () (list (make-consistent-sampler :key-fn key-fn :rate 1)))
+        (return-from make-consistent-sampler value))))
   (%make-consistent-sampler :key-fn key-fn :rate rate))
 
 (defun set-level-sampling (logger level windowed-counter)

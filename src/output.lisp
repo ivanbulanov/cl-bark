@@ -41,8 +41,13 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
                    (block-timeout    (getf spec :block-timeout 5.0))
                    (on-block-timeout (getf spec :on-block-timeout)))
                (when (and filter-fn level-kw)
-                 (cl:error 'bark-configuration-error
-                           :detail "Cannot specify both :filter and :level for a tee destination"))
+                 (restart-case
+                     (cl:error 'bark-configuration-error
+                               :detail "Cannot specify both :filter and :level for a tee destination")
+                   (use-value (value)
+                     :report "Supply a replacement tee-output."
+                     :interactive (lambda () (list (make-tee (list (list :stream stream :formatter formatter)))))
+                     (return-from make-tee value))))
                (let ((actual-filter
                        (cond
                          (filter-fn filter-fn)
