@@ -34,6 +34,7 @@
             (write-char #\" stream))
           (write-string string stream)))))
 
+;;; Logfmt formatting
 (defun emit-logfmt-condition (stream condition)
   "Write CONDITION as a quoted logfmt value: \"type: message\".
    Escapes quotes, backslashes, newlines, returns, and tabs in the message."
