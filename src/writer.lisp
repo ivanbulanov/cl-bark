@@ -127,8 +127,7 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
   "Main loop for the async writer thread. Batch-drains the ring buffer."
   (let ((ring      (async-output-ring async-output))
         (stream    (async-output-stream async-output))
-        (notify    (async-output-notify async-output))
-        (drop-fmt  (async-output-formatter async-output)))
+        (notify    (async-output-notify async-output)))
     (flet ((handle-stream-error (e)
              "Handle a stream write error. Returns T if recovered, NIL to exit."
              (let ((on-error (async-output-on-error async-output)))
@@ -162,39 +161,10 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
           (when (and wrote-p (async-output-running async-output))
             (handler-case (force-output stream)
               (cl:error (e) (handle-stream-error e)))))
-        (let ((dropped (ring-buffer-dropped ring)))
-          (when (plusp dropped)
-            (let ((actual-dropped
-                    (loop for old = (ring-buffer-dropped ring)
-                          when (atomics:cas (ring-buffer-dropped ring) old 0)
-                            return old)))
-              (let ((on-drop (async-output-on-drop async-output)))
-                (when on-drop
-                  (multiple-value-bind (message fields) (funcall on-drop actual-dropped)
-                    (when (or message fields)
-                      (handler-case
-                          (let ((line (if drop-fmt
-                                         (funcall drop-fmt +warn+ "" nil nil message fields)
-                                         (format nil "{\"level\":~d,\"msg\":~s}" +warn+ (or message "")))))
-                            (write-string line stream)
-                            (terpri stream)
-                            (force-output stream))
-                        (cl:error () nil)))))))))
-        (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
-                      (prog1 (async-output-flush-acks async-output)
-                        (setf (async-output-flush-acks async-output) nil)))))
-          (dolist (ack acks)
-            (bt:signal-semaphore ack)))
-        ;; Wake blocked producers under the lock to prevent lost wakeups.
-        ;; Without the lock, a producer between offer-fail and condition-wait
-        ;; could miss the broadcast and sleep until the next writer iteration.
+        (emit-drop-warning async-output stream)
+        (signal-flush-acks async-output)
         (broadcast-space-available async-output)))
-    ;; Drain any orphaned flush-acks so callers don't stall for the 5s timeout
-    (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
-                  (prog1 (async-output-flush-acks async-output)
-                    (setf (async-output-flush-acks async-output) nil)))))
-      (dolist (ack acks)
-        (bt:signal-semaphore ack)))))
+    (signal-flush-acks async-output)))
 
 ;;; --- Output Delivery ---
 
@@ -232,3 +202,40 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
             (format *error-output* "bark on-block-timeout error: ~a~%" e)
             (force-output *error-output*)))))
     (atomics:atomic-incf (async-output-block-dropped ao))))
+
+(defun signal-flush-acks (async-output)
+  "Signal all pending flush acknowledgment semaphores.
+Grabs the flush-acks list under the flush-lock, clears it, then signals each."
+  (let ((acks (bt:with-lock-held ((async-output-flush-lock async-output))
+                (prog1 (async-output-flush-acks async-output)
+                  (setf (async-output-flush-acks async-output) nil)))))
+    (dolist (ack acks)
+      (bt:signal-semaphore ack)))
+  (values))
+
+(defun emit-drop-warning (async-output stream)
+  "Check the drop counter and emit a formatted warning if messages were dropped.
+Atomically resets the counter via CAS. Stream errors are caught internally."
+  (let* ((ring (async-output-ring async-output))
+         (dropped (ring-buffer-dropped ring)))
+    (unless (plusp dropped)
+      (return-from emit-drop-warning (values)))
+    (let ((actual-dropped
+            (loop for old = (ring-buffer-dropped ring)
+                  when (atomics:cas (ring-buffer-dropped ring) old 0)
+                    return old))
+          (on-drop (async-output-on-drop async-output)))
+      (unless on-drop
+        (return-from emit-drop-warning (values)))
+      (multiple-value-bind (message fields) (funcall on-drop actual-dropped)
+        (when (or message fields)
+          (let* ((formatter (async-output-formatter async-output))
+                 (line (if formatter
+                          (funcall formatter +warn+ "" nil nil message fields)
+                          (format nil "{\"level\":~d,\"msg\":~s}" +warn+ (or message "")))))
+            (handler-case
+                (progn (write-string line stream)
+                       (terpri stream)
+                       (force-output stream))
+              (cl:error () nil)))))))
+  (values))
