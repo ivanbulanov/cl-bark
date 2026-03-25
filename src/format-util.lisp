@@ -3,12 +3,14 @@
 (in-package #:bark)
 
 ;;; --- Reusable format stream (thread-safe, lock-free) ---
+
 ;;; Each thread gets its own string-output-stream via dynamic binding.
 ;;; New threads auto-bind via bt:*default-special-bindings*.
 ;;; The internal buffer grows to the largest log line seen, then stays there —
 ;;; no per-call allocation for the stream itself, only for the result string.
 
 ;;; --- Formatting ---
+
 (defvar *format-stream* nil
   "Per-thread reusable string-output-stream for formatters.
    Bound per-thread via bt:*default-special-bindings*; lazily created on first use.")
@@ -26,6 +28,7 @@
      (get-output-stream-string ,var)))
 
 ;;; --- Helpers ---
+
 
 (declaim (inline type-name-string))
 (defun type-name-string (value)

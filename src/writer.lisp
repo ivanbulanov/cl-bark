@@ -15,6 +15,7 @@
   (format nil "bark: dropped ~d log messages (output too slow)" count))
 
 ;;; --- Async output ---
+
 (defstruct (async-output (:constructor %make-async-output))
   "Writer thread + ring buffer for async log delivery."
   (ring              nil   :type (or null ring-buffer))
@@ -121,6 +122,7 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
 (declaim (ftype (function (async-output) (values null &optional)) writer-loop))
 
 ;;; --- Writer thread ---
+
 (defun writer-loop (async-output)
   "Main loop for the async writer thread. Batch-drains the ring buffer."
   (let ((ring      (async-output-ring async-output))
@@ -165,6 +167,7 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
     (signal-flush-acks async-output)))
 
 ;;; --- Output Delivery ---
+
 
 (defun blocking-deliver (ao line)
   "Deliver LINE to blocking async-output AO, waiting for space if full."

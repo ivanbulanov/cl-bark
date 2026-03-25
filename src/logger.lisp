@@ -7,6 +7,7 @@
    Must be power of 2 for bit-and optimization.")
 
 ;;; --- Sampling ---
+
 (defstruct (windowed-counter (:constructor %make-windowed-counter))
   "Per-level sampling: first INITIAL per window always pass, then 1-in-THEREAFTER."
   (initial      5   :type fixnum :read-only t)
@@ -70,6 +71,7 @@ hash decision."
   (values))
 
 ;;; --- Construction ---
+
 (defstruct (logger (:constructor %make-logger))
   "A bark logger instance."
   (root-p          nil   :type boolean :read-only t)
@@ -91,6 +93,7 @@ hash decision."
 (setf (documentation 'logger-p 'function) "Return T if OBJECT is a logger.")
 
 ;;; --- Context and fields ---
+
 (defvar *logger* nil "The current bark logger.")
 
 (defvar *log-context* nil "Dynamic context bindings for the current log scope.")
@@ -303,6 +306,7 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
   (values))
 
 ;;; --- Level management ---
+
 (defun set-level (logger level)
   "Set the minimum log level for LOGGER. Accepts a keyword (:trace through :fatal)
 or a fixnum level constant. Takes effect immediately."
@@ -321,6 +325,7 @@ per-destination filters, or compile-time elimination."
            (logger-level logger))))
 
 ;;; --- Sampling API ---
+
 
 (defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))
   "Create a windowed counter for rate-limiting log messages.
@@ -475,6 +480,7 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
      (funcall fn output))))
 
 ;;; --- Lifecycle ---
+
 (defun flush (logger)
   "Flush LOGGER, blocking until all pending messages are written.
 Signals BARK-ASYNC-STOPPED if any async output has been stopped.
@@ -524,6 +530,7 @@ A CONTINUE restart is available to silently ignore the operation."
 
 ;;; --- Context ---
 
+
 (defmacro with-context ((&rest pairs) &body body)
   "Bind dynamic log context fields for the duration of BODY."
   `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
@@ -532,6 +539,7 @@ A CONTINUE restart is available to silently ignore the operation."
      ,@body))
 
 ;;; --- Utilities ---
+
 
 (defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
   "Execute BODY with a test logger that captures log output.
@@ -558,6 +566,7 @@ A CONTINUE restart is available to silently ignore the operation."
      (lambda () (nreverse results)))))
 
 ;;; --- Convenience API ---
+
 
 (macrolet ((define-log-macro (name accessor)
              `(defmacro ,name (&rest args)

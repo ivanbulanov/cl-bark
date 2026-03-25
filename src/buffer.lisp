@@ -3,6 +3,7 @@
 (in-package #:bark)
 
 ;;; --- Log buffer ---
+
 (defstruct (buffer-entry (:constructor make-buffer-entry))
   "A single buffered log entry, captured for deferred emission.
    Slots: LEVEL (fixnum), MESSAGE (string or nil), FIELDS (plist of per-call fields),
@@ -20,6 +21,7 @@
       (documentation 'buffer-entry-timestamp 'function) "Millisecond unix timestamp from the original log call.")
 
 ;;; --- Buffer logger ---
+
 
 (defun make-buffer-capture-fn (level-value buffer)
   "Create a function that captures log calls into BUFFER instead of formatting."
@@ -50,6 +52,7 @@
 
 ;;; --- Flush ---
 
+
 (defun emit-entry (root-logger entry)
   "Replay a single buffer ENTRY through ROOT-LOGGER's output pipeline."
   (let* ((*override-timestamp* (buffer-entry-timestamp entry))
@@ -72,12 +75,14 @@
 
 ;;; --- Root logger tracking ---
 
+
 (defvar *root-logger* nil
   "The non-buffer logger that the buffer scope flushes through.
    Bound by with-log-buffer. When non-nil, signals that we are inside a buffer
    scope and nested with-log-buffer calls become no-ops.")
 
 ;;; --- with-log-buffer ---
+
 
 (defmacro with-log-buffer ((logger &key (level :trace) on-flush) &body body)
   "Execute BODY with log calls to LOGGER buffered via *logger*.

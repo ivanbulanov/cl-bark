@@ -3,6 +3,7 @@
 (in-package #:bark)
 
 ;;; --- Timestamps ---
+
 (defvar *override-timestamp* nil
   "When non-nil, formatters use this value instead of the wall clock.
    Internal — used by with-log-buffer for replay.")

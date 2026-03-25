@@ -3,6 +3,7 @@
 (in-package #:bark)
 
 ;;; --- Configuration ---
+
 (defvar *max-json-depth* 4
   "Maximum nesting depth for collections in emit-json-value.
    At depth 0, collections become <type> placeholders.")
@@ -17,6 +18,7 @@
 (declaim (ftype (function (string stream) (values null &optional)) write-json-escaped-string))
 
 ;;; --- Serialization ---
+
 (defun write-json-escaped-string (string stream)
   "Write STRING to STREAM with JSON escaping."
   (declare (optimize (speed 3) (safety 1)))
@@ -217,6 +219,7 @@
     (emit-json-fields s bindings)))
 
 ;;; --- Formatting ---
+
 (defun build-json-level-prefixes (level-key level-format)
   "Build a vector of pre-computed JSON level field strings (without opening brace).
    LEVEL-KEY is the JSON key name (e.g. \"level\" or \"severity\").
@@ -277,6 +280,7 @@
         (write-string "}" s)))))
 
 ;;; --- Standard Formatters ---
+
 ;;; Thin delegates to the factories with default settings.
 ;;; The factory closures are created once at load time.
 

@@ -18,6 +18,7 @@
   "Number of level index slots (0 through fatal).")
 
 ;;; --- Level management ---
+
 (defparameter *level-colors*
   #(nil
     "36"    ; trace = cyan
@@ -54,4 +55,3 @@
       (svref *level-names* level)
       "unknown"))
 
-;;; --- Conditions ---

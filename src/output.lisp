@@ -14,6 +14,7 @@
   (destinations #() :type simple-vector))
 
 ;;; --- Tee output ---
+
 (defstruct tee-output
   "Fan-out output: destinations grouped by formatter for shared-format optimization."
   (groups #() :type simple-vector))
@@ -117,6 +118,7 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
 (declaim (ftype (function (t string) (values &optional)) deliver-line))
 
 ;;; --- Dispatch ---
+
 (defun deliver-line (output line)
   "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
   (if (async-output-p output)

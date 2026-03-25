@@ -3,6 +3,7 @@
 (in-package #:bark)
 
 ;;; --- Pretty formatting ---
+
 (defvar *max-pretty-depth* 4
   "Bound as CL:*PRINT-LEVEL* inside pretty-formatter.
    Controls nesting depth for value output. NIL means unlimited.")
@@ -15,6 +16,7 @@
   "Maximum stack frames in pretty-formatter condition output. NIL means unlimited.")
 
 ;;; --- Pretty Formatter Helpers ---
+
 
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
