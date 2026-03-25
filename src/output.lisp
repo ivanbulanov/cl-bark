@@ -5,12 +5,12 @@
 (defstruct destination
   "A single output destination within a tee."
   (async-output nil :type async-output)
-  (formatter    nil :type function)
+  (formatter    nil :type formatter)
   (filter       nil :type (or null function)))
 
 (defstruct formatter-group
   "Destinations sharing an eq formatter, for shared-formatter optimization."
-  (formatter    nil :type function)
+  (formatter    nil :type formatter)
   (destinations #() :type simple-vector))
 
 ;;; --- Tee output ---
@@ -30,7 +30,7 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
           (mapcar
            (lambda (spec)
              (let ((stream           (getf spec :stream))
-                   (formatter        (or (getf spec :formatter) #'json-formatter))
+                   (formatter        (or (getf spec :formatter) *default-json-formatter*))
                    (filter-fn        (getf spec :filter))
                    (level-kw         (getf spec :level))
                    (capacity         (or (getf spec :capacity) +default-buffer-capacity+))
@@ -59,7 +59,7 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
                  (make-destination
                   :async-output (make-async-output stream
                                                    :capacity capacity
-                                                   :formatter formatter
+                                                   :formatter nil
                                                    :on-drop on-drop
                                                    :on-error on-error
                                                    :blocking blocking
@@ -95,13 +95,18 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
                        (cl:error "Cannot specify both :level and :filter in tee destination spec"))
                   collect `(list :stream ,stream-expr ,@keys)))))
 
-(declaim (ftype (function (tee-output fixnum string list list (or null string) list) (values &optional)) emit-to-tee))
+(declaim (ftype (function (tee-output fixnum t list (or null string) list) (values &optional)) emit-to-tee))
 
-(defun emit-to-tee (tee-output level-value chindings raw-bindings context message fields)
-  "Emit a log event to all destinations in TEE-OUTPUT, grouped by formatter."
+(defun emit-to-tee (tee-output level-value prepared context message fields)
+  "Emit a log event to all destinations in TEE-OUTPUT, grouped by formatter.
+   PREPARED is a simple-vector of per-group prepared strings."
   (declare (optimize (speed 3) (safety 1)))
-  (loop for group across (tee-output-groups tee-output) do
-    (let ((passing nil))
+  (loop for group across (tee-output-groups tee-output)
+        for i fixnum from 0 do
+    (let ((passing nil)
+          (group-prepared (if (simple-vector-p prepared)
+                              (aref prepared i)
+                              prepared)))
       ;; Collect destinations that pass their filter
       (loop for dest across (formatter-group-destinations group)
             for filter = (destination-filter dest)
@@ -109,8 +114,8 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
               do (push dest passing))
       ;; Format once for the group, push to all passing destinations
       (when passing
-        (let ((line (funcall (formatter-group-formatter group)
-                             level-value chindings raw-bindings context message fields)))
+        (let ((line (funcall (formatter-format-fn (formatter-group-formatter group))
+                             level-value group-prepared context message fields)))
           (dolist (dest passing)
             (deliver-line (destination-async-output dest) line))))))
   (values))
@@ -131,13 +136,16 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
         (stream (write-string line output) (terpri output) (force-output output))
         (function (funcall output line)))))
 
-(declaim (ftype (function (t function fixnum string list list (or null string) list) (values &optional))
+(declaim (ftype (function (t (or null formatter) fixnum t list (or null string) list) (values &optional))
                 dispatch-to-output))
 
-(defun dispatch-to-output (output formatter level chindings raw-bindings ctx message flds)
-  "Format and deliver a log event. Routes to tee or single output."
+(defun dispatch-to-output (output formatter level prepared ctx message flds)
+  "Format and deliver a log event. Routes to tee or single output.
+   For tee outputs, each destination group has its own formatter (FORMATTER is ignored).
+   For non-tee outputs, FORMATTER must be non-nil; falls back to *default-json-formatter*."
   (if (tee-output-p output)
-      (emit-to-tee output level chindings raw-bindings ctx message flds)
-      (deliver-line output
-                    (funcall (the function formatter)
-                             level chindings raw-bindings ctx message flds))))
+      (emit-to-tee output level prepared ctx message flds)
+      (let ((fmt (or formatter *default-json-formatter*)))
+        (deliver-line output
+                      (funcall (formatter-format-fn fmt)
+                               level prepared ctx message flds)))))

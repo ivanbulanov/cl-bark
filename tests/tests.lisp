@@ -626,6 +626,19 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is-true (search "10" output))
     (5am:is-false (search "..." output))))
 
+(5am:test test-dispatch-nil-formatter-falls-back-to-default
+  "dispatch-to-output with nil formatter falls back to *default-json-formatter*."
+  (let* ((out (make-string-output-stream))
+         (lgr (make-logger :level :info
+                           :output (sync-output out)
+                           :formatter nil)))
+    (let ((*logger* lgr))
+      (bark:info "fallback test"))
+    (let ((result (get-output-stream-string out)))
+      ;; Should produce valid JSON via *default-json-formatter*
+      (5am:is-true (search "fallback test" result))
+      (5am:is-true (search "\"level\"" result)))))
+
 ;;; --- Context & Integration ---
 
 (5am:test test-with-context
