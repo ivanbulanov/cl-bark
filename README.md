@@ -261,7 +261,7 @@ Log output includes fields from three sources, merged in this order:
   (bark:info *cache-log* "cache miss"))     ; → component=cache, request-id=req-123
 ```
 
-With child loggers alone, you'd need to create a new child of each logger per request, thread them through every function, and discard them after.
+With child loggers alone, you'd need to create a temporary child of *each* component logger per request and ensure every function uses the right one. `with-context` adds the field once and all loggers see it.
 
 **Child loggers win for permanent identity.** A worker's ID is fixed for its lifetime:
 
