@@ -125,6 +125,8 @@ Checks the level threshold only. Does not account for sampling, per-destination 
                              level-sampler consistent))
 
 ;; Create child logger with static context (pre-serialized fields)
+;; Children share the parent's output — no threads, no cleanup needed (just let GC collect).
+;; Do not call bark:stop on a child; always stop the root logger.
 (bark:make-child parent &key context field-transform level)
 
 ;; Change level at runtime (swaps function slots)
