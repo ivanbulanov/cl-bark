@@ -196,7 +196,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-serialize-bindings
   "Test serialize-bindings produces a correct JSON fragment."
-  (let ((r (serialize-bindings-json(list :service "web" :version 2))))
+  (let ((r (serialize-bindings-json (list :service "web" :version 2))))
     (5am:is-true (stringp r))
     (5am:is-true (search "service" r))
     (5am:is-true (search "web" r))
@@ -3248,7 +3248,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-json-formatter-no-level-with-prepared-context
   "make-json-formatter with :level-key nil, no timestamp, but prepared context present."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
-    (let* ((chd (serialize-bindings-json(list :svc "api")))
+    (let* ((chd (serialize-bindings-json (list :svc "api")))
            (result (funcall (formatter-format-fn fmt) +info+ chd nil "test" nil)))
       (5am:is-false (search "\"level\"" result))
       (5am:is-true (search "\"svc\":\"api\"" result))
