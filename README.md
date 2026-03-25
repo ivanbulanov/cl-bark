@@ -176,13 +176,11 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 
 - `:stream` (required) — an output stream
 - `:formatter` — a formatter function (defaults to `#'bark:json-formatter`)
-- `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip
+- `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip. Receives the log level (integer) and per-call fields only — not static or dynamic context
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
 - `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
 - `:on-drop` — `(lambda (count) ...)` called when messages are dropped due to a full buffer. Returns a warning message string, or NIL to suppress. Can optionally return extra fields as a second value: `(values message fields)`. See [Backpressure](#backpressure) for the full return protocol. Defaults to `#'bark::default-on-drop`
 - `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. Return a new stream to swap and continue writing, or nil to stop the writer thread (subsequent log calls silently drop messages). The condition is the original `file-error` or `stream-error` — bark does not wrap it. When omitted, the writer logs to `*error-output*` and stops.
-
-The filter receives the log level (integer) and the per-call fields (the `&rest` plist passed to `bark:info` etc.). It does **not** see static context or dynamic context — those are part of formatting, not routing.
 
 `bark:stop` tears down all writer threads. Streams are not closed — the caller who opened them is responsible for closing them.
 
