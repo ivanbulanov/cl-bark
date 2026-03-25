@@ -3581,3 +3581,63 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (5am:is (subtypep 'bark:bark-async-stopped 'bark:bark-lifecycle-error))
   (5am:is (subtypep 'bark:bark-child-operation-error 'bark:bark-lifecycle-error))
   (5am:is (subtypep 'bark:bark-error 'cl:error)))
+
+(5am:test test-consistent-hash-keep-p-rate-1-always-keeps
+  "Rate 1 means mod hash 1 = 0 always, so every key is kept."
+  (dolist (key '("foo" "bar" 42 :baz))
+    (5am:is-true (bark::consistent-hash-keep-p key 1))))
+
+(5am:test test-consistent-hash-keep-p-distribution
+  "With a large sample, rate=N keeps roughly 1/N of distinct keys."
+  (let* ((rate 10)
+         (n 10000)
+         (kept (loop for i below n
+                     count (bark::consistent-hash-keep-p (format nil "key-~d" i) rate))))
+    ;; Expect ~1000 (1/10 of 10000). Allow 20% tolerance.
+    (5am:is (< 700 kept 1300)
+            "Expected ~1000 kept out of 10000 at rate 10, got ~d" kept)))
+
+(5am:test test-windowed-allow-p-initial-burst
+  "Counts <= initial are always allowed."
+  (let ((wc (make-windowed-counter :initial 5 :thereafter 100)))
+    (5am:is-true (bark::windowed-allow-p 1 wc))
+    (5am:is-true (bark::windowed-allow-p 5 wc))
+    (5am:is-false (bark::windowed-allow-p 6 wc))))
+
+(5am:test test-windowed-allow-p-thereafter-sampling
+  "After initial burst, only every Nth message passes."
+  (let ((wc (make-windowed-counter :initial 3 :thereafter 10)))
+    ;; After initial, counts 4-9 should be blocked, 10 should pass
+    (5am:is-false (bark::windowed-allow-p 4 wc))
+    (5am:is-false (bark::windowed-allow-p 9 wc))
+    (5am:is-true (bark::windowed-allow-p 10 wc))
+    (5am:is-false (bark::windowed-allow-p 11 wc))
+    (5am:is-true (bark::windowed-allow-p 20 wc))))
+
+(5am:test test-windowed-allow-p-hard-cap
+  "Thereafter=0 means hard cap — nothing passes after initial."
+  (let ((wc (make-windowed-counter :initial 2 :thereafter 0)))
+    (5am:is-true (bark::windowed-allow-p 1 wc))
+    (5am:is-true (bark::windowed-allow-p 2 wc))
+    (5am:is-false (bark::windowed-allow-p 3 wc))
+    (5am:is-false (bark::windowed-allow-p 100 wc))
+    (5am:is-false (bark::windowed-allow-p 1000 wc))))
+
+(5am:test test-write-json-string-basic
+  "Writes a properly quoted JSON string."
+  (5am:is (string= "\"hello\""
+                    (with-output-to-string (s) (bark::write-json-string s "hello")))))
+
+(5am:test test-write-json-string-escapes
+  "Escapes control characters, quotes, and backslashes."
+  (5am:is (string= "\"a\\\"b\""
+                    (with-output-to-string (s) (bark::write-json-string s "a\"b"))))
+  (5am:is (string= "\"a\\\\b\""
+                    (with-output-to-string (s) (bark::write-json-string s "a\\b"))))
+  (5am:is (string= "\"a\\nb\""
+                    (with-output-to-string (s) (bark::write-json-string s (format nil "a~%b"))))))
+
+(5am:test test-write-json-string-empty
+  "Empty string produces two quotes."
+  (5am:is (string= "\"\""
+                    (with-output-to-string (s) (bark::write-json-string s "")))))
