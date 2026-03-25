@@ -17,7 +17,6 @@
 
 ;;; --- Pretty Formatter Helpers ---
 
-
 (defun format-frame-call (frame)
   "Format a stack frame's call as an uppercase string."
   (let ((call (dissect:call frame)))

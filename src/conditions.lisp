@@ -42,7 +42,6 @@ In HANDLER-CASE the trace reflects the handler's stack, not the error origin."
 
 ;;; --- Conditions ---
 
-
 (define-condition bark-error (cl:error)
   ()
   (:documentation "Base condition for all cl-bark errors."))

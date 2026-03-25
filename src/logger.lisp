@@ -326,7 +326,6 @@ per-destination filters, or compile-time elimination."
 
 ;;; --- Sampling API ---
 
-
 (defun make-windowed-counter (&key (initial 5) (thereafter 100) (window-seconds 1))
   "Create a windowed counter for rate-limiting log messages.
 INITIAL (fixnum, default 5): messages always passed at the start of each window.
@@ -530,7 +529,6 @@ A CONTINUE restart is available to silently ignore the operation."
 
 ;;; --- Context ---
 
-
 (defmacro with-context ((&rest pairs) &body body)
   "Bind dynamic log context fields for the duration of BODY."
   `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
@@ -539,7 +537,6 @@ A CONTINUE restart is available to silently ignore the operation."
      ,@body))
 
 ;;; --- Utilities ---
-
 
 (defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
   "Execute BODY with a test logger that captures log output.
@@ -566,7 +563,6 @@ A CONTINUE restart is available to silently ignore the operation."
      (lambda () (nreverse results)))))
 
 ;;; --- Convenience API ---
-
 
 (macrolet ((define-log-macro (name accessor)
              `(defmacro ,name (&rest args)

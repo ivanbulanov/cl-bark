@@ -168,7 +168,6 @@ When BLOCKING is true, callers wait for space instead of dropping messages."
 
 ;;; --- Output Delivery ---
 
-
 (defun blocking-deliver (ao line)
   "Deliver LINE to blocking async-output AO, waiting for space if full."
   (let ((ring (async-output-ring ao))

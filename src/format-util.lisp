@@ -29,7 +29,6 @@
 
 ;;; --- Helpers ---
 
-
 (declaim (inline type-name-string))
 (defun type-name-string (value)
   "Return the type of VALUE as a lowercase string."
