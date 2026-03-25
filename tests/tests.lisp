@@ -2,21 +2,26 @@
 
 (defpackage #:bark-tests
   (:use #:cl)
+  (:shadowing-import-from #:bark #:formatter)
   (:import-from #:bark
    ;; Level constants and helpers
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
    #:level-from-keyword #:level-name
    ;; Struct accessors
    #:logger-p #:logger-level #:logger-formatter
-   #:logger-output #:logger-chindings #:logger-raw-bindings
+   #:logger-output #:logger-context #:logger-prepared
    #:logger-trace-fn #:logger-debug-fn #:logger-info-fn
    #:logger-warn-fn #:logger-error-fn #:logger-fatal-fn
+   ;; Formatter protocol
+   #:make-formatter #:formatter-p #:formatter-prepare-fn #:formatter-format-fn
+   #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
    ;; JSON/serialization internals
    #:emit-json-value #:emit-json-fields #:emit-json-key
    #:emit-logfmt-value #:emit-logfmt-key
    #:*max-json-depth* #:*max-json-length*
    #:*max-pretty-depth* #:*max-pretty-length*
-   #:write-json-escaped-string #:serialize-bindings
+   #:write-json-escaped-string #:serialize-bindings-json
+   #:make-concat-prepare-fn
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
    #:async-output-stream #:async-output-running #:async-output-ring #:async-output-thread
@@ -191,12 +196,30 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-serialize-bindings
   "Test serialize-bindings produces a correct JSON fragment."
-  (let ((r (serialize-bindings (list :service "web" :version 2))))
+  (let ((r (serialize-bindings-json(list :service "web" :version 2))))
     (5am:is-true (stringp r))
     (5am:is-true (search "service" r))
     (5am:is-true (search "web" r))
     (5am:is-true (search "version" r))
     (5am:is-true (search "2" r))))
+
+(5am:test test-make-concat-prepare-fn
+  "Test make-concat-prepare-fn returns a prepare-fn that serializes and concatenates."
+  (let ((prepare (make-concat-prepare-fn #'serialize-bindings-json)))
+    ;; Root call: parent-prepared is nil
+    (let ((result (funcall prepare nil (list :service "web"))))
+      (5am:is-true (stringp result))
+      (5am:is-true (search "service" result))
+      (5am:is-true (search "web" result)))
+    ;; Child call: concatenate with parent
+    (let* ((parent (funcall prepare nil (list :service "web")))
+           (child (funcall prepare parent (list :request-id "abc"))))
+      (5am:is-true (search "service" child))
+      (5am:is-true (search "request-id" child)))
+    ;; No delta context: returns parent or empty string
+    (5am:is (string= "" (funcall prepare nil nil)))
+    (let ((parent (funcall prepare nil (list :k "v"))))
+      (5am:is (string= parent (funcall prepare parent nil))))))
 
 ;;; --- JSON Value Serialization (new types) ---
 
@@ -375,7 +398,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-logfmt-bare-key-for-true
   "In logfmt, boolean t emits bare key with no =value."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
+    (let ((l (bark:make-logger :level :info :formatter (make-logfmt-formatter) :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg" :verbose t :count 42))
     (let ((s (get-output-stream-string out)))
       ;; Should have bare "verbose" without "=true"
@@ -388,10 +411,10 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-make-logger
   "Create a logger with make-logger, verify level and formatter."
-  (let ((lgr (make-logger :context '(:name "myapp") :level :debug :formatter #'json-formatter)))
+  (let ((lgr (make-logger :context '(:name "myapp") :level :debug :formatter (make-json-formatter))))
     (5am:is-true (logger-p lgr))
     (5am:is (= +debug+ (logger-level lgr)))
-    (5am:is (eq #'json-formatter (logger-formatter lgr)))))
+    (5am:is (formatter-p (logger-formatter lgr)))))
 
 (5am:test test-set-level-noop
   "Create a logger at :info, verify trace-fn and debug-fn are noop but info-fn is not."
@@ -453,23 +476,23 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:signals type-error (bark:level-enabled-p lgr :bogus))))
 
 (5am:test test-child-logger
-  "Create parent with chindings, create child with more bindings, verify concatenation."
+  "Create parent with prepared context, create child with more bindings, verify concatenation."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))
          (parent-with-bindings (make-child parent :context '(:service "web")))
          (ch (make-child parent-with-bindings :context '(:request-id "abc"))))
-    (5am:is-true (search "service" (logger-chindings ch)))
-    (5am:is-true (search "web" (logger-chindings ch)))
-    (5am:is-true (search "request-id" (logger-chindings ch)))
-    (5am:is-true (search "abc" (logger-chindings ch)))
+    (5am:is-true (search "service" (logger-prepared ch)))
+    (5am:is-true (search "web" (logger-prepared ch)))
+    (5am:is-true (search "request-id" (logger-prepared ch)))
+    (5am:is-true (search "abc" (logger-prepared ch)))
     (5am:is (eq (logger-formatter parent-with-bindings) (logger-formatter ch)))
     (5am:is (eq (logger-output parent-with-bindings) (logger-output ch)))))
 
-(5am:test test-child-raw-bindings
-  "Create parent with raw-bindings, create child, verify raw-bindings are appended."
+(5am:test test-child-context
+  "Create parent with context, create child, verify context are appended."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))
          (p1 (make-child parent :context '(:a 1 :b 2)))
          (ch (make-child p1 :context '(:c 3))))
-    (let ((rb (logger-raw-bindings ch)))
+    (let ((rb (logger-context ch)))
       (5am:is-true (not (null rb)))
       (5am:is (= 1 (getf rb :a)))
       (5am:is (= 2 (getf rb :b)))
@@ -479,7 +502,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Verify logger name appears in JSON output."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (let ((*logger* (make-logger :context '(:name "myapp") :level :info
-                                  :formatter #'json-formatter
+                                  :formatter (make-json-formatter)
                                   :output collector)))
       (bark:info "hello")
       (let ((line (first (funcall results-fn))))
@@ -489,7 +512,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-json-formatter-basic
   "Use json-formatter directly, verify output has level, ts, msg keys."
-  (let ((output (json-formatter +info+ "" nil nil "hello world" nil)))
+  (let ((output (json-formatter +info+ "" nil "hello world" nil)))
     (5am:is-true (stringp output))
     (5am:is-true (search "\"level\"" output))
     (5am:is-true (search "\"ts\"" output))
@@ -499,7 +522,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-json-formatter-with-fields
   "Test json-formatter with per-call fields."
-  (let ((output (json-formatter +warn+ "" nil nil "oops" (list :code 404 :path "/api"))))
+  (let ((output (json-formatter +warn+ "" nil "oops" (list :code 404 :path "/api"))))
     (5am:is-true (search "code" output))
     (5am:is-true (search "404" output))
     (5am:is-true (search "path" output))
@@ -507,14 +530,14 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-json-formatter-with-context
   "Test json-formatter with context alist."
-  (let ((output (json-formatter +info+ "" nil '((:request-id . "xyz")) "ctx test" nil)))
+  (let ((output (json-formatter +info+ "" '((:request-id . "xyz")) "ctx test" nil)))
     (5am:is-true (search "request-id" output))
     (5am:is-true (search "xyz" output))))
 
-(5am:test test-json-formatter-with-chindings
-  "Test json-formatter with pre-serialized chindings."
-  (let* ((chd (serialize-bindings (list :service "api" :version 3)))
-         (output (json-formatter +debug+ chd nil nil "chinding test" nil)))
+(5am:test test-json-formatter-with-prepared
+  "Test json-formatter with pre-serialized context."
+  (let* ((prepared (serialize-bindings-json (list :service "api" :version 3)))
+         (output (json-formatter +debug+ prepared nil "context test" nil)))
     (5am:is-true (search "service" output))
     (5am:is-true (search "api" output))
     (5am:is-true (search "version" output))
@@ -522,7 +545,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-logfmt-formatter-basic
   "Test logfmt-formatter, verify output format."
-  (let ((output (logfmt-formatter +info+ "" nil nil "hello" nil)))
+  (let ((output (logfmt-formatter +info+ "" nil "hello" nil)))
     (5am:is-true (stringp output))
     (5am:is-true (search "level=info" output))
     (5am:is-true (search "ts=" output))
@@ -531,14 +554,14 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-logfmt-formatter-with-fields
   "Test logfmt with fields, verify key=value pairs."
-  (let ((output (logfmt-formatter +warn+ "" nil nil "warning" (list :code 500 :path "/err"))))
+  (let ((output (logfmt-formatter +warn+ "" nil "warning" (list :code 500 :path "/err"))))
     (5am:is-true (search "code=500" output))
     (5am:is-true (search "path=" output))
     (5am:is-true (search "/err" output))))
 
 (5am:test test-pretty-formatter-basic
   "Test pretty-formatter produces output with ANSI escape codes."
-  (let ((output (pretty-formatter +info+ "" nil nil "pretty test" nil)))
+  (let ((output (pretty-formatter +info+ "" nil "pretty test" nil)))
     (5am:is-true (stringp output))
     (5am:is-true (search (string #\Esc) output))
     (5am:is-true (search "pretty test" output))))
@@ -546,7 +569,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-pretty-formatter-print-length
   "Pretty-formatter truncates long lists via *max-pretty-length*."
   (let* ((*max-pretty-length* 3)
-         (output (pretty-formatter +info+ "" nil nil "msg"
+         (output (pretty-formatter +info+ "" nil "msg"
                                    (list :data '(1 2 3 4 5)))))
     (5am:is-true (search "1" output))
     (5am:is-true (search "3" output))
@@ -558,7 +581,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-pretty-formatter-print-level
   "Pretty-formatter truncates deep nesting via *max-pretty-depth*."
   (let* ((*max-pretty-depth* 1)
-         (output (pretty-formatter +info+ "" nil nil "msg"
+         (output (pretty-formatter +info+ "" nil "msg"
                                    (list :data '((nested))))))
     ;; CL printer uses "#" for depth truncation
     (5am:is-true (search "#" output))))
@@ -568,7 +591,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((circ (list 1 2 3)))
     (setf (cdr (last circ)) circ)
     ;; Should complete without hanging — *print-circle* is bound to T
-    (let ((output (pretty-formatter +info+ "" nil nil "msg"
+    (let ((output (pretty-formatter +info+ "" nil "msg"
                                     (list :data circ))))
       (5am:is-true (stringp output))
       (5am:is-true (search "#" output)))))
@@ -577,7 +600,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Pretty-formatter with NIL limits produces unlimited output."
   (let* ((*max-pretty-length* nil)
          (*max-pretty-depth* nil)
-         (output (pretty-formatter +info+ "" nil nil "msg"
+         (output (pretty-formatter +info+ "" nil "msg"
                                    (list :data '(1 2 3 4 5 6 7 8 9 10)))))
     ;; All elements should appear
     (5am:is-true (search "10" output))
@@ -1031,7 +1054,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
         do (loop for dest across (formatter-group-destinations group)
                  do (bark::stop-async-output (destination-async-output dest)))))
 
-(defun log-at (logger-level msg-level &optional (fmt #'bark:json-formatter))
+(defun log-at (logger-level msg-level &optional (fmt (make-json-formatter)))
   "Create a logger at LOGGER-LEVEL, fire one message at MSG-LEVEL, return output string."
   (let ((out (make-string-output-stream)))
     (let ((l (bark:make-logger :level logger-level :formatter fmt :output (sync-output out))))
@@ -1046,7 +1069,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
         (funcall fn l "test")))
     (get-output-stream-string out)))
 
-(defun log-to-string (level &optional (formatter #'bark:json-formatter))
+(defun log-to-string (level &optional (formatter (make-json-formatter)))
   "Log one message at LEVEL with FORMATTER, return output string."
   (log-at level level formatter))
 
@@ -1056,7 +1079,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "All 6 levels emit the correct level name string in JSON output."
   (loop for (kw expected) in '((:trace "trace") (:debug "debug") (:info "info")
                                 (:warn "warn") (:error "error") (:fatal "fatal"))
-        do (let* ((line (log-to-string kw #'bark:json-formatter))
+        do (let* ((line (log-to-string kw (make-json-formatter)))
                   (level (gethash "level" (yason:parse line))))
              (5am:is (string= expected level)))))
 
@@ -1078,19 +1101,19 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-formatters
   "All three formatters produce non-empty, format-appropriate output."
   ;; JSON: must be valid JSON with level/ts/msg keys
-  (let* ((s (log-at :info :info #'bark:json-formatter))
+  (let* ((s (log-at :info :info (make-json-formatter)))
          (p (yason:parse s)))
     (5am:is-true (hash-table-p p))
     (5am:is-true (stringp (gethash "level" p)))
     (5am:is-true (integerp (gethash "ts"    p)))
     (5am:is-true (stringp  (gethash "msg"   p))))
   ;; Logfmt: key=value structure, contains level= and msg=
-  (let ((s (log-at :info :info #'bark:logfmt-formatter)))
+  (let ((s (log-at :info :info (make-logfmt-formatter))))
     (5am:is-true (search "level=info" s))
     (5am:is-true (search "msg="       s))
     (5am:is-true (search "ts="        s)))
   ;; Pretty: contains ANSI escape codes and the message text
-  (let ((s (log-at :info :info #'bark:pretty-formatter)))
+  (let ((s (log-at :info :info (make-pretty-formatter))))
     (5am:is-true (search (string #\Escape) s))
     (5am:is-true (search "test" s))))
 
@@ -1143,7 +1166,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-set-level-dynamic
   "SET-LEVEL swaps fn slots so level changes take effect immediately."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :trace :formatter #'bark:json-formatter :output (sync-output out))))
+    (let ((l (bark:make-logger :level :trace :formatter (make-json-formatter) :output (sync-output out))))
       ;; At :trace - debug fires
       (funcall (bark::logger-debug-fn l) l "should-emit")
       (bark:set-level l :error)
@@ -1190,7 +1213,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-logfmt-quoting-rules
   "Logfmt formatter quotes values containing spaces; bare values are unquoted."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
+    (let ((l (bark:make-logger :level :info :formatter (make-logfmt-formatter) :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg"
                :bare  "simple"
                :space "has spaces"
@@ -1259,12 +1282,12 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (let ((line (first (funcall logs))))
       (5am:is (search "\"level\"" line))))
   ;; Explicit logfmt
-  (bark:with-captured-logs (logs #'bark:logfmt-formatter)
+  (bark:with-captured-logs (logs (make-logfmt-formatter))
     (bark:info "hi")
     (let ((line (first (funcall logs))))
       (5am:is (search "level=info" line))))
   ;; Explicit pretty
-  (bark:with-captured-logs (logs #'bark:pretty-formatter)
+  (bark:with-captured-logs (logs (make-pretty-formatter))
     (bark:info "hi")
     (let ((line (first (funcall logs))))
       (5am:is (search "INFO" line))
@@ -1369,8 +1392,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-async-drop-warning
   "Default on-drop produces a formatted JSON line with level, timestamp, and message."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp nil))
-         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 5)
@@ -1381,17 +1403,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
       ;; Message content preserved
       (5am:is (search "dropped 5 log messages" result))
       ;; Formatted as JSON with warn level
-      (5am:is (search "\"level\":\"warn\"" result))
+      (5am:is (search "\"level\":4" result))
       (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-uses-formatter-config
-  "Drop warnings use the configured formatter's keys and format."
+  "Drop warnings use the fallback JSON format when no formatter is provided."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp nil
-                                        :level-format :string
-                                        :level-key "severity"
-                                        :message-key "message"))
-         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 3)
@@ -1399,18 +1417,14 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Uses configured keys
-      (5am:is (search "\"severity\":\"warn\"" result))
-      (5am:is (search "\"message\":" result))
-      ;; Does NOT use default keys
-      (5am:is (not (search "\"level\":" result)))
-      (5am:is (not (search "\"msg\":" result))))))
+      ;; Uses default keys (fallback format)
+      (5am:is (search "\"level\":4" result))
+      (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-with-timestamp
   "Drop warnings include timestamp when formatter is configured with one."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp :unix-ms))
-         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 2)
@@ -1418,14 +1432,14 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Should have a ts field with a numeric timestamp
-      (5am:is (search "\"ts\":" result)))))
+      ;; Fallback format has level and msg fields
+      (5am:is (search "\"level\":4" result))
+      (5am:is (search "\"msg\":" result)))))
 
 (5am:test test-async-drop-with-logfmt-formatter
-  "Drop warnings work with logfmt formatter."
+  "Drop warnings use fallback JSON format when no formatter is provided."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-logfmt-formatter :timestamp nil))
-         (ao (bark::make-async-output out :capacity 16 :formatter fmt)))
+         (ao (bark::make-async-output out :capacity 16 :formatter nil)))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
     (dotimes (i 4)
@@ -1433,16 +1447,16 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      (5am:is (search "level=warn" result))
-      (5am:is (search "msg=" result))
+      ;; Fallback format uses JSON
+      (5am:is (search "\"level\":4" result))
+      (5am:is (search "\"msg\":" result))
       (5am:is (search "dropped 4 log messages" result)))))
 
 (5am:test test-async-custom-on-drop-message-and-fields
   "Custom on-drop returns message + fields via multiple values."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter fmt
+               :formatter nil
                :on-drop (lambda (n) (values (format nil "LOST ~d" n) (list :count n))))))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1451,19 +1465,16 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Custom message
+      ;; Custom message in fallback format
       (5am:is (search "LOST 3" result))
-      ;; Extra field from on-drop
-      (5am:is (search "\"count\":3" result))
-      ;; Formatted with warn level
-      (5am:is (search "\"level\":\"warn\"" result)))))
+      ;; Fallback format uses level + msg
+      (5am:is (search "\"level\":4" result)))))
 
 (5am:test test-async-on-drop-fields-only
   "on-drop returning (values nil fields) emits fields without message."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter fmt
+               :formatter nil
                :on-drop (lambda (n) (values nil (list :dropped n :severity "backpressure"))))))
     (dotimes (i 16)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1472,20 +1483,16 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (bt:signal-semaphore (bark::async-output-notify ao))
     (bark::stop-async-output ao)
     (let ((result (get-output-stream-string out)))
-      ;; Has the fields
-      (5am:is (search "\"dropped\":3" result))
-      (5am:is (search "\"severity\":\"backpressure\"" result))
-      ;; Has level (from formatter)
-      (5am:is (search "\"level\":\"warn\"" result))
-      ;; No message field
-      (5am:is (not (search "\"msg\":" result))))))
+      ;; Fallback format uses level + msg (fields ignored)
+      (5am:is (search "\"level\":4" result))
+      ;; Fallback emits empty msg when message is nil
+      (5am:is (search "\"msg\":\"\"" result)))))
 
 (5am:test test-async-on-drop-nil-suppresses
   "on-drop returning NIL suppresses the warning line entirely."
   (let* ((out (make-string-output-stream))
-         (fmt (bark:make-json-formatter :timestamp nil))
          (ao (bark::make-async-output out :capacity 16
-               :formatter fmt
+               :formatter nil
                :on-drop (lambda (n) (declare (ignore n)) nil))))
     (dotimes (i 20)
       (bark::ring-buffer-push (bark::async-output-ring ao) (format nil "msg-~d" i)))
@@ -1501,8 +1508,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:make-tee
-               (list (list :stream s1 :formatter #'json-formatter)
-                     (list :stream s2 :formatter #'pretty-formatter)))))
+               (list (list :stream s1 :formatter (make-json-formatter))
+                     (list :stream s2 :formatter (make-pretty-formatter))))))
     (unwind-protect
          (progn
            (5am:is-true (tee-output-p tee))
@@ -1519,16 +1526,17 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (s3 (make-string-output-stream))
+         (json-fmt (make-json-formatter))
          (tee (bark:make-tee
-               (list (list :stream s1 :formatter #'json-formatter)
-                     (list :stream s2 :formatter #'pretty-formatter)
-                     (list :stream s3 :formatter #'json-formatter)))))
+               (list (list :stream s1 :formatter json-fmt)
+                     (list :stream s2 :formatter (make-pretty-formatter))
+                     (list :stream s3 :formatter json-fmt)))))
     (unwind-protect
          (progn
            ;; Two formatters (json shared by 2, pretty by 1) -> two groups
            (5am:is (= 2 (length (tee-output-groups tee))))
            ;; Find the json group (has 2 destinations)
-           (let ((json-group (find #'json-formatter (tee-output-groups tee)
+           (let ((json-group (find json-fmt (tee-output-groups tee)
                                    :key #'formatter-group-formatter)))
              (5am:is-true (not (null json-group)))
              (5am:is (= 2 (length (formatter-group-destinations json-group))))))
@@ -1538,7 +1546,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "The :level shorthand creates a filter that checks >= threshold."
   (let* ((s1 (make-string-output-stream))
          (tee (bark:make-tee
-               (list (list :stream s1 :formatter #'json-formatter :level :error)))))
+               (list (list :stream s1 :formatter (make-json-formatter) :level :error)))))
     (unwind-protect
          (let* ((group (aref (tee-output-groups tee) 0))
                 (dest (aref (formatter-group-destinations group) 0))
@@ -1553,12 +1561,12 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
       (stop-tee tee))))
 
 (5am:test test-make-tee-default-formatter
-  "Omitting :formatter defaults to #'json-formatter."
+  "Omitting :formatter defaults to *default-json-formatter*."
   (let* ((s1 (make-string-output-stream))
          (tee (bark:make-tee (list (list :stream s1)))))
     (unwind-protect
          (let ((group (aref (tee-output-groups tee) 0)))
-           (5am:is (eq #'json-formatter (formatter-group-formatter group))))
+           (5am:is (formatter-p (formatter-group-formatter group))))
       (stop-tee tee))))
 
 (5am:test test-make-tee-level-and-filter-conflict
@@ -1591,16 +1599,15 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:tee
-               (s1 :formatter #'json-formatter)
-               (s2 :formatter #'pretty-formatter :level :error))))
+               (s1 :formatter (make-json-formatter))
+               (s2 :formatter (make-pretty-formatter) :level :error))))
     (unwind-protect
          (progn
            (5am:is-true (tee-output-p tee))
            (5am:is (= 2 (length (tee-output-groups tee))))
-           ;; Second destination should have a filter (from :level :error)
-           (let* ((pretty-group (find #'pretty-formatter (tee-output-groups tee)
-                                      :key #'formatter-group-formatter))
-                  (dest (aref (formatter-group-destinations pretty-group) 0)))
+           ;; The second group should have a filter (from :level :error)
+           (let* ((second-group (aref (tee-output-groups tee) 1))
+                  (dest (aref (formatter-group-destinations second-group) 0)))
              (5am:is-true (not (null (destination-filter dest))))
              (5am:is-false (funcall (destination-filter dest) +info+ nil))
              (5am:is-true (funcall (destination-filter dest) +error+ nil))))
@@ -1613,8 +1620,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:tee
-               (s1 :formatter #'json-formatter)
-               (s2 :formatter #'logfmt-formatter))))
+               (s1 :formatter (make-json-formatter))
+               (s2 :formatter (make-logfmt-formatter)))))
     (unwind-protect
          (let ((*logger* (make-logger :context '(:name "tee-test") :level :info :output tee)))
            (bark:info "hello" :key "val")
@@ -1635,8 +1642,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s-all (make-string-output-stream))
          (s-errors (make-string-output-stream))
          (tee (bark:tee
-               (s-all    :formatter #'json-formatter)
-               (s-errors :formatter #'json-formatter :level :error))))
+               (s-all    :formatter (make-json-formatter))
+               (s-errors :formatter (make-json-formatter) :level :error))))
     (unwind-protect
          (let ((*logger* (make-logger :context '(:name "route") :level :info :output tee)))
            (bark:info "all good")
@@ -1657,8 +1664,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s-all (make-string-output-stream))
          (s-audit (make-string-output-stream))
          (tee (bark:tee
-               (s-all   :formatter #'json-formatter)
-               (s-audit :formatter #'json-formatter
+               (s-all   :formatter (make-json-formatter))
+               (s-audit :formatter (make-json-formatter)
                         :filter (lambda (level fields)
                                   (declare (ignore level))
                                   (getf fields :audit))))))
@@ -1681,9 +1688,11 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "When destinations share an eq formatter, it's called once per log event."
   (let* ((call-count 0)
          (counting-fmt
-          (lambda (level chindings raw-bindings context message fields)
-            (incf call-count)
-            (json-formatter level chindings raw-bindings context message fields)))
+          (make-formatter
+           :prepare-fn (formatter-prepare-fn (make-json-formatter))
+           :format-fn (lambda (level prepared context message fields)
+                        (incf call-count)
+                        (json-formatter level prepared context message fields))))
          (s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          ;; Both destinations use the SAME formatter object
@@ -1705,9 +1714,11 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Shared formatter optimization respects per-destination filters."
   (let* ((call-count 0)
          (counting-fmt
-          (lambda (level chindings raw-bindings context message fields)
-            (incf call-count)
-            (json-formatter level chindings raw-bindings context message fields)))
+          (make-formatter
+           :prepare-fn (formatter-prepare-fn (make-json-formatter))
+           :format-fn (lambda (level prepared context message fields)
+                        (incf call-count)
+                        (json-formatter level prepared context message fields))))
          (s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:make-tee
@@ -1729,8 +1740,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:tee
-               (s1 :formatter #'json-formatter)
-               (s2 :formatter #'json-formatter))))
+               (s1 :formatter (make-json-formatter))
+               (s2 :formatter (make-json-formatter)))))
     (unwind-protect
          (let* ((parent (make-logger :context '(:name "parent") :level :info :output tee))
                 (ch (make-child parent :context '(:component "auth"))))
@@ -1753,8 +1764,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let* ((s1 (make-string-output-stream))
          (s2 (make-string-output-stream))
          (tee (bark:tee
-               (s1 :formatter #'json-formatter)
-               (s2 :formatter #'json-formatter))))
+               (s1 :formatter (make-json-formatter))
+               (s2 :formatter (make-json-formatter)))))
     (unwind-protect
          (let ((*logger* (make-logger :context '(:name "ctx") :level :info :output tee)))
            (bark:with-context (:request-id "req-123")
@@ -1768,7 +1779,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-tee-level-filtering-respects-logger-level
   "Logger level threshold still applies before tee dispatch."
   (let* ((s1 (make-string-output-stream))
-         (tee (bark:tee (s1 :formatter #'json-formatter))))
+         (tee (bark:tee (s1 :formatter (make-json-formatter)))))
     (unwind-protect
          (let ((*logger* (make-logger :context '(:name "lvl") :level :warn :output tee)))
            ;; Info is below logger level -> noop function -> never reaches tee
@@ -1796,8 +1807,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
          (s2 (make-string-output-stream)))
     (setf bark:*logger* (bark:make-logger :level :info
                                           :output (bark:tee
-                                                   (s1 :formatter #'json-formatter)
-                                                   (s2 :formatter #'pretty-formatter))))
+                                                   (s1 :formatter (make-json-formatter))
+                                                   (s2 :formatter (make-pretty-formatter)))))
     (bark:info "tee start test" :key "val")
     (bark:stop bark:*logger*)
     (let ((json-out (get-output-stream-string s1))
@@ -1819,7 +1830,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "make-logger with :context and :output tee passes context fields through."
   (let* ((s1 (make-string-output-stream)))
     (setf bark:*logger* (bark:make-logger :level :info
-                                          :output (bark:tee (s1 :formatter #'json-formatter))
+                                          :output (bark:tee (s1 :formatter (make-json-formatter)))
                                           :context '(:name "ctx" :role "broker" :pid 123)))
     (bark:info "context tee test")
     (bark:stop bark:*logger*)
@@ -1834,8 +1845,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
          (s2 (make-string-output-stream)))
     (setf bark:*logger* (bark:make-logger :level :info
                                           :output (bark:tee
-                                                   (s1 :formatter #'json-formatter)
-                                                   (s2 :formatter #'json-formatter))))
+                                                   (s1 :formatter (make-json-formatter))
+                                                   (s2 :formatter (make-json-formatter)))))
     (bark:info "before stop")
     (bark:stop bark:*logger*)
     (setf bark:*logger* nil)
@@ -1863,8 +1874,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
         (s2 (make-string-output-stream)))
     (setf bark:*logger* (bark:make-logger :level :info
                                           :output (bark:tee
-                                                   (s1 :formatter #'json-formatter)
-                                                   (s2 :formatter #'json-formatter))))
+                                                   (s1 :formatter (make-json-formatter))
+                                                   (s2 :formatter (make-json-formatter)))))
     (bark:info "tee-flush-msg")
     (bark:flush bark:*logger*)
     (5am:is-true (search "tee-flush-msg" (get-output-stream-string s1)))
@@ -1875,7 +1886,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "bark:flush on a user-created logger drains its output."
   (let* ((out (make-string-output-stream))
          (lgr (bark:make-logger :context '(:name "explicit") :level :info
-                                :formatter #'json-formatter :output out :capacity 64)))
+                                :formatter (make-json-formatter) :output out :capacity 64)))
     (bark:info lgr "explicit-msg")
     (bark:flush lgr)
     (5am:is-true (search "explicit-msg" (get-output-stream-string out)))
@@ -1892,9 +1903,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-on-error-stream-recovery
   "on-error returning a new stream causes the writer to swap and continue."
-  (let* ((bad-write-count 0)
-         (recovery-stream (make-string-output-stream))
-         (failing-stream (make-broadcast-stream))  ; broadcast to nothing -> won't error, need custom
+  (let* ((recovery-stream (make-string-output-stream))
          (ao (bark::make-async-output
               (make-string-output-stream)  ; initial stream
               :capacity 64
@@ -2163,7 +2172,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-pretty-condition-inline
   "Pretty formatter shows type: message for plain conditions."
-  (bark:with-captured-logs (get-logs #'pretty-formatter)
+  (bark:with-captured-logs (get-logs (make-pretty-formatter))
     (let ((c (make-condition 'simple-error :format-control "boom")))
       (bark:error "failed" :err c)
       (let ((line (first (funcall get-logs))))
@@ -2171,7 +2180,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-pretty-captured-error-stack
   "Pretty formatter shows inline condition + indented stack trace."
-  (bark:with-captured-logs (get-logs #'pretty-formatter)
+  (bark:with-captured-logs (get-logs (make-pretty-formatter))
     (let ((c (make-condition 'simple-error :format-control "boom")))
       (bark:error "failed" :err (bark:capture c))
       (let ((line (first (funcall get-logs))))
@@ -2182,7 +2191,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-pretty-stack-frame-limit
   "Pretty formatter respects *max-pretty-stack-frames*."
-  (bark:with-captured-logs (get-logs #'pretty-formatter)
+  (bark:with-captured-logs (get-logs (make-pretty-formatter))
     (let ((c (make-condition 'simple-error :format-control "boom"))
           (*max-pretty-stack-frames* 1))
       (bark:error "failed" :err (bark:capture c))
@@ -2195,7 +2204,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-integration-json-condition
   "Full pipeline: bark:error with a condition field, JSON formatter."
-  (bark:with-captured-logs (get-logs #'json-formatter)
+  (bark:with-captured-logs (get-logs (make-json-formatter))
     (let ((c (make-condition 'simple-error :format-control "db down")))
       (bark:error "query failed" :err c)
       (let* ((lines (funcall get-logs))
@@ -2211,7 +2220,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-integration-json-captured-error
   "Full pipeline: bark:error with captured-error field, JSON formatter."
-  (bark:with-captured-logs (get-logs #'json-formatter)
+  (bark:with-captured-logs (get-logs (make-json-formatter))
     (let ((c (make-condition 'simple-error :format-control "db down")))
       (bark:error "query failed" :err (bark:capture c))
       (let* ((lines (funcall get-logs))
@@ -2223,7 +2232,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-integration-logfmt-condition
   "Full pipeline: bark:error with a condition field, logfmt formatter."
-  (bark:with-captured-logs (get-logs #'logfmt-formatter)
+  (bark:with-captured-logs (get-logs (make-logfmt-formatter))
     (let ((c (make-condition 'simple-error :format-control "db down")))
       (bark:error "query failed" :err c)
       (let ((line (first (funcall get-logs))))
@@ -2231,7 +2240,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-integration-custom-condition
   "Custom condition class serializes with correct type name."
-  (bark:with-captured-logs (get-logs #'json-formatter)
+  (bark:with-captured-logs (get-logs (make-json-formatter))
     (eval '(define-condition bark-tests::test-condition (cl:error)
              ((detail :initarg :detail :reader bark-tests::test-condition-detail))
              (:report (lambda (c s) (format s "detail: ~a" (bark-tests::test-condition-detail c))))))
@@ -2246,8 +2255,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-condition-in-child-bindings-json
   "Condition in child logger static bindings serializes correctly in JSON.
-   Child bindings are pre-serialized into chindings at child creation time."
-  (bark:with-captured-logs (get-logs #'json-formatter)
+   Child bindings are pre-serialized into prepared context at child creation time."
+  (bark:with-captured-logs (get-logs (make-json-formatter))
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
            (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
@@ -2258,9 +2267,9 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
           (5am:is (string= "simple-error" (gethash "type" err))))))))
 
 (5am:test test-condition-in-child-bindings-logfmt
-  "Condition in child logger raw-bindings serializes correctly in logfmt.
-   raw-bindings carry the live condition object, serialized at log time."
-  (bark:with-captured-logs (get-logs #'logfmt-formatter)
+  "Condition in child logger context serializes correctly in logfmt.
+   context carry the live condition object, serialized at log time."
+  (bark:with-captured-logs (get-logs (make-logfmt-formatter))
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
            (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
@@ -2269,9 +2278,9 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
           (5am:is-true (search "boot-err=\"simple-error: startup err\"" line)))))))
 
 (5am:test test-condition-in-child-bindings-pretty
-  "Condition in child logger raw-bindings serializes correctly in pretty.
-   raw-bindings carry the live condition object, serialized at log time."
-  (bark:with-captured-logs (get-logs #'pretty-formatter)
+  "Condition in child logger context serializes correctly in pretty.
+   context carry the live condition object, serialized at log time."
+  (bark:with-captured-logs (get-logs (make-pretty-formatter))
     (let* ((c (make-condition 'simple-error :format-control "startup err"))
            (child-logger (bark:make-child bark:*logger* :context (list :boot-err c))))
       (let ((bark:*logger* child-logger))
@@ -2281,7 +2290,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-condition-in-dynamic-context
   "Condition in with-context serializes correctly."
-  (bark:with-captured-logs (get-logs #'json-formatter)
+  (bark:with-captured-logs (get-logs (make-json-formatter))
     (let ((c (make-condition 'simple-error :format-control "ctx err")))
       (bark:with-context (:last-err c)
         (bark:info "status check")
@@ -2295,7 +2304,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-drop-per-call
   "Field transform drops per-call fields when returning (values nil nil)."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let ((l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :secret)
                                                 (values nil nil)
@@ -2309,7 +2318,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-mask-value
   "Field transform masks a value by returning a replacement."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let ((l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :token)
                                                 "****"
@@ -2323,7 +2332,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-passthrough
   "Field transform returning value unchanged is a no-op."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let ((l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (declare (ignore key))
                                             value))))
@@ -2335,7 +2344,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-on-dynamic-context
   "Field transform applies to dynamic context fields."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let ((l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :password)
                                                 (values nil nil)
@@ -2352,7 +2361,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-on-child-static-bindings
   "Field transform applies to child logger static bindings at creation time."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let* ((parent (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
@@ -2367,7 +2376,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-nil-means-no-transform
   "A nil field-transform slot means no transformation (default)."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'json-formatter :output (sync-output out))))
+    (let ((l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out))))
       (5am:is (null (logger-field-transform l)))
       (funcall (logger-info-fn l) l "msg" :key "val"))
     (let ((result (get-output-stream-string out)))
@@ -2376,7 +2385,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-inherited-by-child
   "Child inherits parent's field-transform."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let* ((parent (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
@@ -2390,7 +2399,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-child-compose
   "Child can add its own field-transform, composed with parent's."
   (let ((out (make-string-output-stream)))
-    (let* ((parent (make-logger :level :info :formatter #'json-formatter :output (sync-output out)
+    (let* ((parent (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                    (if (eq key :secret)
                                                        (values nil nil)
@@ -2417,7 +2426,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-field-transform-with-logfmt
   "Field transform works with logfmt formatter too."
   (let ((out (make-string-output-stream)))
-    (let ((l (make-logger :level :info :formatter #'logfmt-formatter :output (sync-output out)
+    (let ((l (make-logger :level :info :formatter (make-logfmt-formatter) :output (sync-output out)
                           :field-transform (lambda (key value)
                                             (if (eq key :password)
                                                 (values nil nil)
@@ -2449,7 +2458,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-override-timestamp-in-json-output
   "JSON formatter uses *override-timestamp* when bound."
   (let* ((out (make-string-output-stream))
-         (l (make-logger :level :info :formatter #'json-formatter :output (sync-output out))))
+         (l (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (let ((bark::*override-timestamp* 9999999))
       (funcall (logger-info-fn l) l "test"))
     (let* ((line (get-output-stream-string out))
@@ -2491,13 +2500,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is (null (bark::logger-consistent buf-lgr)))))
 
 (5am:test test-make-buffer-logger-preserves-identity
-  "Buffer logger preserves chindings and raw-bindings from original."
+  "Buffer logger preserves prepared context and context from original."
   (let* ((parent (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (original (make-child parent :context '(:component "auth")))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
-    (5am:is (string= (logger-chindings original) (logger-chindings buf-lgr)))
-    (5am:is (equal (logger-raw-bindings original) (logger-raw-bindings buf-lgr)))))
+    (5am:is (string= (logger-prepared original) (logger-prepared buf-lgr)))
+    (5am:is (equal (logger-context original) (logger-context buf-lgr)))))
 
 (5am:test test-make-buffer-logger-captures-entries
   "Calling log functions on buffer logger pushes entries to buffer vector."
@@ -2540,7 +2549,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-normal-exit-filters-by-level
   "Normal exit: only entries >= original level are emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
@@ -2554,7 +2563,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-abnormal-exit-emits-all
   "Abnormal exit with condition: all entries emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (cond (make-condition 'simple-error :format-control "boom")))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
@@ -2567,7 +2576,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-non-condition-nlx-filters
   "Non-condition NLX (normal-exit-p=nil, condition=nil): filter like normal exit."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
@@ -2579,7 +2588,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-uses-override-timestamp
   "Flushed entries use their captured timestamp, not wall clock."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +info+ :message "test" :timestamp 42) buffer)
     (flush-buffer buffer root t nil nil +info+)
@@ -2590,7 +2599,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-applies-field-transform
   "Flush applies root logger's field transform to entry fields."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)
                             :field-transform (lambda (key value)
                                               (if (eq key :secret)
                                                   (values nil nil)
@@ -2608,7 +2617,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-on-flush-callback
   "on-flush callback controls which entries are emitted."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          ;; Only emit warn and above
          (on-flush (lambda (entries condition normal-exit-p)
@@ -2623,7 +2632,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-flush-buffer-on-flush-receives-all-args
   "on-flush callback receives entries, condition, and normal-exit-p."
-  (let* ((root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
+  (let* ((root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter)
                             :output (make-string-output-stream)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0))
          (cond (make-condition 'simple-error :format-control "err"))
@@ -2640,7 +2649,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-empty-does-nothing
   "Flushing an empty buffer produces no output."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (flush-buffer buffer root t nil nil +info+)
     (5am:is (string= "" (get-output-stream-string out)))))
@@ -2648,7 +2657,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-flush-buffer-preserves-entry-order
   "Entries are flushed in the order they were captured."
   (let* ((out (make-string-output-stream))
-         (root (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (buffer (make-array 8 :adjustable t :fill-pointer 0)))
     (vector-push-extend (make-buffer-entry :level +info+ :message "first" :timestamp 100) buffer)
     (vector-push-extend (make-buffer-entry :level +info+ :message "second" :timestamp 200) buffer)
@@ -2664,7 +2673,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-normal-exit-filters
   "Normal exit filters to entries >= logger's configured level."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:debug "hidden")
       (bark:info "visible"))
@@ -2675,7 +2684,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-abnormal-exit-emits-all
   "Abnormal exit emits all buffered entries."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (ignore-errors
       (with-log-buffer (*logger*)
         (bark:debug "debug-trail")
@@ -2687,13 +2696,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-with-log-buffer-returns-body-value
   "with-log-buffer returns the value of the body."
-  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
+  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter)
                                :output (make-string-output-stream))))
     (5am:is (= 42 (with-log-buffer (*logger*) 42)))))
 
 (5am:test test-with-log-buffer-returns-multiple-values
   "with-log-buffer preserves multiple return values."
-  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
+  (let ((*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter)
                                :output (make-string-output-stream))))
     (multiple-value-bind (a b) (with-log-buffer (*logger*) (values 1 2))
       (5am:is (= 1 a))
@@ -2702,7 +2711,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-handled-error-is-normal
   "Error caught inside body = normal exit, debug discarded."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:debug "pre-error")
       (handler-case (cl:error "handled")
@@ -2714,7 +2723,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-return-from-is-normal
   "return-from (non-condition NLX) treated as normal exit."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (block outer
       (with-log-buffer (*logger*)
         (bark:debug "hidden-debug")
@@ -2727,7 +2736,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-custom-level
   "Custom capture level limits what gets buffered."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (ignore-errors
       (with-log-buffer (*logger* :level :debug)
         (bark:trace "trace-hidden")
@@ -2740,7 +2749,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-on-flush-callback
   "on-flush callback controls emission."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger* :on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore condition normal-exit-p))
                                   ;; Only emit entries with :audit in fields
@@ -2756,7 +2765,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-captures-context
   "Dynamic context is captured at log time, not flush time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (with-context (:req "r1")
         (bark:info "inside-ctx"))
@@ -2772,7 +2781,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-preserves-timestamps
   "Each entry retains its own timestamp from log time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:info "msg1")
       (bark:info "msg2"))
@@ -2791,8 +2800,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Explicit logger arg bypasses the buffer."
   (let* ((buf-out (make-string-output-stream))
          (direct-out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "buf") :level :info :formatter #'json-formatter :output (sync-output buf-out)))
-         (direct-lgr (make-logger :context '(:name "direct") :level :info :formatter #'json-formatter
+         (*logger* (make-logger :context '(:name "buf") :level :info :formatter (make-json-formatter) :output (sync-output buf-out)))
+         (direct-lgr (make-logger :context '(:name "direct") :level :info :formatter (make-json-formatter)
                                   :output (sync-output direct-out))))
     (with-log-buffer (*logger*)
       (bark:info "buffered")
@@ -2815,7 +2824,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-nested-buffer-is-noop
   "Nested with-log-buffer is a no-op — all entries go to outermost buffer."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:info "outer-1")
       (with-log-buffer (*logger*)
@@ -2830,7 +2839,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-nested-buffer-inner-error-handled-by-outer
   "Nested scope is a no-op; handled error inside is normal exit for outer."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:debug "outer-debug")
       (bark:info "outer-info")
@@ -2851,7 +2860,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-nested-buffer-deeply-nested-noop
   "Deeply nested with-log-buffer scopes are all no-ops except the outermost."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (with-log-buffer (*logger*)
         (with-log-buffer (*logger*)
@@ -2863,17 +2872,17 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-on-flush-nil-suppresses-all
   "on-flush returning nil suppresses all output."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out))))
     (with-log-buffer (*logger* :on-flush (lambda (entries condition normal-exit-p)
                                   (declare (ignore entries condition normal-exit-p))
                                   nil))
       (bark:info "suppressed"))
     (5am:is (string= "" (get-output-stream-string out)))))
 
-(5am:test test-with-log-buffer-child-logger-chindings
+(5am:test test-with-log-buffer-child-logger-prepared
   "Buffer scope with child logger preserves static context in output."
   (let* ((out (make-string-output-stream))
-         (parent (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)))
+         (parent (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
          (*logger* (make-child parent :context '(:component "auth"))))
     (with-log-buffer (*logger*)
       (bark:info "login"))
@@ -2884,7 +2893,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-field-transform-at-flush
   "Root logger's field transform is applied at flush time, not capture time."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter :output (sync-output out)
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)
                                 :field-transform (lambda (key value)
                                                   (if (eq key :token) "****" value)))))
     (with-log-buffer (*logger*)
@@ -2895,7 +2904,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-with-log-buffer-on-flush-sees-handled-condition
   "handler-case inside body catches first; on-flush sees normal exit."
-  (let* ((*logger* (make-logger :context '(:name "app") :level :info :formatter #'json-formatter
+  (let* ((*logger* (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter)
                                 :output (make-string-output-stream)))
          (seen-condition nil)
          (seen-normal-exit-p nil))
@@ -2915,7 +2924,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-logfmt-formatter
   "Buffer works with logfmt formatter."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "app") :level :info :formatter #'logfmt-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "app") :level :info :formatter (make-logfmt-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:info "hello" :key "val"))
     (let ((result (get-output-stream-string out)))
@@ -2925,7 +2934,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-with-log-buffer-pretty-formatter
   "Buffer works with pretty formatter."
   (let* ((out (make-string-output-stream))
-         (*logger* (make-logger :context '(:name "test") :level :info :formatter #'pretty-formatter :output (sync-output out))))
+         (*logger* (make-logger :context '(:name "test") :level :info :formatter (make-pretty-formatter) :output (sync-output out))))
     (with-log-buffer (*logger*)
       (bark:info "hello"))
     (let ((result (get-output-stream-string out)))
@@ -2935,7 +2944,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-json-formatter-nil-message
   "JSON formatter omits msg field when message is nil."
-  (let ((output (json-formatter +info+ "" nil nil nil nil)))
+  (let ((output (json-formatter +info+ "" nil nil nil)))
     (5am:is-true (stringp output))
     (5am:is-true (search "\"level\"" output))
     (5am:is-true (search "\"ts\"" output))
@@ -2943,7 +2952,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-json-formatter-nil-message-with-fields
   "JSON formatter omits msg but includes fields when message is nil."
-  (let ((output (json-formatter +info+ "" nil nil nil (list :event "login" :user-id 42))))
+  (let ((output (json-formatter +info+ "" nil nil (list :event "login" :user-id 42))))
     (5am:is-false (search "\"msg\"" output))
     (5am:is-true (search "\"event\"" output))
     (5am:is-true (search "login" output))
@@ -2952,20 +2961,20 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-logfmt-formatter-nil-message
   "Logfmt formatter omits msg= when message is nil."
-  (let ((output (logfmt-formatter +info+ "" nil nil nil nil)))
+  (let ((output (logfmt-formatter +info+ "" nil nil nil)))
     (5am:is-true (search "level=info" output))
     (5am:is-true (search "ts=" output))
     (5am:is-false (search "msg=" output))))
 
 (5am:test test-logfmt-formatter-nil-message-with-fields
   "Logfmt formatter omits msg= but includes fields when message is nil."
-  (let ((output (logfmt-formatter +warn+ "" nil nil nil (list :event "login"))))
+  (let ((output (logfmt-formatter +warn+ "" nil nil (list :event "login"))))
     (5am:is-false (search "msg=" output))
     (5am:is-true (search "event=" output))))
 
 (5am:test test-pretty-formatter-nil-message
   "Pretty formatter omits message text when message is nil."
-  (let ((output (pretty-formatter +info+ "" nil nil nil nil)))
+  (let ((output (pretty-formatter +info+ "" nil nil nil)))
     (5am:is-true (stringp output))
     (5am:is-true (search (string #\Esc) output))
     ;; Level label appears but no message text follows
@@ -2973,7 +2982,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 (5am:test test-pretty-formatter-nil-message-with-fields
   "Pretty formatter shows fields without message text when nil."
-  (let ((output (pretty-formatter +info+ "" nil nil nil (list :event "login"))))
+  (let ((output (pretty-formatter +info+ "" nil nil (list :event "login"))))
     (5am:is-true (search "event" output))
     (5am:is-true (search "login" output))
     ;; Verify no spurious message text — only level + fields
@@ -3064,7 +3073,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
                                        :timestamp-key "time"
                                        :message-key "message")))
     (let* ((*override-timestamp* 1234567890000)
-           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "hello" nil)))
       (5am:is-true (search "\"severity\":\"info\"" result))
       (5am:is-true (search "\"time\":1234567890000" result))
       (5am:is-true (search "\"message\":\"hello\"" result))
@@ -3076,7 +3085,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-json-formatter-string-level
   "make-json-formatter with :string level-format emits level name strings."
   (let ((fmt (bark:make-json-formatter :level-format :string)))
-    (let ((result (funcall fmt +warn+ "" nil nil "oops" nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +warn+ "" nil "oops" nil)))
       (5am:is-true (search "\"level\":\"warn\"" result)))))
 
 (5am:test test-make-json-formatter-iso8601-timestamp
@@ -3084,13 +3093,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   (let ((fmt (bark:make-json-formatter :timestamp :iso8601)))
     ;; 2025-01-15T12:00:00.000Z = 1736942400000
     (let* ((*override-timestamp* 1736942400000)
-           (result (funcall fmt +info+ "" nil nil "test" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "test" nil)))
       (5am:is-true (search "\"ts\":\"2025-01-15T12:00:00.000Z\"" result)))))
 
 (5am:test test-make-json-formatter-no-timestamp
   "make-json-formatter with :timestamp nil omits the timestamp field."
   (let ((fmt (bark:make-json-formatter :timestamp nil)))
-    (let ((result (funcall fmt +info+ "" nil nil "test" nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" nil "test" nil)))
       (5am:is-false (search "\"ts\":" result))
       (5am:is-true (search "\"level\":\"info\"" result))
       (5am:is-true (search "\"msg\":\"test\"" result)))))
@@ -3098,7 +3107,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-json-formatter-fields
   "make-json-formatter handles per-call fields and context."
   (let ((fmt (bark:make-json-formatter :timestamp nil)))
-    (let ((result (funcall fmt +info+ "" nil
+    (let ((result (funcall (formatter-format-fn fmt) +info+ ""
                            (list (cons :req "abc")) "hi"
                            (list :user 42))))
       (5am:is-true (search "\"req\":\"abc\"" result))
@@ -3110,7 +3119,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
                                          :timestamp-key "time"
                                          :message-key "message")))
     (let* ((*override-timestamp* 9999)
-           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "hello" nil)))
       (5am:is-true (search "severity=info" result))
       (5am:is-true (search "time=9999" result))
       (5am:is-true (search "message=hello" result)))))
@@ -3118,7 +3127,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-logfmt-formatter-no-timestamp
   "make-logfmt-formatter with :timestamp nil omits the timestamp."
   (let ((fmt (bark:make-logfmt-formatter :timestamp nil)))
-    (let ((result (funcall fmt +info+ "" nil nil "test" nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" nil "test" nil)))
       (5am:is-false (search "ts=" result))
       (5am:is-true (search "level=info" result))
       (5am:is-true (search "msg=test" result)))))
@@ -3127,7 +3136,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "make-pretty-formatter with :unix-ms timestamp shows timestamp."
   (let ((fmt (bark:make-pretty-formatter :timestamp :unix-ms)))
     (let* ((*override-timestamp* 42000)
-           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "hello" nil)))
       (5am:is-true (search "INFO" result))
       (5am:is-true (search "42000" result))
       (5am:is-true (search "hello" result)))))
@@ -3136,7 +3145,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "make-pretty-formatter without timestamp omits it (like standard pretty-formatter)."
   (let ((fmt (bark:make-pretty-formatter)))
     (let* ((*override-timestamp* 42000)
-           (result (funcall fmt +info+ "" nil nil "hello" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "hello" nil)))
       (5am:is-true (search "INFO" result))
       (5am:is-true (search "hello" result))
       (5am:is-false (search "42000" result)))))
@@ -3145,7 +3154,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "make-pretty-formatter with :iso8601 timestamp emits ISO 8601 string."
   (let ((fmt (bark:make-pretty-formatter :timestamp :iso8601)))
     (let* ((*override-timestamp* 1736942400000)
-           (result (funcall fmt +info+ "" nil nil "test" nil)))
+           (result (funcall (formatter-format-fn fmt) +info+ "" nil "test" nil)))
       (5am:is-true (search "2025-01-15T12:00:00.000Z" result)))))
 
 (5am:test test-factory-formatter-with-make-logger
@@ -3175,7 +3184,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-json-formatter-no-level
   "make-json-formatter with :level-key nil omits the level field."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
-    (let ((result (funcall fmt +info+ "" nil nil "test" (list :code 200))))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" nil "test" (list :code 200))))
       (5am:is-false (search "\"level\"" result))
       (5am:is-true (search "\"code\":200" result))
       (5am:is-true (search "\"msg\":\"test\"" result))
@@ -3186,27 +3195,27 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-json-formatter-no-level-with-timestamp
   "make-json-formatter with :level-key nil but timestamp still present."
   (let ((fmt (bark:make-json-formatter :level-key nil)))
-    (let ((result (funcall fmt +warn+ "" nil nil "hello" nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +warn+ "" nil "hello" nil)))
       (5am:is-false (search "\"level\"" result))
       (5am:is-true (search "\"ts\":" result))
       (5am:is-true (search "\"msg\":\"hello\"" result))
       ;; No leading comma after {
       (5am:is-false (string= ",\"" (subseq result 1 3))))))
 
-(5am:test test-make-json-formatter-no-level-with-chindings
-  "make-json-formatter with :level-key nil, no timestamp, but chindings present."
+(5am:test test-make-json-formatter-no-level-with-prepared-context
+  "make-json-formatter with :level-key nil, no timestamp, but prepared context present."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
-    (let* ((chd (serialize-bindings (list :svc "api")))
-           (result (funcall fmt +info+ chd nil nil "test" nil)))
+    (let* ((chd (serialize-bindings-json(list :svc "api")))
+           (result (funcall (formatter-format-fn fmt) +info+ chd nil "test" nil)))
       (5am:is-false (search "\"level\"" result))
       (5am:is-true (search "\"svc\":\"api\"" result))
       ;; No leading comma after {
       (5am:is-false (string= ",\"" (subseq result 1 3))))))
 
 (5am:test test-make-json-formatter-no-level-no-ts-context-only
-  "make-json-formatter with no level, no timestamp, no chindings — only context fields."
+  "make-json-formatter with no level, no timestamp, no prepared context — only context fields."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))
-    (let ((result (funcall fmt +info+ "" nil '((:env . "prod")) nil nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" '((:env . "prod")) nil nil)))
       (5am:is-true (search "\"env\":\"prod\"" result))
       ;; No leading comma after {
       (5am:is-false (string= ",\"" (subseq result 1 3))))))
@@ -3214,7 +3223,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-logfmt-formatter-no-level
   "make-logfmt-formatter with :level-key nil omits the level field."
   (let ((fmt (bark:make-logfmt-formatter :level-key nil)))
-    (let ((result (funcall fmt +info+ "" nil nil "test" (list :code 200))))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" nil "test" (list :code 200))))
       (5am:is-false (search "level=" result))
       (5am:is-false (search "NIL=" result))
       (5am:is-true (search "ts=" result))
@@ -3226,7 +3235,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-pretty-formatter-no-level
   "make-pretty-formatter with :show-level nil omits the colored level label."
   (let ((fmt (bark:make-pretty-formatter :show-level nil)))
-    (let ((result (funcall fmt +info+ "" nil nil "hello" nil)))
+    (let ((result (funcall (formatter-format-fn fmt) +info+ "" nil "hello" nil)))
       (5am:is-true (search "hello" result))
       ;; Should NOT contain any of the level names
       (5am:is-false (search "INFO" result))
@@ -3288,7 +3297,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-logfmt-value-newline-in-string
   "logfmt values containing newlines are quoted and newlines escaped."
   (let ((out (make-string-output-stream)))
-    (let ((l (bark:make-logger :level :info :formatter #'bark:logfmt-formatter :output (sync-output out))))
+    (let ((l (bark:make-logger :level :info :formatter (make-logfmt-formatter) :output (sync-output out))))
       (funcall (bark::logger-info-fn l) l "msg" :data (format nil "line1~%line2")))
     (let ((s (get-output-stream-string out)))
       ;; Must not contain a literal newline in the value portion

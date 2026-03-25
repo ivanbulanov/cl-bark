@@ -69,7 +69,7 @@
                   (write-condition-summary s (captured-error-condition v)))
                  ((typep v 'condition)
                   (write-condition-summary s v))
-                 (t (princ v s))))))))
+                 (t (princ v s)))))))
 
 (defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t))
   "Return a pretty formatter struct with optional timestamp display.
@@ -78,13 +78,7 @@
   (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc)))
         (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
     (make-formatter
-     :prepare-fn (lambda (parent-prepared delta-context)
-                   (let ((s (if delta-context
-                                (serialize-bindings-pretty delta-context)
-                                "")))
-                     (if parent-prepared
-                         (concatenate 'string parent-prepared s)
-                         s)))
+     :prepare-fn (make-concat-prepare-fn #'serialize-bindings-pretty)
      :format-fn
      (lambda (level prepared context message fields)
        (with-format-stream (s)

@@ -69,9 +69,17 @@
     (write-char #\= stream)
     (emit-logfmt-value stream value)))
 
+(declaim (ftype (function (list) (values string &optional)) serialize-bindings-logfmt))
+
+(defun serialize-bindings-logfmt (bindings)
+  "Pre-serialize BINDINGS plist to a logfmt fragment string."
+  (with-output-to-string (s)
+    (loop for (k v) on bindings by #'cddr
+          do (emit-logfmt-field s k v))))
+
 (defun make-logfmt-formatter (&key (timestamp :unix-ms) (level-key "level")
                                     (timestamp-key "ts") (message-key "msg"))
-  "Return a logfmt formatter closure with custom keys.
+  "Return a logfmt formatter struct with custom keys.
    Level is always string for logfmt. Pre-computes key name strings.
    Pass :level-key NIL to omit the level field entirely."
   (let ((level-prefix (when level-key (format nil "~a=" level-key)))
@@ -79,33 +87,36 @@
         (ts-prefix-first (when timestamp (format nil "~a=" timestamp-key)))
         (msg-prefix (format nil " ~a=" message-key))
         (msg-prefix-first (format nil "~a=" message-key)))
-    (lambda (level chindings raw-bindings context message fields)
-      (declare (ignore chindings))
-      (with-format-stream (s)
-        (let ((wrote nil))
-          (when level-prefix
-            (write-string level-prefix s)
-            (write-string (level-name level) s)
-            (setf wrote t))
-          (when ts-prefix
-            (write-string (if wrote ts-prefix ts-prefix-first) s)
-            (emit-timestamp timestamp s)
-            (setf wrote t))
-          (loop for (k v) on raw-bindings by #'cddr do (emit-logfmt-field s k v))
-          (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
-          (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
-          (when message
-            (write-string (if wrote msg-prefix msg-prefix-first) s)
-            (emit-logfmt-value s message)))))))
+    (make-formatter
+     :prepare-fn (make-concat-prepare-fn #'serialize-bindings-logfmt)
+     :format-fn
+     (lambda (level prepared context message fields)
+       (with-format-stream (s)
+         (let ((wrote nil))
+           (when level-prefix
+             (write-string level-prefix s)
+             (write-string (level-name level) s)
+             (setf wrote t))
+           (when ts-prefix
+             (write-string (if wrote ts-prefix ts-prefix-first) s)
+             (emit-timestamp timestamp s)
+             (setf wrote t))
+           (when (plusp (length (the string prepared)))
+             (write-string prepared s)
+             (setf wrote t))
+           (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
+           (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
+           (when message
+             (write-string (if wrote msg-prefix msg-prefix-first) s)
+             (emit-logfmt-value s message))))))))
 
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional))
+(defparameter *default-logfmt-formatter* (make-logfmt-formatter)
+  "Default logfmt formatter instance.")
+
+(declaim (ftype (function (fixnum string list (or null string) list) (values string &optional))
                 logfmt-formatter))
 
-(let ((fmt (make-logfmt-formatter)))
-  (defun logfmt-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry as a logfmt line (key=value pairs) with default settings.
-Equivalent to (funcall (make-logfmt-formatter) ...) with no customization.
-Field values: strings, numbers, symbols, pathnames, and conditions serialize
-as scalars. Boolean T emits a bare key (no =value). Collections and other
-types produce a \"<type>\" placeholder. See docs/value-serialization.md."
-    (funcall fmt level chindings raw-bindings context message fields)))
+(defun logfmt-formatter (level prepared context message fields)
+  "Format a log entry as a logfmt line with default settings."
+  (funcall (formatter-format-fn *default-logfmt-formatter*)
+           level prepared context message fields))

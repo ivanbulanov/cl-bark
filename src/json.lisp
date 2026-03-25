@@ -211,9 +211,44 @@
         do (emit-json-key stream (car pair) sep)
            (emit-json-value stream (cdr pair))))
 
-(declaim (ftype (function (list) (values string &optional)) serialize-bindings))
+;;; --- Formatter protocol ---
 
-(defun serialize-bindings (bindings)
+(defstruct (formatter (:constructor %make-formatter))
+  "A formatter protocol: prepare-fn pre-serializes static context at logger creation,
+   format-fn formats a log event at call time."
+  (prepare-fn (lambda (parent-prepared delta-context)
+                (declare (ignore parent-prepared delta-context))
+                "")
+              :type function :read-only t)
+  (format-fn  (cl:error "format-fn is required")
+              :type function :read-only t))
+
+(declaim (ftype (function (&key (:prepare-fn function) (:format-fn function))
+                           (values formatter &optional))
+                make-formatter))
+
+(defun make-formatter (&key prepare-fn format-fn)
+  "Create a formatter with a prepare/format protocol."
+  (%make-formatter :prepare-fn (or prepare-fn
+                                   (lambda (parent-prepared delta-context)
+                                     (declare (ignore parent-prepared delta-context))
+                                     ""))
+                   :format-fn format-fn))
+
+(declaim (ftype (function (function) (values function &optional)) make-concat-prepare-fn))
+
+(defun make-concat-prepare-fn (serialize-fn)
+  "Return a prepare-fn that serializes delta-context with SERIALIZE-FN
+   and concatenates with parent-prepared."
+  (lambda (parent-prepared delta-context)
+    (let ((s (if delta-context (funcall serialize-fn delta-context) "")))
+      (if parent-prepared
+          (concatenate 'string parent-prepared s)
+          s))))
+
+(declaim (ftype (function (list) (values string &optional)) serialize-bindings-json))
+
+(defun serialize-bindings-json (bindings)
   "Pre-serialize BINDINGS plist to a JSON fragment string."
   (with-output-to-string (s)
     (emit-json-fields s bindings)))
@@ -235,63 +270,64 @@
 (defun make-json-formatter (&key (timestamp :unix-ms) (level-format :string)
                                   (level-key "level") (timestamp-key "ts")
                                   (message-key "msg"))
-  "Return a JSON formatter closure with custom keys and formats.
+  "Return a JSON formatter struct with custom keys and formats.
    Pre-computes level prefix vector, timestamp key fragment, and message key fragment.
    Pass :level-key NIL to omit the level field entirely."
   (let ((prefixes (when level-key
                     (build-json-level-prefixes level-key level-format)))
         (ts-key (when timestamp (format nil "\"~a\":" timestamp-key)))
         (msg-key (format nil "\"~a\":\"" message-key)))
-    (lambda (level chindings raw-bindings context message fields)
-      (declare (optimize (speed 3) (safety 1)))
-      (declare (ignore raw-bindings))
-      (with-format-stream (s)
-        (write-char #\{ s)
-        (let ((wrote nil))
-          ;; Level
-          (when prefixes
-            (write-string (svref prefixes level) s)
-            (setf wrote t))
-          ;; Timestamp
-          (when ts-key
-            (when wrote (write-char #\, s))
-            (write-string ts-key s)
-            (emit-timestamp timestamp s)
-            (setf wrote t))
-          ;; Chindings (pre-serialized with leading commas)
-          (let ((clen (length chindings)))
-            (when (plusp clen)
-              (if wrote
-                  (write-string chindings s)
-                  (progn (write-string chindings s :start 1)
-                         (setf wrote t)))))
-          ;; Context and fields
-          (let ((sep (if wrote #\, nil)))
-            (emit-context-fields s context sep)
-            (when context (setf sep #\,))
-            (emit-json-fields s fields sep)
-            (when fields (setf sep #\,))
-            ;; Message
-            (when message
-              (when sep (write-char sep s))
-              (write-string msg-key s)
-              (write-json-escaped-string message s)
-              (write-string "\"" s))))
-        (write-string "}" s)))))
+    (make-formatter
+     :prepare-fn (make-concat-prepare-fn #'serialize-bindings-json)
+     :format-fn
+     (lambda (level prepared context message fields)
+       (declare (optimize (speed 3) (safety 1)))
+       (with-format-stream (s)
+         (write-char #\{ s)
+         (let ((wrote nil))
+           ;; Level
+           (when prefixes
+             (write-string (svref prefixes level) s)
+             (setf wrote t))
+           ;; Timestamp
+           (when ts-key
+             (when wrote (write-char #\, s))
+             (write-string ts-key s)
+             (emit-timestamp timestamp s)
+             (setf wrote t))
+           ;; Prepared context (pre-serialized with leading commas)
+           (let ((clen (length (the string prepared))))
+             (when (plusp clen)
+               (if wrote
+                   (write-string prepared s)
+                   (progn (write-string prepared s :start 1)
+                          (setf wrote t)))))
+           ;; Dynamic context and per-call fields
+           (let ((sep (if wrote #\, nil)))
+             (emit-context-fields s context sep)
+             (when context (setf sep #\,))
+             (emit-json-fields s fields sep)
+             (when fields (setf sep #\,))
+             ;; Message
+             (when message
+               (when sep (write-char sep s))
+               (write-string msg-key s)
+               (write-json-escaped-string message s)
+               (write-string "\"" s))))
+         (write-string "}" s))))))
 
 ;;; --- Standard Formatters ---
 
 ;;; Thin delegates to the factories with default settings.
 ;;; The factory closures are created once at load time.
 
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional))
+(defparameter *default-json-formatter* (make-json-formatter)
+  "Default JSON formatter instance.")
+
+(declaim (ftype (function (fixnum string list (or null string) list) (values string &optional))
                 json-formatter))
 
-(let ((fmt (make-json-formatter)))
-  (defun json-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry as a single JSON line with default settings.
-Equivalent to (funcall (make-json-formatter) ...) with no customization.
-Field values: strings, numbers, booleans, symbols, pathnames, lists, vectors,
-hash-tables, conditions, and captured-errors serialize to JSON natively.
-Unsupported types produce a \"<type>\" placeholder. See docs/value-serialization.md."
-    (funcall fmt level chindings raw-bindings context message fields)))
+(defun json-formatter (level prepared context message fields)
+  "Format a log entry as a single JSON line with default settings."
+  (funcall (formatter-format-fn *default-json-formatter*)
+           level prepared context message fields))
