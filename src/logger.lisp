@@ -26,8 +26,8 @@
       (documentation 'windowed-counter-window-ticks 'function) "Window duration in internal-time-units.")
 
 (setf (documentation 'consistent-sampler-key-fn 'function)
-      "Function (lambda (raw-bindings) ...) that extracts a sampling key from the
-logger's static bindings plist. Return a string, symbol, or number for
+      "Function (lambda (context) ...) that extracts a sampling key from the
+logger's static context plist. Return a string, symbol, or number for
 deterministic sampling (passed to SXHASH; these types are stable across SBCL
 sessions). Return NIL to skip consistent sampling and fall through to the
 windowed counter. Do not return 0 or the empty string as a \"no key\" sentinel —
@@ -378,7 +378,7 @@ Signals BARK-CONFIGURATION-ERROR if any value is not a windowed-counter or NIL."
 
 (defun make-consistent-sampler (&key key-fn (rate 1))
   "Create a consistent sampler. RATE is 1-in-N (keep one, drop N-1).
-KEY-FN is (lambda (raw-bindings) ...) where RAW-BINDINGS is the logger's
+KEY-FN is (lambda (context) ...) where CONTEXT is the logger's
 static context plist (set via :context on make-logger/make-child). It should
 return a string, symbol, or number for deterministic hashing, or NIL to skip
 consistent sampling and fall through to the windowed counter.
