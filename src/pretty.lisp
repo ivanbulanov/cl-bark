@@ -54,58 +54,85 @@
                         #\Esc)))
             (incf i)))))))
 
+(declaim (ftype (function (list) (values string &optional)) serialize-bindings-pretty))
+
+(defun serialize-bindings-pretty (bindings)
+  "Pre-serialize BINDINGS plist to a pretty fragment string."
+  (with-output-to-string (s)
+    (let ((*print-level* *max-pretty-depth*)
+          (*print-length* *max-pretty-length*)
+          (*print-circle* t))
+      (loop for (k v) on bindings by #'cddr
+            do (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc)
+               (cond
+                 ((captured-error-p v)
+                  (write-condition-summary s (captured-error-condition v)))
+                 ((typep v 'condition)
+                  (write-condition-summary s v))
+                 (t (princ v s))))))))
+
 (defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t))
-  "Return a pretty formatter closure with optional timestamp display.
+  "Return a pretty formatter struct with optional timestamp display.
    TIMESTAMP is nil (no timestamp), :iso8601, or :unix-ms.
    Level is always colored string. Pass :show-level NIL to omit it."
   (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc)))
         (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
-    (lambda (level chindings raw-bindings context message fields)
-      (declare (ignore chindings))
-      (with-format-stream (s)
-        (let* ((*print-level* *max-pretty-depth*)
-               (*print-length* *max-pretty-length*)
-               (*print-circle* t)
-               (stacks nil)
-               (wrote nil))
-          (flet ((write-key (k)
-                   (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
-                 (write-val (k v)
-                   (cond
-                     ((captured-error-p v)
-                      (write-condition-summary s (captured-error-condition v))
-                      (push (cons k v) stacks))
-                     ((typep v 'condition)
-                      (write-condition-summary s v))
-                     (t (princ v s)))))
-            (when show-level
-              (let ((color (svref *level-colors* level)))
-                (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level) #\Esc))
-              (setf wrote t))
-            (when ts-prefix
-              (write-string (if wrote ts-prefix ts-prefix-first) s)
-              (emit-timestamp timestamp s)
-              (setf wrote t))
-            (when message
-              (write-char #\Space s)
-              (write-string message s))
-            (loop for (k v) on raw-bindings by #'cddr do
-              (write-key k) (write-val k v))
-            (dolist (pair context)
-              (write-key (car pair)) (write-val (car pair) (cdr pair)))
-            (loop for (k v) on fields by #'cddr do
-              (write-key k) (write-val k v))
-            (when stacks
-              (emit-pretty-stack s (nreverse stacks)))))))))
+    (make-formatter
+     :prepare-fn (lambda (parent-prepared delta-context)
+                   (let ((s (if delta-context
+                                (serialize-bindings-pretty delta-context)
+                                "")))
+                     (if parent-prepared
+                         (concatenate 'string parent-prepared s)
+                         s)))
+     :format-fn
+     (lambda (level prepared context message fields)
+       (with-format-stream (s)
+         (let* ((*print-level* *max-pretty-depth*)
+                (*print-length* *max-pretty-length*)
+                (*print-circle* t)
+                (stacks nil)
+                (wrote nil))
+           (flet ((write-key (k)
+                    (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
+                  (write-val (k v)
+                    (cond
+                      ((captured-error-p v)
+                       (write-condition-summary s (captured-error-condition v))
+                       (push (cons k v) stacks))
+                      ((typep v 'condition)
+                       (write-condition-summary s v))
+                      (t (princ v s)))))
+             (when show-level
+               (let ((color (svref *level-colors* level)))
+                 (format s "~c[~am~a~c[0m" #\Esc color (svref *level-names-upper* level) #\Esc))
+               (setf wrote t))
+             (when ts-prefix
+               (write-string (if wrote ts-prefix ts-prefix-first) s)
+               (emit-timestamp timestamp s)
+               (setf wrote t))
+             (when message
+               (write-char #\Space s)
+               (write-string message s))
+             ;; Splice pre-serialized static context
+             (when (plusp (length (the string prepared)))
+               (write-string prepared s))
+             ;; Dynamic context
+             (dolist (pair context)
+               (write-key (car pair)) (write-val (car pair) (cdr pair)))
+             ;; Per-call fields
+             (loop for (k v) on fields by #'cddr do
+               (write-key k) (write-val k v))
+             (when stacks
+               (emit-pretty-stack s (nreverse stacks))))))))))
 
-(declaim (ftype (function (fixnum string list list (or null string) list) (values string &optional))
+(defparameter *default-pretty-formatter* (make-pretty-formatter)
+  "Default pretty formatter instance.")
+
+(declaim (ftype (function (fixnum string list (or null string) list) (values string &optional))
                 pretty-formatter))
 
-(let ((fmt (make-pretty-formatter)))
-  (defun pretty-formatter (level chindings raw-bindings context message fields)
-    "Format a log entry as colored human-readable text for REPL/development use.
-Equivalent to (funcall (make-pretty-formatter) ...) with no customization.
-Field values are printed via PRINC with *print-level*/*print-length* bound to
-*max-pretty-depth*/*max-pretty-length*. Conditions and captured-errors get
-special formatting with type, message, and stack traces."
-    (funcall fmt level chindings raw-bindings context message fields)))
+(defun pretty-formatter (level prepared context message fields)
+  "Format a log entry as colored human-readable text with default settings."
+  (funcall (formatter-format-fn *default-pretty-formatter*)
+           level prepared context message fields))
