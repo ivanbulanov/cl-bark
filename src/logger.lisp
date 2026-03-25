@@ -200,7 +200,17 @@ hash decision."
                         (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                         level-sampler consistent)
-  "Create a root logger.
+  "Create a root logger. Multiple root loggers can coexist — each owns its own
+output and writer thread(s). Assign to *logger* for implicit use by logging
+macros, or pass explicitly as the first argument to bark:info etc.
+
+OUTPUT (stream, function, tee-output, or NIL):
+  Stream/NIL — wrapped in async-output (background writer thread + ring buffer).
+  NIL defaults to *error-output*. Function — called synchronously, no thread.
+  tee-output — from bark:tee or bark:make-tee, used as-is.
+
+LEVEL (keyword or fixnum, default :info):
+  Minimum log level. One of :trace :debug :info :warn :error :fatal.
 
 FORMATTER (formatter struct, default *default-json-formatter*):
   Formatter with prepare-fn/format-fn protocol. Use make-json-formatter,
@@ -208,7 +218,26 @@ FORMATTER (formatter struct, default *default-json-formatter*):
 
 CONTEXT (plist or NIL):
   Static context fields pre-serialized at creation time via formatter's
-  prepare-fn — zero per-call cost."
+  prepare-fn — zero per-call cost.
+
+FIELD-TRANSFORM (function or NIL):
+  Function (lambda (key value) ...) applied to every field before serialization.
+  Return the (possibly modified) value, or (values nil nil) to drop the field.
+
+CAPACITY (fixnum, default 8192): Ring buffer size in messages. Stream output only.
+ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
+  dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
+BLOCKING (boolean): When T, callers block on a full buffer instead of dropping.
+BLOCK-TIMEOUT (real, default 5.0): Seconds to wait when blocking before giving up.
+ON-BLOCK-TIMEOUT (function or NIL): Called when block-timeout expires.
+
+LEVEL-SAMPLER (simple-vector or NIL): From make-level-sampler — per-level
+  windowed counters for rate limiting.
+CONSISTENT (consistent-sampler or NIL): From make-consistent-sampler —
+  deterministic hash-based sampling.
+
+Async parameters (CAPACITY through ON-BLOCK-TIMEOUT) are only valid with stream
+output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ERROR."
   (when (and (or (functionp output) (tee-output-p output))
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
