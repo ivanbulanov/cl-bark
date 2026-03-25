@@ -556,10 +556,10 @@ A CONTINUE restart is available to silently ignore the operation."
 
 ;;; --- Utilities ---
 
-(defmacro with-captured-logs ((&optional (var 'logs) (formatter '(make-json-formatter))) &body body)
+(defmacro with-captured-logs ((&optional (var 'logs) (formatter '*default-json-formatter*)) &body body)
   "Execute BODY with a test logger that captures log output.
    Binds VAR to a function that returns the list of logged strings.
-   FORMATTER defaults to (make-json-formatter) but can be any formatter struct."
+   FORMATTER defaults to *default-json-formatter* but can be any formatter struct."
   `(multiple-value-bind (collector results-fn) (make-list-collector)
      (let* ((*logger* (make-logger :level :trace
                                    :formatter ,formatter :output collector
