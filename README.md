@@ -179,7 +179,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 - `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
 - `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
-- `:on-drop` — `(lambda (count) ...)` called when messages are dropped due to a full buffer. Return `(values message fields)` to emit a warning through the destination's formatter at warn level, or NIL to suppress. Defaults to `#'bark::default-on-drop`
+- `:on-drop` — `(lambda (count) ...)` called when messages are dropped due to a full buffer. Returns a warning message string, or NIL to suppress. Can optionally return extra fields as a second value: `(values message fields)`. See [Backpressure](#backpressure) for the full return protocol. Defaults to `#'bark::default-on-drop`
 - `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. Return a new stream to swap and continue, or nil to exit. The condition is the original `file-error` or `stream-error` — bark does not wrap it. When omitted, the writer logs to `*error-output*` and exits.
 
 The filter receives the log level (integer) and the per-call fields (the `&rest` plist passed to `bark:info` etc.). It does **not** see static context or dynamic context — those are part of formatting, not routing.
