@@ -17,7 +17,7 @@
 (defconstant +level-slot-count+ (1+ +fatal+)
   "Number of level index slots (0 through fatal).")
 
-;;; Level management
+;;; --- Level management ---
 (defparameter *level-colors*
   #(nil
     "36"    ; trace = cyan
@@ -54,4 +54,4 @@
       (svref *level-names* level)
       "unknown"))
 
-;;; Conditions
+;;; --- Conditions ---

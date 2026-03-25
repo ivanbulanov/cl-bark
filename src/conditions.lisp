@@ -2,7 +2,7 @@
 
 (in-package #:bark)
 
-;;; Error capture
+;;; --- Error capture ---
 (defstruct (captured-error (:constructor %make-captured-error))
   "A condition snapshot with stack trace for structured logging."
   (condition nil :type condition :read-only t)
@@ -39,7 +39,7 @@ In HANDLER-CASE the trace reflects the handler's stack, not the error origin."
   (%make-captured-error :condition condition
                         :stack (strip-internal-frames (dissect:stack))))
 
-;;; Conditions
+;;; --- Conditions ---
 
 (define-condition bark-error (cl:error)
   ()

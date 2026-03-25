@@ -6,7 +6,7 @@
   "How often the windowed counter reads the clock (in messages).
    Must be power of 2 for bit-and optimization.")
 
-;;; Sampling
+;;; --- Sampling ---
 (defstruct (windowed-counter (:constructor %make-windowed-counter))
   "Per-level sampling: first INITIAL per window always pass, then 1-in-THEREAFTER."
   (initial      5   :type fixnum :read-only t)
@@ -69,7 +69,7 @@ hash decision."
   (declare (ignore logger message fields))
   (values))
 
-;;; Construction
+;;; --- Construction ---
 (defstruct (logger (:constructor %make-logger))
   "A bark logger instance."
   (root-p          nil   :type boolean :read-only t)
@@ -90,7 +90,7 @@ hash decision."
 
 (setf (documentation 'logger-p 'function) "Return T if OBJECT is a logger.")
 
-;;; Context and fields
+;;; --- Context and fields ---
 (defvar *logger* nil "The current bark logger.")
 
 (defvar *log-context* nil "Dynamic context bindings for the current log scope.")
@@ -302,7 +302,7 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
     (setf (logger-fatal-fn logger) (slot-fn +fatal+)))
   (values))
 
-;;; Level management
+;;; --- Level management ---
 (defun set-level (logger level)
   "Set the minimum log level for LOGGER. Accepts a keyword (:trace through :fatal)
 or a fixnum level constant. Takes effect immediately."
@@ -474,7 +474,7 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
     ((and output (async-output-p output))
      (funcall fn output))))
 
-;;; Lifecycle
+;;; --- Lifecycle ---
 (defun flush (logger)
   "Flush LOGGER, blocking until all pending messages are written.
 Signals BARK-ASYNC-STOPPED if any async output has been stopped.

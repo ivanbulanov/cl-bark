@@ -8,7 +8,7 @@
 ;;; The internal buffer grows to the largest log line seen, then stays there —
 ;;; no per-call allocation for the stream itself, only for the result string.
 
-;;; Formatting
+;;; --- Formatting ---
 (defvar *format-stream* nil
   "Per-thread reusable string-output-stream for formatters.
    Bound per-thread via bt:*default-special-bindings*; lazily created on first use.")

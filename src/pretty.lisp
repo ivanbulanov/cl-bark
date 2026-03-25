@@ -2,7 +2,7 @@
 
 (in-package #:bark)
 
-;;; Pretty formatting
+;;; --- Pretty formatting ---
 (defvar *max-pretty-depth* 4
   "Bound as CL:*PRINT-LEVEL* inside pretty-formatter.
    Controls nesting depth for value output. NIL means unlimited.")

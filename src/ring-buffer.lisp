@@ -10,7 +10,7 @@
   "Spin iterations in ring-buffer-pop before yielding to the OS scheduler.
    Prevents unbounded CPU spin when a producer is preempted between CAS and slot write.")
 
-;;; Data structure
+;;; --- Data structure ---
 (defstruct (ring-buffer (:constructor %make-ring-buffer))
   "Lock-free MPSC ring buffer with drop-on-full semantics."
   (slots    #()  :type simple-vector)
@@ -67,7 +67,7 @@
 
 (declaim (ftype (function (ring-buffer t) (values boolean &optional)) ring-buffer-push ring-buffer-offer))
 
-;;; Operations
+;;; --- Operations ---
 (defun ring-buffer-push (rb value)
   "Push VALUE into the ring buffer. Returns T on success, NIL if full (increments drop counter)."
   (%ring-buffer-try-push rb value t))
