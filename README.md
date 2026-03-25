@@ -94,7 +94,7 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 ;; => {"level":"info","ts":...,"event":"registration","user-id":42}
 ```
 
-Message-vs-fields detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
+When the first non-logger argument is a literal keyword, the macro emits the fields-only path directly. When it's a variable, a runtime `keywordp` check ensures consistent behavior. When `*logger*` is nil, the call is a no-op.
 
 ### Level Predicate
 
