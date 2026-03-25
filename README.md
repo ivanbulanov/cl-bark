@@ -37,23 +37,25 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 
 ## Features
 
-- **Async I/O** — lock-free MPSC ring buffer with batch drain; bounded memory, caller never blocks
+- **Async I/O** — lock-free MPSC ring buffer with batch drain; semaphore-based flush, no sleep-polling
+- **Function output** — pass a function as `:output` for testing or custom integrations; called synchronously, no thread
+- **Bounded async buffer** — configurable ring buffer capacity with drop-on-full semantics
+- **Blocking back-pressure** — `:blocking t` makes callers wait for buffer space instead of dropping; configurable timeout and callback
 - **Multi-output (tee)** — fan-out to multiple destinations, each with its own formatter, filter, and async writer
 - **Per-destination filters** — route events by level or custom predicate per destination
-- **Per-destination formatters** — different formats per destination (JSON to file, pretty to console)
+- **Per-destination formatters** — for example, JSON to file, pretty to console
 - **Shared formatter optimization** — when destinations share an `eq` formatter, the message is formatted once
-- **Explicit logger selection** — pass a logger as first argument to any logging macro to bypass `*logger*`
 - **Error recovery** — per-destination `:on-error` handler can swap streams on failure
-- **Function pointer swap** — `set-level` swaps slots to `#'noop`; disabled levels cost one indirect call
-- **Static context** — child logger fields serialized once at creation, zero per-call cost
+- **Child loggers** — `make-child` shares parent output; inherits and composes context, field-transform, and samplers
+- **Implicit or explicit logger** — single-logger apps use `*logger*` and bare `(bark:info ...)`; multi-logger apps pass a logger as first argument
+- **Static context** — logger fields serialized once at creation, zero per-call cost
 - **Dynamic context** — `with-context` uses CL special variables for automatic scoping and thread isolation
-- **Stack-allocated &rest** — `dynamic-extent` on per-call fields avoids heap allocation
-- **Compile-time elimination** — set `*compile-time-max-level*` before compiling to strip calls entirely
 - **Pluggable formatters** — JSON Lines (production), logfmt (compact), pretty (ANSI-colored REPL)
-- **Counter-based sampling** — per-level 1-in-N sampling, checked before serialization
+- **Structured error capture** — `bark:capture` snapshots conditions with stack traces; formatters serialize type, message, and frames
 - **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
-- **Bounded async buffer** — configurable ring buffer capacity with drop-on-full per destination
-- **Synchronous flush** — `bark:flush` uses semaphore rendezvous, not sleep; works on any logger
+- **Windowed rate limiting** — per-level time-windowed counters with initial burst allowance then 1-in-N, checked before serialization
+- **Consistent hash sampling** — deterministic key-based sampling via `make-consistent-sampler`; same key always kept or always dropped
+- **Low overhead** — disabled levels cost one indirect call (`#'noop` slot swap), per-call fields are stack-allocated (`dynamic-extent`), `*compile-time-max-level*` strips calls entirely at compile time
 - **Request-scoped buffering** — `with-log-buffer` captures all log calls; on success emit only info+, on failure emit everything including debug — zero-config retroactive log level decisions
 
 ## Log Levels
@@ -92,7 +94,7 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 ;; => {"level":"info","ts":...,"event":"registration","user-id":42}
 ```
 
-Detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
+Message-vs-fields detection is compile-time for literal keywords, runtime (`keywordp`) for variables. When `*logger*` is nil, the call is a no-op.
 
 ### Level Predicate
 
