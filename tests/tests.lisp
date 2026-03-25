@@ -487,6 +487,26 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is (eq (logger-formatter parent-with-bindings) (logger-formatter ch)))
     (5am:is (eq (logger-output parent-with-bindings) (logger-output ch)))))
 
+(5am:test test-prepared-slot-types
+  "Non-tee logger has string prepared; tee logger has simple-vector prepared."
+  ;; Non-tee: string
+  (let ((lgr (make-logger :context '(:service "web") :level :info)))
+    (5am:is (stringp (logger-prepared lgr))))
+  ;; Tee: simple-vector
+  (let* ((s1 (make-string-output-stream))
+         (s2 (make-string-output-stream))
+         (tee (bark:tee
+               (s1 :formatter (make-json-formatter))
+               (s2 :formatter (make-logfmt-formatter)))))
+    (unwind-protect
+         (let ((lgr (make-logger :context '(:service "web") :level :info :output tee)))
+           (5am:is (simple-vector-p (logger-prepared lgr)))
+           (5am:is (= 2 (length (logger-prepared lgr))))
+           ;; Each element is a string
+           (5am:is (stringp (aref (logger-prepared lgr) 0)))
+           (5am:is (stringp (aref (logger-prepared lgr) 1))))
+      (stop-tee tee))))
+
 (5am:test test-child-context
   "Create parent with context, create child, verify context are appended."
   (let* ((parent (make-logger :context '(:name "parent") :level :trace))

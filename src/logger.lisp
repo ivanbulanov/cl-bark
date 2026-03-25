@@ -76,9 +76,9 @@ hash decision."
   "A bark logger instance."
   (root-p          nil   :type boolean :read-only t)
   (level           +info+ :type fixnum)
-  (chindings       ""    :type string :read-only t)
-  (raw-bindings    nil   :type list :read-only t)
-  (formatter       nil   :type (or null function))
+  (context         nil   :type list :read-only t)
+  (prepared        ""    :type (or string simple-vector) :read-only t)
+  (formatter       nil   :type (or null formatter))
   (output          nil   :type t)
   (level-sampler   nil   :type (or null simple-vector))
   (consistent      nil   :type (or null consistent-sampler))
@@ -156,7 +156,7 @@ hash decision."
           (let ((cs (logger-consistent lgr)))
             (when cs
               (let ((key (funcall (consistent-sampler-key-fn cs)
-                                  (logger-raw-bindings lgr))))
+                                  (logger-context lgr))))
                 (when key
                   (if (consistent-hash-keep-p key (consistent-sampler-rate cs))
                       (return-from sampling)
@@ -182,11 +182,11 @@ hash decision."
                             fields)))
               (dispatch-to-output output (logger-formatter lgr)
                                   level-value
-                                  (logger-chindings lgr) (logger-raw-bindings lgr)
+                                  (logger-prepared lgr)
                                   ctx message flds))))
         (values)))))
 
-(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter function)
+(declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter (or null formatter))
                                 (:context list) (:field-transform (or null function))
                                 (:capacity fixnum) (:on-drop (or null function))
                                 (:blocking boolean) (:block-timeout t)
@@ -195,50 +195,20 @@ hash decision."
                                 (:consistent (or null consistent-sampler)))
                           (values logger &optional)) make-logger))
 
-(defun make-logger (&key output (level :info) (formatter #'json-formatter)
+(defun make-logger (&key output (level :info) (formatter *default-json-formatter*)
                         context field-transform
                         (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                         level-sampler consistent)
-  "Create a root logger. Multiple root loggers can coexist — each owns its own
-output and writer thread(s). Assign to *logger* for implicit use by logging
-macros, or pass explicitly as the first argument to bark:info etc.
+  "Create a root logger.
 
-OUTPUT (stream, function, tee-output, or NIL):
-  Stream/NIL — wrapped in async-output (background writer thread + ring buffer).
-  NIL defaults to *error-output*. Function — called synchronously, no thread.
-  tee-output — from bark:tee or bark:make-tee, used as-is.
-
-LEVEL (keyword or fixnum, default :info):
-  Minimum log level. One of :trace :debug :info :warn :error :fatal.
-
-FORMATTER (function, default #'json-formatter):
-  Formatting function with signature (level chindings raw-bindings context
-  message fields) -> string. Use make-json-formatter, make-logfmt-formatter,
-  or make-pretty-formatter for customization.
+FORMATTER (formatter struct, default *default-json-formatter*):
+  Formatter with prepare-fn/format-fn protocol. Use make-json-formatter,
+  make-logfmt-formatter, or make-pretty-formatter for customization.
 
 CONTEXT (plist or NIL):
-  Static context fields attached to every log entry, e.g. '(:name \"myapp\").
-  Pre-serialized at creation time — zero per-call cost.
-
-FIELD-TRANSFORM (function or NIL):
-  Function (lambda (key value) ...) applied to every field before serialization.
-  Return the (possibly modified) value, or (values nil nil) to drop the field.
-
-CAPACITY (fixnum, default 8192): Ring buffer size in messages. Stream output only.
-ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
-  dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
-BLOCKING (boolean): When T, callers block on a full buffer instead of dropping.
-BLOCK-TIMEOUT (real, default 5.0): Seconds to wait when blocking before giving up.
-ON-BLOCK-TIMEOUT (function or NIL): Called when block-timeout expires.
-
-LEVEL-SAMPLER (simple-vector or NIL): From make-level-sampler — per-level
-  windowed counters for rate limiting.
-CONSISTENT (consistent-sampler or NIL): From make-consistent-sampler —
-  deterministic hash-based sampling.
-
-Async parameters (CAPACITY through ON-BLOCK-TIMEOUT) are only valid with stream
-output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ERROR."
+  Static context fields pre-serialized at creation time via formatter's
+  prepare-fn — zero per-call cost."
   (when (and (or (functionp output) (tee-output-p output))
              (or blocking on-block-timeout block-timeout-supplied-p
                  (/= capacity +default-buffer-capacity+)
@@ -260,7 +230,7 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
                           ((or (streamp output) (null output))
                            (make-async-output (or output *error-output*)
                                               :capacity capacity
-                                              :formatter formatter
+                                              :formatter nil
                                               :on-drop on-drop
                                               :on-error nil
                                               :blocking blocking
@@ -277,12 +247,20 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
          (effective-context (if (and context field-transform)
                                 (apply-field-transform-plist field-transform context)
                                 context))
-         (chindings (if effective-context (serialize-bindings effective-context) ""))
-         (raw-bindings effective-context)
+         (prepared (if (tee-output-p actual-output)
+                       (let ((groups (tee-output-groups actual-output)))
+                         (map 'simple-vector
+                              (lambda (group)
+                                (funcall (formatter-prepare-fn (formatter-group-formatter group))
+                                         nil effective-context))
+                              groups))
+                       (if formatter
+                           (funcall (formatter-prepare-fn formatter) nil effective-context)
+                           "")))
          (lgr (%make-logger
                :root-p t
-               :chindings chindings
-               :raw-bindings raw-bindings
+               :context effective-context
+               :prepared prepared
                :formatter formatter
                :output actual-output
                :field-transform field-transform
@@ -432,19 +410,30 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
          (effective-bindings (if (and context composed-transform)
                                  (apply-field-transform-plist composed-transform context)
                                  context))
-         (new-chindings (concatenate 'string
-                                      (logger-chindings parent)
-                                      (serialize-bindings effective-bindings)))
-         (new-raw-bindings (append (logger-raw-bindings parent) effective-bindings))
+         (parent-formatter (logger-formatter parent))
+         (new-context (append (logger-context parent) effective-bindings))
+         (new-prepared
+           (if (tee-output-p (logger-output parent))
+               (let ((parent-vec (logger-prepared parent))
+                     (groups (tee-output-groups (logger-output parent))))
+                 (map 'simple-vector
+                      (lambda (group pv)
+                        (funcall (formatter-prepare-fn (formatter-group-formatter group))
+                                 pv effective-bindings))
+                      groups parent-vec))
+               (if parent-formatter
+                   (funcall (formatter-prepare-fn parent-formatter)
+                            (logger-prepared parent) effective-bindings)
+                   "")))
          (child-level (cond
                         ((null level) (logger-level parent))
                         ((keywordp level) (level-from-keyword level))
                         (t level)))
          (child (%make-logger
                  :level child-level
-                 :chindings new-chindings
-                 :raw-bindings new-raw-bindings
-                 :formatter (logger-formatter parent)
+                 :context new-context
+                 :prepared new-prepared
+                 :formatter parent-formatter
                  :output (logger-output parent)
                  :level-sampler (logger-level-sampler parent)
                  :consistent (logger-consistent parent)
@@ -538,10 +527,10 @@ A CONTINUE restart is available to silently ignore the operation."
 
 ;;; --- Utilities ---
 
-(defmacro with-captured-logs ((&optional (var 'logs) (formatter '#'json-formatter)) &body body)
+(defmacro with-captured-logs ((&optional (var 'logs) (formatter '(make-json-formatter))) &body body)
   "Execute BODY with a test logger that captures log output.
    Binds VAR to a function that returns the list of logged strings.
-   FORMATTER defaults to #'json-formatter but can be any formatter function."
+   FORMATTER defaults to (make-json-formatter) but can be any formatter struct."
   `(multiple-value-bind (collector results-fn) (make-list-collector)
      (let* ((*logger* (make-logger :level :trace
                                    :formatter ,formatter :output collector
