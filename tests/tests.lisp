@@ -21,6 +21,7 @@
    #:*max-json-depth* #:*max-json-length*
    #:*max-pretty-depth* #:*max-pretty-length*
    #:write-json-escaped-string #:serialize-bindings-json
+   #:serialize-bindings-logfmt #:serialize-bindings-pretty
    #:make-concat-prepare-fn
    ;; Async output internals
    #:make-async-output #:stop-async-output #:flush-async-output
@@ -202,6 +203,37 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is-true (search "web" r))
     (5am:is-true (search "version" r))
     (5am:is-true (search "2" r))))
+
+(5am:test test-serialize-bindings-logfmt
+  "Test serialize-bindings-logfmt produces a correct logfmt fragment."
+  (let ((r (serialize-bindings-logfmt (list :service "web" :version 2))))
+    (5am:is-true (stringp r))
+    ;; Logfmt uses space-separated key=value pairs
+    (5am:is-true (search "service=web" r))
+    (5am:is-true (search "version=2" r))
+    ;; Leading space (logfmt field separator)
+    (5am:is (char= #\Space (char r 0))))
+  ;; Quoting: values with spaces get quoted
+  (let ((r (serialize-bindings-logfmt (list :msg "hello world"))))
+    (5am:is-true (search "msg=" r))
+    (5am:is-true (search "\"hello world\"" r)))
+  ;; Boolean T emits bare key
+  (let ((r (serialize-bindings-logfmt (list :verbose t))))
+    (5am:is-true (search "verbose" r))
+    (5am:is-false (search "=" r :start2 (search "verbose" r)))))
+
+(5am:test test-serialize-bindings-pretty
+  "Test serialize-bindings-pretty produces a correct pretty fragment."
+  (let ((r (serialize-bindings-pretty (list :service "web" :version 2))))
+    (5am:is-true (stringp r))
+    ;; Contains key names with ANSI escape codes
+    (5am:is-true (search "service" r))
+    (5am:is-true (search "web" r))
+    (5am:is-true (search "version" r))
+    ;; Contains ANSI escape sequences
+    (5am:is-true (search (string #\Esc) r)))
+  ;; Empty bindings
+  (5am:is (string= "" (serialize-bindings-pretty nil))))
 
 (5am:test test-make-concat-prepare-fn
   "Test make-concat-prepare-fn returns a prepare-fn that serializes and concatenates."
