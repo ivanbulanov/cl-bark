@@ -118,7 +118,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 ```lisp
 ;; Create logger and assign to the global
 (setf bark:*logger*
-      (bark:make-logger &key output (level :info) (formatter #'json-formatter)
+      (bark:make-logger &key output (level :info) (formatter (bark:make-json-formatter))
                              context field-transform
                              (capacity 8192) (on-drop #'default-on-drop)
                              blocking (block-timeout 5.0) on-block-timeout
@@ -177,7 +177,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 `destinations` is a list of plists, each with the keys:
 
 - `:stream` (required) — an output stream
-- `:formatter` — a formatter function (defaults to `#'bark:json-formatter`)
+- `:formatter` — a formatter struct (defaults to `bark:*default-json-formatter*`; create one with `bark:make-json-formatter`, `bark:make-logfmt-formatter`, `bark:make-pretty-formatter`, or `bark:make-formatter`)
 - `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip. Receives the log level (integer) and per-call fields only — not static or dynamic context
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
 - `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
@@ -197,18 +197,18 @@ Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &
 ```lisp
 (bark:tee
   ;; Fast local console — small buffer
-  (*error-output*                       :formatter #'bark:pretty-formatter
+  (*error-output*                       :formatter (bark:make-pretty-formatter)
                                         :capacity 1024)
   ;; Slow remote sink — large buffer, custom drop message
   ((open "/var/log/app.jsonl"
          :direction :output
-         :if-exists :append)            :formatter #'bark:json-formatter
+         :if-exists :append)            :formatter (bark:make-json-formatter)
                                         :capacity 65536
                                         :on-drop (lambda (n) (format nil "lost ~d" n)))
   ;; Errors only
   ((open "/var/log/errors.jsonl"
          :direction :output
-         :if-exists :append)            :formatter #'bark:json-formatter
+         :if-exists :append)            :formatter (bark:make-json-formatter)
                                         :level :error))
 ```
 
@@ -373,26 +373,27 @@ The transform applies to **all three field sources**:
 
 ### Formatters
 
-A formatter is a function with signature:
+A formatter is a struct with two slots: `prepare-fn` and `format-fn`. The `format-fn` has signature:
 ```
-(level chindings raw-bindings context message fields) -> string
+(level prepared context message fields) -> string
 ```
 
 | Parameter | Type | Purpose |
 |-----------|------|---------|
 | `level` | fixnum | Numeric log level (1-6) |
-| `chindings` | string | Static context pre-serialized as a JSON fragment (e.g. `,"name":"myapp"`). Splice directly into JSON output for zero per-call serialization cost |
-| `raw-bindings` | plist | Static context as a key-value plist (e.g. `(:name "myapp")`). Same data as `chindings` but not pre-serialized — use this in non-JSON formatters |
+| `prepared` | string | Pre-serialized static context prepared by the `prepare-fn` (opaque to the logger). Used by formatters to splice static context into output with zero per-call cost |
 | `context` | alist | Dynamic context from `with-context` |
 | `message` | string | The log message |
 | `fields` | plist | Per-call fields from the `&rest` args |
 
-JSON-oriented formatters use `chindings` (pre-serialized, zero per-call cost) and `(declare (ignore raw-bindings))`. Text-oriented formatters use `raw-bindings` and `(declare (ignore chindings))`. Both representations carry the same data.
+The `prepare-fn` is called once per child logger creation and receives a plist of static context fields. It returns a pre-serialized string (e.g., a JSON fragment for JSON formatters, a logfmt string for logfmt formatters). The `format-fn` receives this prepared string and splices it into the output. This design enables O(delta) child creation: each child level only serializes its own new fields, inheriting the parent's pre-serialized context.
 
-Built-in formatters:
-- `bark:json-formatter` — JSON Lines (default, production)
-- `bark:logfmt-formatter` — `key=value` pairs
-- `bark:pretty-formatter` — colored terminal output for REPL/development
+Built-in formatter factories:
+- `bark:make-json-formatter` — creates a JSON Lines formatter (production)
+- `bark:make-logfmt-formatter` — creates a `key=value` pairs formatter
+- `bark:make-pretty-formatter` — creates a colored terminal formatter for REPL/development
+
+Default formatter: `bark:*default-json-formatter*` (a `make-json-formatter` instance)
 
 **Supported field value types:**
 
@@ -426,11 +427,19 @@ All types are accepted — no log call ever signals `type-error`. Ratios are coe
 
 **pretty:** Values are printed via `princ`, bounded by `*print-level*` and `*print-length*`.
 
-**Customization:** Specialize `print-object` on your classes to control the type name shown in placeholders. Collection depth and length are bounded by formatter-specific limits — see [Tuning](#tuning).
+**Customization:** Specialize `print-object` on your classes to control the type name shown in placeholders. Collection depth and length are bounded by formatter-specific limits — see [Globals](#globals) for `*max-json-depth*`, `*max-json-length*`, `*max-pretty-depth*`, `*max-pretty-length*`.
 
 #### Formatter Factories
 
-The built-in formatters (`json-formatter`, `logfmt-formatter`, `pretty-formatter`) are zero-config convenience functions with fixed defaults. When you need to match an external system's expected format — different field names, timestamp format, or level encoding — use the corresponding factory function to create a customized formatter. Factories return closures with the same signature as the built-ins, with all configuration pre-computed at creation time (no per-call overhead). You can also write an entirely custom formatter — any function with the signature `(level chindings raw-bindings context message fields)` that returns a string works as a `:formatter`. Custom formatters must call `bark:current-log-timestamp-ms` for timestamps instead of reading the clock directly — during `with-log-buffer` replay, this function returns the original log-call timestamp rather than the flush time.
+Formatter factories create customized `formatter` structs with pre-computed configuration (no per-call overhead). The built-in factories (`make-json-formatter`, `make-logfmt-formatter`, `make-pretty-formatter`) have sensible defaults. When you need to match an external system's expected format — different field names, timestamp format, or level encoding — call the factory with your customization parameters.
+
+You can also write an entirely custom formatter using `make-formatter`:
+
+```lisp
+(bark:make-formatter &key prepare-fn format-fn)
+```
+
+Both `:prepare-fn` and `:format-fn` are required. The `prepare-fn` receives a plist of static context and returns a pre-serialized string. The `format-fn` has signature `(level prepared context message fields)` and returns a string. Custom formatters must call `bark:current-log-timestamp-ms` for timestamps instead of reading the clock directly — during `with-log-buffer` replay, this function returns the original log-call timestamp rather than the flush time.
 
 **`make-json-formatter`**
 
@@ -554,7 +563,7 @@ To capture and assert on log output:
     (assert (= 1 (length lines)))))
 
 ;; Use a different formatter
-(bark:with-captured-logs (get-logs #'bark:logfmt-formatter)
+(bark:with-captured-logs (get-logs (bark:make-logfmt-formatter))
   (bark:info "hello")
   (assert (search "level=info" (first (funcall get-logs)))))
 ```
@@ -718,8 +727,8 @@ Same events, different formats. The most common multi-output scenario.
       (bark:make-logger :level :info
                         :context '(:name "myapp")
                         :output (bark:tee
-                                 (*error-output* :formatter #'bark:pretty-formatter)
-                                 (*log-file*     :formatter #'bark:json-formatter))))
+                                 (*error-output* :formatter (bark:make-pretty-formatter))
+                                 (*log-file*     :formatter (bark:make-json-formatter)))))
 
 (bark:info "request handled" :status 200)
 ;; => pretty-printed to stderr
@@ -735,8 +744,8 @@ All events to console, errors only to a separate file.
       (bark:make-logger :level :info
                         :context '(:name "myapp")
                         :output (bark:tee
-                                 (*error-output* :formatter #'bark:pretty-formatter)
-                                 (*error-file*   :formatter #'bark:json-formatter
+                                 (*error-output* :formatter (bark:make-pretty-formatter))
+                                 (*error-file*   :formatter (bark:make-json-formatter)
                                                  :level :error))))
 
 (bark:info "all good")           ; console only
@@ -752,8 +761,8 @@ Audit events to a dedicated stream based on a per-call field.
       (bark:make-logger :level :info
                         :context '(:name "myapp")
                         :output (bark:tee
-                                 (*error-output* :formatter #'bark:json-formatter)
-                                 (*audit-file*   :formatter #'bark:json-formatter
+                                 (*error-output* :formatter (bark:make-json-formatter))
+                                 (*audit-file*   :formatter (bark:make-json-formatter)
                                                  :filter (lambda (level fields)
                                                            (declare (ignore level))
                                                            (getf fields :audit))))))
@@ -787,9 +796,9 @@ Reopen a log file on any error:
 
 ```lisp
 (bark:tee
-  (*error-output* :formatter #'bark:pretty-formatter)
+  (*error-output* :formatter (bark:make-pretty-formatter))
   ((open "/var/log/app.jsonl" :direction :output :if-exists :append)
-   :formatter #'bark:json-formatter
+   :formatter (bark:make-json-formatter)
    :on-error (lambda (condition)
                (declare (ignore condition))
                (open "/var/log/app.jsonl"
@@ -999,7 +1008,7 @@ Every log call formats the message to a finished string in the caller's thread, 
 
 **4. Shared formatter optimization requires formatting before fan-out.** With tee, destinations are grouped by formatter identity (`eq`). The message is formatted once per group, then the same string is pushed to all passing destinations' ring buffers. If formatting were deferred to writer threads, each writer would format independently — duplicating work when destinations share a formatter.
 
-**Trade-off: per-call latency.** Formatting dominates caller-thread latency. This is bounded by `*max-json-depth*`, `*max-json-length*`, and `*max-json-stack-frames*`. Pre-serialized `chindings` on child loggers eliminate per-call cost for static context. Sampling skips formatting entirely for sampled-out messages.
+**Trade-off: per-call latency.** Formatting dominates caller-thread latency. This is bounded by `*max-json-depth*`, `*max-json-length*`, and `*max-json-stack-frames*`. Pre-serialized `prepared` context on child loggers (via `prepare-fn`) eliminates per-call cost for static context. Sampling skips formatting entirely for sampled-out messages.
 
 ### Performance Characteristics
 

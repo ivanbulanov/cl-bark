@@ -5,7 +5,7 @@
 (declaim (optimize (speed 3) (safety 1)))
 
 (defun make-bench-logger (&key (blocking nil) (capacity 8192)
-                               (formatter #'bark:json-formatter))
+                               (formatter (bark:make-json-formatter)))
   "Create a cl-bark logger writing to the discard stream.
    Returns the logger. Caller must call bark:stop when done."
   (bark:make-logger :level :trace
@@ -150,9 +150,9 @@
     ;; Use blocking mode to isolate formatter cost from async enqueue variance.
     ;; The write-to-discard cost is constant across formatters, so deltas
     ;; reflect pure formatting differences.
-    (dolist (fmt-pair (list (cons "json" #'bark:json-formatter)
-                           (cons "logfmt" #'bark:logfmt-formatter)
-                           (cons "pretty" #'bark:pretty-formatter)))
+    (dolist (fmt-pair (list (cons "json" (bark:make-json-formatter))
+                           (cons "logfmt" (bark:make-logfmt-formatter))
+                           (cons "pretty" (bark:make-pretty-formatter))))
       (let ((logger (make-bench-logger :blocking t
                                        :formatter (cdr fmt-pair))))
         (unwind-protect
@@ -175,9 +175,9 @@
                     :level :trace
                     :output (bark:make-tee
                              (list (list :stream *discard-stream*
-                                         :formatter #'bark:json-formatter)
+                                         :formatter (bark:make-json-formatter))
                                    (list :stream stream2
-                                         :formatter #'bark:logfmt-formatter))))))
+                                         :formatter (bark:make-logfmt-formatter)))))))
       (unwind-protect
           (multiple-value-bind (time-samples bytes-timer name batch-size)
               (run-batch-scenario "tee-2-destinations"
@@ -198,9 +198,9 @@
                     :level :trace
                     :output (bark:make-tee
                              (list (list :stream *discard-stream*
-                                         :formatter #'bark:json-formatter)
+                                         :formatter (bark:make-json-formatter))
                                    (list :stream stream2
-                                         :formatter #'bark:json-formatter))))))
+                                         :formatter (bark:make-json-formatter)))))))
       (unwind-protect
           (multiple-value-bind (time-samples bytes-timer name batch-size)
               (run-batch-scenario "tee-shared-formatter"

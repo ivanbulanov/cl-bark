@@ -7,7 +7,7 @@
   (:import-from #:bark
    #:make-logger #:make-windowed-counter #:make-level-sampler
    #:set-level-sampling #:logger-debug-fn
-   #:json-formatter #:make-child))
+   #:make-json-formatter #:make-child))
 
 (in-package #:bark-concurrency-tests)
 
@@ -38,7 +38,7 @@
         (thereafter 100))
     (multiple-value-bind (output count-fn) (make-counting-output)
       (let ((lgr (make-logger :context '(:name "conc") :level :debug
-                              :formatter #'json-formatter :output output
+                              :formatter (make-json-formatter) :output output
                               :level-sampler (make-level-sampler
                                               :debug (make-windowed-counter
                                                       :initial initial
@@ -96,7 +96,7 @@
   "Concurrent logging with both samplers does not crash or corrupt."
   (multiple-value-bind (output count-fn) (make-counting-output)
     (let ((lgr (make-logger :context '(:name "stress") :level :debug
-                            :formatter #'json-formatter :output output
+                            :formatter (make-json-formatter) :output output
                             :consistent (bark:make-consistent-sampler
                                          :key-fn (lambda (b) (getf b :rid))
                                          :rate 5)

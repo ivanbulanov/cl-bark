@@ -80,7 +80,7 @@
 (defun bark-logfmt-setup ()
   (setf *bark-logfmt-logger*
         (bark:make-logger :level :trace :output *discard-stream*
-                          :blocking t :formatter #'bark:logfmt-formatter))
+                          :blocking t :formatter (bark:make-logfmt-formatter)))
   (setf *bark-logfmt-child*
         (bark:make-child *bark-logfmt-logger* :context *bench-context*)))
 

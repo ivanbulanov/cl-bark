@@ -3,7 +3,7 @@
 (defpackage #:bark
   (:use #:cl)
   (:documentation "High-performance structured logger for Common Lisp. Async I/O via lock-free ring buffers, JSON/logfmt/pretty formatters, multi-output fan-out, child loggers with pre-serialized context, sampling, and request-scoped buffering.")
-  (:shadow #:debug #:error #:trace #:warn)
+  (:shadow #:debug #:error #:trace #:warn #:formatter)
   (:export
    ;; levels
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
@@ -17,6 +17,7 @@
    ;; pretty
    #:*max-pretty-depth* #:*max-pretty-length* #:*max-pretty-stack-frames*
    ;; formatters
+   #:formatter #:make-formatter #:formatter-p #:formatter-prepare-fn #:formatter-format-fn
    #:json-formatter #:logfmt-formatter #:pretty-formatter
    #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
    ;; output
