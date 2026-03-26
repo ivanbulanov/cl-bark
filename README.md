@@ -283,6 +283,38 @@ dynamic context:  request-id=req-123, tenant=acme     (per-request, transient)
 per-call fields:  query="SELECT ...", duration-ms=42   (this specific event)
 ```
 
+#### Context Key Shadowing
+
+Nested `with-context` forms shadow outer keys with the same name — like CL `let`:
+
+```lisp
+(bark:with-context (:request-id "req-123")
+  ;; Retry with new correlation ID
+  (bark:with-context (:request-id "req-456")
+    (bark:info "retrying")))
+;; => {"request-id":"req-456","msg":"retrying"}  — inner value wins, no duplicate keys
+```
+
+Non-overlapping keys from outer scopes are preserved:
+
+```lisp
+(bark:with-context (:tenant "acme" :request-id "req-123")
+  (bark:with-context (:request-id "req-456")
+    (bark:info "retrying")))
+;; => {"tenant":"acme","request-id":"req-456","msg":"retrying"}
+```
+
+When the inner `with-context` exits, the outer binding is restored:
+
+```lisp
+(bark:with-context (:x "outer")
+  (bark:with-context (:x "inner")
+    (bark:info "inside"))   ; x = "inner"
+  (bark:info "after"))      ; x = "outer"
+```
+
+**Note:** Shadowing applies only within dynamic context (`with-context`). Duplicate keys across static context (child loggers) and per-call fields are not deduplicated — those layers are the caller's responsibility.
+
 ### Condition Logging
 
 Conditions passed as field values are automatically serialized with their type and message — no wrapper needed.

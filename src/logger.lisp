@@ -548,11 +548,18 @@ A CONTINUE restart is available to silently ignore the operation."
 ;;; --- Context ---
 
 (defmacro with-context ((&rest pairs) &body body)
-  "Bind dynamic log context fields for the duration of BODY."
-  `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
-                                       collect `(cons ,k ,v))
-                               *log-context*)))
-     ,@body))
+  "Bind dynamic log context fields for the duration of BODY.
+Inner bindings shadow outer bindings with the same key — like CL LET."
+  (let ((new-keys (loop for (k) on pairs by #'cddr collect k)))
+    `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
+                                         collect `(cons ,k ,v))
+                                 ,(if (= (length new-keys) 1)
+                                      `(remove ,(first new-keys) *log-context* :key #'car)
+                                      `(remove-if (lambda (pair)
+                                                    (member (car pair)
+                                                            '(,@new-keys)))
+                                                  *log-context*)))))
+       ,@body)))
 
 ;;; --- Utilities ---
 

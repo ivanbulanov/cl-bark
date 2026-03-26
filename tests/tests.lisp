@@ -698,6 +698,68 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
       (5am:is-true (search "inner" line))
       (5am:is-true (search "b" line)))))
 
+(5am:test test-nested-context-shadowing
+  "Inner with-context shadows same key from outer with-context."
+  (with-captured-logs (get-logs)
+    (with-context (:request-id "outer")
+      (with-context (:request-id "inner")
+        (bark:info "shadowed")))
+    (let* ((logs (funcall get-logs))
+           (line (first logs))
+           (parsed (yason:parse line)))
+      ;; Inner value wins, outer is removed
+      (5am:is (equal "inner" (gethash "request-id" parsed)))
+      ;; Only one occurrence of the key
+      (let ((count (loop for start = (search "request-id" line)
+                           then (search "request-id" line :start2 (1+ start))
+                         while start count 1)))
+        (5am:is (= 1 count))))))
+
+(5am:test test-nested-context-shadowing-preserves-non-overlapping
+  "Inner with-context shadows same key but preserves non-overlapping outer keys."
+  (with-captured-logs (get-logs)
+    (with-context (:tenant "acme" :request-id "outer")
+      (with-context (:request-id "inner")
+        (bark:info "mixed")))
+    (let* ((parsed (yason:parse (first (funcall get-logs)))))
+      (5am:is (equal "inner" (gethash "request-id" parsed)))
+      (5am:is (equal "acme" (gethash "tenant" parsed))))))
+
+(5am:test test-nested-context-multi-key-shadowing
+  "Inner with-context with multiple keys shadows all matching outer keys."
+  (with-captured-logs (get-logs)
+    (with-context (:a 1 :b 2 :c 3)
+      (with-context (:a 10 :c 30)
+        (bark:info "multi")))
+    (let* ((parsed (yason:parse (first (funcall get-logs)))))
+      (5am:is (= 10 (gethash "a" parsed)))
+      (5am:is (= 2  (gethash "b" parsed)))
+      (5am:is (= 30 (gethash "c" parsed))))))
+
+(5am:test test-nested-context-three-levels
+  "Three levels of nesting: innermost wins for shared keys."
+  (with-captured-logs (get-logs)
+    (with-context (:x "L1" :y "L1")
+      (with-context (:x "L2")
+        (with-context (:x "L3")
+          (bark:info "deep"))))
+    (let* ((parsed (yason:parse (first (funcall get-logs)))))
+      (5am:is (equal "L3" (gethash "x" parsed)))
+      (5am:is (equal "L1" (gethash "y" parsed))))))
+
+(5am:test test-context-shadowing-scoping
+  "Shadowed keys are restored when inner with-context exits."
+  (with-captured-logs (get-logs)
+    (with-context (:x "outer")
+      (with-context (:x "inner")
+        (bark:info "inside"))
+      (bark:info "after"))
+    (let* ((logs (funcall get-logs))
+           (inside (yason:parse (first logs)))
+           (after  (yason:parse (second logs))))
+      (5am:is (equal "inner" (gethash "x" inside)))
+      (5am:is (equal "outer" (gethash "x" after))))))
+
 (5am:test test-with-captured-logs
   "Verify with-captured-logs captures log lines as a list."
   (with-captured-logs (get-logs)
