@@ -1089,7 +1089,7 @@ See [multi-output-design.md](docs/multi-output-design.md) for the full design ra
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Author
 
