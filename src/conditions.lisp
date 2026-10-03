@@ -87,3 +87,8 @@ A CONTINUE restart is available to skip stopped outputs."))
                      (bark-child-operation-error-operation c))))
   (:documentation "Signaled when a root-only operation is attempted on a child logger.
 A CONTINUE restart is available to silently ignore the operation."))
+
+(setf (documentation 'bark-configuration-error-detail 'function)
+      "Return the human-readable string describing why the BARK-CONFIGURATION-ERROR was signaled."
+      (documentation 'bark-child-operation-error-operation 'function)
+      "Return the keyword naming the root-only operation (currently :STOP) that was attempted on a child logger.")

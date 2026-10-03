@@ -339,8 +339,8 @@ or a fixnum level constant. Takes effect immediately."
 
 (defun level-enabled-p (logger level)
   "Return T if LEVEL is enabled on LOGGER. NIL when LOGGER is nil.
-Checks the level threshold only — does not account for sampling,
-per-destination filters, or compile-time elimination."
+Checks the level threshold only — does not account for sampling or
+per-destination filters."
   (and logger
        (>= (level-from-keyword level)
            (logger-level logger))))
@@ -589,7 +589,8 @@ Inner bindings shadow outer bindings with the same key — like CL LET."
          ,@body))))
 
 (defvar *compile-time-max-level* 0
-  "When positive, log calls for levels below this are eliminated at compile time.")
+  "Reserved. Intended to eliminate log calls below this level at compile time,
+   but no logging macro currently consults it, so it has no effect.")
 
 (declaim (ftype (function nil (values function function &optional)) make-list-collector))
 
@@ -654,8 +655,9 @@ fatal) share the same calling convention:
 
 The first argument is dispatched at runtime: if it satisfies logger-p, it is
 used as the logger; if it is a keyword, it starts a fields-only plist with no
-message; otherwise it is the message string.
+message; otherwise (including NIL) it is the message and the call logs through
+*logger*.
 
-When *logger* is NIL (or the explicit logger is NIL), the call is a no-op —
-logging macros never signal. Calls below *compile-time-max-level* are
-eliminated entirely at compile time.")
+When *logger* is NIL, the call is a no-op — logging macros never signal. An
+explicit NIL first argument is not a logger; it is treated as the message.
+*compile-time-max-level* is reserved and currently has no effect.")

@@ -237,6 +237,10 @@
   (format-fn  (cl:error "format-fn is required")
               :type function :read-only t))
 
+(setf (documentation 'formatter-p 'function) "Return T if OBJECT is a formatter."
+      (documentation 'formatter-prepare-fn 'function) "Function of two arguments, the parent's prepared string (or NIL) and the delta context plist, returning the pre-serialized static context string for a logger. Called when a logger or child logger is created."
+      (documentation 'formatter-format-fn 'function) "Function of five arguments, LEVEL (fixnum), PREPARED (string), CONTEXT (list), MESSAGE (string or NIL) and FIELDS (list), returning the formatted log line as a string. Called for each log event.")
+
 (declaim (ftype (function (&key (:prepare-fn function) (:format-fn function))
                            (values formatter &optional))
                 make-formatter))

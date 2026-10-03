@@ -106,7 +106,8 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
     (list ,@(loop for spec in destination-specs
                   for (stream-expr . keys) = spec
                   do (when (and (member :level keys) (member :filter keys))
-                       (cl:error "Cannot specify both :level and :filter in tee destination spec"))
+                       (cl:error 'bark-configuration-error
+                                 :detail "Cannot specify both :level and :filter in tee destination spec"))
                   collect `(list :stream ,stream-expr ,@keys)))))
 
 (declaim (ftype (function (tee-output fixnum t list (or null string) list) (values &optional)) emit-to-tee))

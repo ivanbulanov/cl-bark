@@ -51,7 +51,7 @@
 
 (defun make-buffer-logger (original buffer-level buffer)
   "Create a buffer-logger: a copy of ORIGINAL with level lowered to BUFFER-LEVEL,
-   field-transform and sampler cleared, and level slots replaced with capture functions."
+   no field-transform or sampler slots set (they are omitted), and level slots replaced with capture functions."
   (let ((lgr (%make-logger
               :context (logger-context original)
               :prepared (logger-prepared original)
