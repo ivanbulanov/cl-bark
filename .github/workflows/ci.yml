@@ -33,6 +33,7 @@ jobs:
             (asdf:load-system :cl-bark/tests)
             (asdf:load-system :cl-bark/concurrency-tests)
             ;; No reader-time 5AM: references: this form is read before fiveam is loaded.
+            ;; 40ants/run-tests exits 2 when the last form returns NIL, so return OK.
             (let ((ok t))
               (dolist (suite '(("BARK-TESTS" . "BARK-TESTS")
                                ("BLOCKING-TESTS" . "BARK-BLOCKING-TESTS")
@@ -43,4 +44,5 @@ jobs:
                   (unless (uiop:symbol-call :fiveam :results-status results)
                     (setf ok nil))))
               (unless ok
-                (uiop:quit 1)))
+                (uiop:quit 1))
+              ok)
