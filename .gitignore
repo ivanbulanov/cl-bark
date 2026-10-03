@@ -2,4 +2,5 @@
 *~
 \#*\#
 .qlot/
-docs/plans/
+.funhouse-meta.sexp
+.funhouse/logs/

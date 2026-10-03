@@ -14,7 +14,7 @@ Sampling trades completeness for sustainability. The two strategies address diff
 
 ## Windowed Counter
 
-**What it does:** For a given log level, guarantee the first N messages per time window always pass, then sample 1-in-M thereafter.
+**What it does:** For a given log level, guarantee the first N messages per time window always pass, then sample 1-in-M thereafter. Counting is 1-based and the clock is only consulted every 64th message (see "Window boundary fuzziness").
 
 **Why this shape:** The first few messages in a burst are the most diagnostic — they show what triggered the burst. After that, statistical sampling preserves trends without flooding. This is Go zap's production-proven model.
 
@@ -26,11 +26,14 @@ Sampling trades completeness for sustainability. The two strategies address diff
 
 ```lisp
 ;; Sample debug messages: first 5 per second always pass, then 1-in-100
-(bark:start :level :debug
-            :level-sampler (bark:make-level-sampler
-                             :debug (bark:make-windowed-counter
-                                      :initial 5 :thereafter 100)))
+(setf bark:*logger*
+      (bark:make-logger :level :debug
+                        :level-sampler (bark:make-level-sampler
+                                         :debug (bark:make-windowed-counter
+                                                  :initial 5 :thereafter 100))))
 ```
+
+Counting is 1-based: messages 1 through 5 in a window pass, then every 100th message (100, 200, ...) passes.
 
 ### Hard Cap
 
@@ -42,7 +45,7 @@ Set `thereafter` to 0 to drop everything after the initial burst:
   :trace (bark:make-windowed-counter :initial 10 :thereafter 0))
 ```
 
-This is useful for trace-level instrumentation that would otherwise overwhelm the system. You see the first 10 per window, then silence until the next window.
+This is useful for trace-level instrumentation that would otherwise overwhelm the system. You see the first 10 per window, then silence until the window is reset (see "Window boundary fuzziness" below for when a reset is noticed).
 
 ### Multiple Levels
 
@@ -62,14 +65,14 @@ Change sampling without restarting:
 
 ```lisp
 ;; Tighten debug sampling during a load spike
-(bark:set-level-sampling *logger* :debug
+(bark:set-level-sampling bark:*logger* :debug
   (bark:make-windowed-counter :initial 2 :thereafter 500))
 
 ;; Remove debug sampling entirely
-(bark:set-level-sampling *logger* :debug nil)
+(bark:set-level-sampling bark:*logger* :debug nil)
 ```
 
-`set-level-sampling` is thread-safe. The struct replacement is atomic (single word-sized write). Active log calls see either the old or new counter, never a partial state.
+The level argument is a keyword (`:debug`) or a fixnum level value. `set-level-sampling` is thread-safe. The per-level slot replacement is a single word-sized write, so active log calls see either the old or new counter, never a partial state. If the logger has no level-sampler yet, the first call installs a fresh vector with a CAS.
 
 ### Window Sizing
 
@@ -96,28 +99,29 @@ Shorter windows react faster to traffic changes but may allow more total message
 ### Basic Usage
 
 ```lisp
-(bark:start :level :debug
-            :consistent (bark:make-consistent-sampler
-                          :key-fn (lambda (bindings)
-                                    (getf bindings :request-id))
-                          :rate 10))
+(setf bark:*logger*
+      (bark:make-logger :level :debug
+                        :consistent (bark:make-consistent-sampler
+                                      :key-fn (lambda (context)
+                                                (getf context :request-id))
+                                      :rate 10)))
 ```
 
 This keeps 1-in-10 requests (all their logs) and drops the other 9 entirely.
 
 ### How `key-fn` Works
 
-The `key-fn` receives the logger's accumulated `raw-bindings` — a plist containing all static context from the logger and its ancestors. It returns a key (any hashable value) or nil.
+The `key-fn` receives the logger's static context plist (`logger-context`) — all context set via `:context` on the logger and its ancestors. It returns a key (a string, symbol, or number, which is passed to `sxhash`) or nil.
 
 When `key-fn` returns nil (no correlation key available), the consistent sampler is skipped and the message falls through to the windowed counter. This means messages logged before a request-id is established naturally bypass consistent sampling.
 
 ```lisp
-;; Key function extracts :request-id from bindings
-(lambda (bindings) (getf bindings :request-id))
+;; Key function extracts :request-id from the logger's context
+(lambda (context) (getf context :request-id))
 
 ;; The :request-id comes from a child logger:
-(let ((req-log (bark:child *logger* :request-id (generate-id))))
-  ;; req-log's raw-bindings include :request-id
+(let ((req-log (bark:make-child bark:*logger* :context (list :request-id (generate-id)))))
+  ;; req-log's context includes :request-id
   ;; All logs through req-log get the same hash decision
   (bark:info req-log "handling request")
   (bark:debug req-log "parsed body" :size 4096))
@@ -149,33 +153,34 @@ log call → consistent check → windowed check → emit
 
 **When a key is found:** the consistent sampler makes the keep/drop decision. The windowed counter is bypassed entirely. This preserves the all-or-nothing guarantee — if a request is kept, all its logs pass without volume gating.
 
-**When no key is found:** the consistent sampler is skipped (~15ns overhead) and the windowed counter decides.
+**When no key is found:** the consistent sampler is skipped and the windowed counter decides.
 
 ### Typical Production Setup
 
 ```lisp
-(bark:start
-  :name "api-server"
-  :level :debug
+(setf bark:*logger*
+      (bark:make-logger
+        :context '(:name "api-server")
+        :level :debug
 
-  ;; Consistent: keep 1-in-50 full request traces
-  :consistent (bark:make-consistent-sampler
-                :key-fn (lambda (bindings) (getf bindings :request-id))
-                :rate 50)
+        ;; Consistent: keep 1-in-50 full request traces
+        :consistent (bark:make-consistent-sampler
+                      :key-fn (lambda (context) (getf context :request-id))
+                      :rate 50)
 
-  ;; Windowed: for messages without a request-id (startup, health checks, etc.)
-  :level-sampler (bark:make-level-sampler
-                   :debug (bark:make-windowed-counter
-                            :initial 5 :thereafter 200)
-                   :trace (bark:make-windowed-counter
-                            :initial 2 :thereafter 0)))
+        ;; Windowed: for messages without a request-id (startup, health checks, etc.)
+        :level-sampler (bark:make-level-sampler
+                         :debug (bark:make-windowed-counter
+                                  :initial 5 :thereafter 200)
+                         :trace (bark:make-windowed-counter
+                                  :initial 2 :thereafter 0))))
 
 ;; Per-request child logger
 (defun handle-request (request)
-  (let ((bark:*logger* (bark:child bark:*logger*
-                                   :request-id (request-id request)
-                                   :method (request-method request))))
-    ;; All logs here carry :request-id in raw-bindings.
+  (let ((bark:*logger* (bark:make-child bark:*logger*
+                                        :context (list :request-id (request-id request)
+                                                       :method (request-method request)))))
+    ;; All logs here carry :request-id in the logger context.
     ;; Consistent sampler decides once per request.
     (bark:info "request started")
     (bark:debug "headers parsed" :count (header-count request))
@@ -187,44 +192,46 @@ Startup logs and health checks lack `:request-id`, so they fall through to the w
 
 ### Microservice with Component Loggers
 
-Child loggers inherit both sampling configurations:
+`make-child` snapshots both sampling configurations at creation time. The child shares the parent's level-sampler vector and consistent sampler object as they were when the child was created:
 
 ```lisp
 ;; Root logger with sampling
-(bark:start :level :debug
-            :consistent (bark:make-consistent-sampler
-                          :key-fn (lambda (b) (getf b :request-id))
-                          :rate 20)
-            :level-sampler (bark:make-level-sampler
-                             :debug (bark:make-windowed-counter
-                                      :initial 5 :thereafter 100)))
+(setf bark:*logger*
+      (bark:make-logger :level :debug
+                        :consistent (bark:make-consistent-sampler
+                                      :key-fn (lambda (context) (getf context :request-id))
+                                      :rate 20)
+                        :level-sampler (bark:make-level-sampler
+                                         :debug (bark:make-windowed-counter
+                                                  :initial 5 :thereafter 100))))
 
 ;; Component loggers — each inherits sampling from root
-(defvar *db-log* (bark:child bark:*logger* :component "database"))
-(defvar *cache-log* (bark:child bark:*logger* :component "cache"))
-(defvar *auth-log* (bark:child bark:*logger* :component "auth"))
+(defvar *db-log* (bark:make-child bark:*logger* :context '(:component "database")))
+(defvar *cache-log* (bark:make-child bark:*logger* :context '(:component "cache")))
+(defvar *auth-log* (bark:make-child bark:*logger* :context '(:component "auth")))
 
 ;; In a request handler:
-(let ((bark:*logger* (bark:child bark:*logger* :request-id rid)))
-  ;; All component loggers see :request-id via the inherited key-fn,
-  ;; because raw-bindings accumulate from all ancestors.
-  ;; BUT: only loggers created as children of the request-scoped logger
-  ;; will carry :request-id. The component loggers above were created
-  ;; from the root — they need a per-request child too:
-  (let ((*db-log* (bark:child *db-log* :request-id rid)))
-    (bark:debug *db-log* "query executed" :sql "SELECT ...")))
+;; Context accumulates from all ancestors, but only loggers created as
+;; children of the request-scoped context carry :request-id. The component
+;; loggers above were created from the root, so they need a per-request
+;; child too:
+(let ((db-log (bark:make-child *db-log* :context (list :request-id rid))))
+  (bark:debug db-log "query executed" :sql "SELECT ..."))
 ```
+
+Because the snapshot is taken at creation, a later `set-consistent` on the parent does not reach existing children. `set-level-sampling` on the parent reaches existing children only if the parent already had a level-sampler when the child was created (the vector is shared); if the parent had none, the call installs a new vector that existing children do not see. Windowed counters are shared objects, so children created from the same parent draw from the same counter for a given level.
 
 ## Interaction with Other Features
 
 ### Request-Scoped Buffering (`with-log-buffer`)
 
-Sampling is completely bypassed inside `with-log-buffer`. The buffer captures everything regardless of sampling configuration. At flush time, the buffer decides what to emit based on exit status — this is a higher-priority decision than sampling.
+Sampling is bypassed for implicit log calls (through `bark:*logger*`) inside `with-log-buffer`. The macro binds `*logger*` to a buffer logger built without the sampler slots, so the buffer captures everything regardless of sampling configuration, and flushed entries are replayed straight to the output without passing through the samplers. At flush time, the buffer decides what to emit based on exit status — this is a higher-priority decision than sampling. Calls that pass an explicit logger argument bypass the buffer entirely and are sampled as usual.
 
 ```lisp
 ;; Even with aggressive sampling, the buffer captures all debug logs.
-;; On error, everything is emitted. On success, only info+ is emitted.
-(bark:with-log-buffer ()
+;; On error, everything is emitted. On success, only entries at or above
+;; the source logger's level are emitted.
+(bark:with-log-buffer (bark:*logger*)
   (bark:debug "step 1" :data payload)   ; captured (sampling bypassed)
   (bark:debug "step 2" :result result)  ; captured
   (process))
@@ -238,19 +245,20 @@ Sampling runs before formatting and output dispatch. A sampled-out message never
 
 ```lisp
 ;; Debug to file (sampled), info+ to console (unsampled)
-(bark:start :level :debug
-            :level-sampler (bark:make-level-sampler
-                             :debug (bark:make-windowed-counter
-                                      :initial 5 :thereafter 100))
-            :output (bark:tee
-                     (*error-output* :formatter #'bark:pretty-formatter
-                                     :level :info)   ; info+ only
-                     (log-file      :formatter #'bark:json-formatter)))
+(setf bark:*logger*
+      (bark:make-logger :level :debug
+                        :level-sampler (bark:make-level-sampler
+                                         :debug (bark:make-windowed-counter
+                                                  :initial 5 :thereafter 100))
+                        :output (bark:tee
+                                 (*error-output* :formatter #'bark:pretty-formatter
+                                                 :level :info)   ; info+ only
+                                 (log-file      :formatter #'bark:json-formatter))))
 ```
 
 ### Compile-Time Elimination
 
-`*compile-time-max-level*` eliminates log calls at compile time. Sampling cannot resurrect eliminated calls. If you compile with `(setf bark:*compile-time-max-level* 30)`, debug and trace calls don't exist in the binary — no sampling configuration can bring them back.
+Compile-time elimination is not currently implemented: `*compile-time-max-level*` is defined but no logging macro consults it, so setting it has no effect on sampling or on the compiled log calls.
 
 ### Level Gate
 
@@ -266,13 +274,15 @@ When the consistent sampler decides "keep," the windowed counter is skipped enti
 
 ### Post-burst sampling gap
 
-After the initial burst (messages 0 through `initial-1`), the next sampled message passes at `count = thereafter`, not `count = initial + thereafter`. With `initial=5, thereafter=100`: the gap between the last burst message and the first sample is 96 dropped messages, not 100.
+Counts are 1-based: each message increments the counter (via `atomics:atomic-incf`, which returns the new value) and passes when `count <= initial`, or when `thereafter` is positive and `count` is a multiple of `thereafter`. The first sampled message passes at `count = thereafter`, not `count = initial + thereafter`. With `initial=5, thereafter=100`: messages 1 through 5 pass, message 100 passes, and the 94 messages in between (6 through 99) are dropped, not 100.
 
 This matches Go zap's behavior and is negligible in practice. If you need a precise rate immediately after the burst, set `initial=0`.
 
 ### Window boundary fuzziness
 
-The windowed counter amortizes clock reads every 64 messages (configurable via `+window-check-interval+` at compile time). This means window boundaries are detected up to 64 messages late. At 10K messages/sec, the fuzziness is ~6ms — irrelevant for 1-second windows. At 1M messages/sec, it's ~64 microseconds.
+The windowed counter amortizes clock reads: the clock is checked only when the counter value is a multiple of `+window-check-interval+` (64 by default, a compile-time constant). The counter includes dropped messages, so for a given level the window expiry is noticed on every 64th message at that level, and a reset sets the count back to 0. This means window boundaries are detected up to 64 messages late. At 10K messages/sec, the fuzziness is ~6ms — irrelevant for 1-second windows. At 1M messages/sec, it's ~64 microseconds.
+
+At low volume the delay is much longer in wall-clock time: a level that logs fewer than 64 messages per window will not see its window reset until its counter reaches 64 (or the next multiple of 64) after the window has expired. Until then, a hard cap (`thereafter=0`) keeps dropping and the initial burst is not replenished.
 
 **Recourse:** If you need tighter windows, reduce `+window-check-interval+` before compiling cl-bark. Powers of 2 only (for bit-mask optimization). Lower values increase clock overhead (~0.3ns per check per message).
 
@@ -286,7 +296,7 @@ The consistent sampler uses `sxhash` for hashing. On SBCL, `sxhash` is determini
 
 ### Child logger key-fn timing
 
-The consistent sampler's `key-fn` reads `raw-bindings` from the logger struct. These bindings are set at logger creation time (via `child`). If you set up the consistent sampler on a root logger and create request-scoped children, the `key-fn` sees the child's bindings — including `:request-id`. But logging through the root logger directly (without a child) means `key-fn` won't find `:request-id` and falls through to the windowed counter.
+The consistent sampler's `key-fn` reads the static context plist (`logger-context`) from the logger struct. This context is set at logger creation time (via `:context` on `make-logger` or `make-child`). If you set up the consistent sampler on a root logger and create request-scoped children, the `key-fn` sees the child's context — including `:request-id`. But logging through the root logger directly (without a child) means `key-fn` won't find `:request-id` and falls through to the windowed counter.
 
 **Recourse:** Always log through a request-scoped child when you want consistent sampling. Root-level logs (startup, health checks) fall through to the windowed counter by design.
 
@@ -302,12 +312,12 @@ Sampling runs before field transforms. A sampled-out message never reaches the f
 
 2. **Disable sampling for a level.** Pass nil to `set-level-sampling`:
    ```lisp
-   (bark:set-level-sampling *logger* :debug nil)
+   (bark:set-level-sampling bark:*logger* :debug nil)
    ```
 
-3. **Use `with-log-buffer` for critical paths.** Buffering bypasses all sampling. Wrap the code path where you need complete logs:
+3. **Use `with-log-buffer` for critical paths.** Buffering bypasses sampling for implicit log calls. Wrap the code path where you need complete logs:
    ```lisp
-   (bark:with-log-buffer ()
+   (bark:with-log-buffer (bark:*logger*)
      (critical-operation))
    ```
 
@@ -317,7 +327,7 @@ Sampling runs before field transforms. A sampled-out message never reaches the f
 
 2. **Add a hard cap.** Set `thereafter=0` on noisy levels:
    ```lisp
-   (bark:set-level-sampling *logger* :trace
+   (bark:set-level-sampling bark:*logger* :trace
      (bark:make-windowed-counter :initial 2 :thereafter 0))
    ```
 
@@ -334,14 +344,16 @@ If behavior seems different, check whether `rate` or `initial`/`thereafter` valu
 Use `with-log-buffer` around the request handler instead of relying on sampling:
 
 ```lisp
-(bark:with-log-buffer (:level :trace)
+(bark:with-log-buffer (bark:*logger* :level :trace)
   (handle-request request))
 ```
+
+By default the buffer emits everything only if the scope exits abnormally with a condition; on normal exit it emits entries at or above the logger's level. Pass `:on-flush` to choose entries yourself.
 
 Or create a child logger with the consistent sampler disabled:
 
 ```lisp
-(let ((bark:*logger* (bark:child bark:*logger* :request-id rid)))
+(let ((bark:*logger* (bark:make-child bark:*logger* :context (list :request-id rid))))
   (bark:set-consistent bark:*logger* nil)
   (handle-request request))
 ```
@@ -351,13 +363,14 @@ Or create a child logger with the consistent sampler disabled:
 Sampling is per-logger, not per-destination. Use tee-level filters for per-destination volume control:
 
 ```lisp
-(bark:start :level :debug
-            :output (bark:tee
-                     ;; Console: info+ only (no sampling needed)
-                     (*error-output* :formatter #'bark:pretty-formatter
-                                     :level :info)
-                     ;; File: all levels, sampled
-                     (log-file :formatter #'bark:json-formatter)))
+(setf bark:*logger*
+      (bark:make-logger :level :debug
+                        :output (bark:tee
+                                 ;; Console: info+ only (no sampling needed)
+                                 (*error-output* :formatter #'bark:pretty-formatter
+                                                 :level :info)
+                                 ;; File: all levels, sampled
+                                 (log-file :formatter #'bark:json-formatter))))
 ```
 
 The console gets a clean info+ stream (filtered by level, not sampling). The file gets all levels but with sampling applied.

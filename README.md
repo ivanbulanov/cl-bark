@@ -4,7 +4,23 @@ High-performance structured logger for Common Lisp. Inspired by [Pino](https://g
 
 ## Status
 
-**Beta (0.1.0).** The library has been reviewed and tested with automated tests but has been used only by the author so far. Real-world applicability is not yet proven. The API is not expected to change, but no stability guarantee is made until 1.0.
+**Beta (0.1.0).** The library has been reviewed and tested with automated tests but has been used only by the author so far. Real-world applicability is not yet proven. The API is not expected to change, but no stability guarantee is made until 1.0. See [CHANGELOG.md](CHANGELOG.md).
+
+## Installation
+
+cl-bark is not in Quicklisp yet. Clone it where ASDF can find it, then load it with Quicklisp so the dependencies are fetched:
+
+```sh
+git clone https://github.com/ivanbulanov/cl-bark.git ~/quicklisp/local-projects/cl-bark
+```
+
+```lisp
+(ql:quickload :cl-bark)
+```
+
+With [qlot](https://github.com/fukamachi/qlot), add `github cl-bark ivanbulanov/cl-bark` to your `qlfile`.
+
+Tested on SBCL. The code uses only portable libraries ([dependencies](#dependencies)), with an SBCL-specific fast path for timestamps.
 
 ## Philosophy
 
@@ -55,7 +71,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
 - **Windowed rate limiting** — per-level time-windowed counters with initial burst allowance then 1-in-N, checked before serialization
 - **Consistent hash sampling** — deterministic key-based sampling via `make-consistent-sampler`; same key always kept or always dropped
-- **Low overhead** — disabled levels cost one indirect call (`#'noop` slot swap), per-call fields are stack-allocated (`dynamic-extent`), `*compile-time-max-level*` strips calls entirely at compile time
+- **Low overhead** — disabled levels cost one indirect call (`#'noop` slot swap), per-call fields are stack-allocated (`dynamic-extent`), `*compile-time-max-level*` is reserved for compile-time stripping but currently has no effect
 - **Request-scoped buffering** — `with-log-buffer` captures all log calls; on success emit only info+, on failure emit everything including debug — zero-config retroactive log level decisions
 
 ## Log Levels
@@ -111,7 +127,7 @@ Returns `t` if a log call at `level` would be dispatched (not noop'd) on `logger
 
 When `logger` is `nil`, returns `nil` — consistent with the logging macros.
 
-Checks the level threshold only. Does not account for sampling, per-destination filters, or compile-time elimination.
+Checks the level threshold only. Does not account for sampling or per-destination filters.
 
 ### Lifecycle
 
@@ -120,7 +136,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 (setf bark:*logger*
       (bark:make-logger &key output (level :info) (formatter (bark:make-json-formatter))
                              context field-transform
-                             (capacity 8192) (on-drop #'default-on-drop)
+                             (capacity 8192) (on-drop <default drop-warning handler>)
                              blocking (block-timeout 5.0) on-block-timeout
                              level-sampler consistent))
 
@@ -132,8 +148,8 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
 
-;; Set sampling rate (1-in-N)
-(bark:set-sampling logger level rate)
+;; Set per-level sampling (windowed-counter, or nil to remove)
+(bark:set-level-sampling logger level windowed-counter)
 
 ;; Flush pending messages (blocks until written)
 (bark:flush logger)
@@ -177,12 +193,13 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 `destinations` is a list of plists, each with the keys:
 
 - `:stream` (required) — an output stream
-- `:formatter` — a formatter struct (defaults to `bark:*default-json-formatter*`; create one with `bark:make-json-formatter`, `bark:make-logfmt-formatter`, `bark:make-pretty-formatter`, or `bark:make-formatter`)
+- `:formatter` — a formatter struct (defaults to the built-in JSON formatter, equivalent to `(bark:make-json-formatter)`; create one with `bark:make-json-formatter`, `bark:make-logfmt-formatter`, `bark:make-pretty-formatter`, or `bark:make-formatter`)
 - `:filter` — `(lambda (level fields) ...)` returning non-nil to pass, nil to skip. Receives the log level (integer) and per-call fields only — not static or dynamic context
 - `:level` — a level keyword; shorthand for a filter that checks `(>= level threshold)`. Mutually exclusive with `:filter`
 - `:capacity` — ring buffer size in messages for this destination (defaults to 8192; rounded up to next power of two, minimum 16)
-- `:on-drop` — `(lambda (count) ...)` called when messages are dropped due to a full buffer. Returns a warning message string, or NIL to suppress. Can optionally return extra fields as a second value: `(values message fields)`. See [Backpressure](#backpressure) for the full return protocol. Defaults to `#'bark::default-on-drop`
-- `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. Return a new stream to swap and continue writing, or nil to stop the writer thread (subsequent log calls silently drop messages). The condition is the original `file-error` or `stream-error` — bark does not wrap it. When omitted, the writer logs to `*error-output*` and stops.
+- `:on-drop` — `(lambda (count) ...)` called when messages are dropped due to a full buffer. Returns a warning message string, or NIL to suppress. Can optionally return extra fields as a second value: `(values message fields)`. See [Backpressure](#backpressure) for the full return protocol. Defaults to a handler that writes one warning line through the same destination reporting how many messages were dropped
+- `:on-error` — `(lambda (condition) ...)` called in the writer thread when a stream write fails. Return a new stream to swap and continue writing, or nil to stop the writer thread (subsequent log calls silently drop messages; in blocking mode they wait for `:block-timeout` first). The condition is the original `file-error` or `stream-error` — bark does not wrap it. When omitted, the writer logs to `*error-output*` and stops.
+- `:blocking`, `:block-timeout`, `:on-block-timeout` — per-destination blocking mode; see [Backpressure](#backpressure)
 
 `bark:stop` tears down all writer threads. Streams are not closed — the caller who opened them is responsible for closing them.
 
@@ -192,7 +209,7 @@ Checks the level threshold only. Does not account for sampling, per-destination 
 (bark:tee &rest destination-specs) -> tee-output
 ```
 
-Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error)`:
+Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout)`:
 
 ```lisp
 (bark:tee
@@ -258,9 +275,9 @@ Log output includes fields from three sources, merged in this order:
 
 ```lisp
 (bark:with-context (:request-id "req-123")
-  (bark:info *auth-log* "checking token")   ; → component=auth, request-id=req-123
-  (bark:info *db-log* "running query")      ; → component=database, request-id=req-123
-  (bark:info *cache-log* "cache miss"))     ; → component=cache, request-id=req-123
+  (bark:info *auth-log* "checking token")   ; component=auth, request-id=req-123
+  (bark:info *db-log* "running query")      ; component=database, request-id=req-123
+  (bark:info *cache-log* "cache miss"))     ; component=cache, request-id=req-123
 ```
 
 With child loggers alone, you'd need to create a temporary child of *each* component logger per request and ensure every function uses the right one. `with-context` adds the field once and all loggers see it.
@@ -425,7 +442,7 @@ Built-in formatter factories:
 - `bark:make-logfmt-formatter` — creates a `key=value` pairs formatter
 - `bark:make-pretty-formatter` — creates a colored terminal formatter for REPL/development
 
-Default formatter: `bark:*default-json-formatter*` (a `make-json-formatter` instance)
+Default formatter: the built-in JSON formatter, equivalent to `(bark:make-json-formatter)`
 
 **Supported field value types:**
 
@@ -547,7 +564,7 @@ See [docs/sampling.md](docs/sampling.md) for windowed counters, consistent sampl
 
 **Async mode (default).** Each destination has a bounded ring buffer. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
 
-**Blocking mode** (`:blocking t` on `make-logger`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes.
+**Blocking mode** (`:blocking t` on `make-logger`, or per destination in `make-tee` / `tee`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes.
 
 **Async drop handling:**
 
@@ -577,10 +594,7 @@ The `on-drop` callback receives the drop count and returns `(values message fiel
 
 ### Compile-Time Elimination
 
-```lisp
-;; Before compiling application code:
-(setf bark:*compile-time-max-level* 30)  ; strip trace and debug at compile time
-```
+`bark:*compile-time-max-level*` is reserved for future use. It is defined, but no logging macro currently consults it, so setting it has no effect. Use the runtime level (`bark:set-level`) to disable levels.
 
 ### Testing
 
@@ -651,7 +665,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **Timestamps:** Flushed entries carry their original log-time timestamps. User-defined formatters should call `bark:current-log-timestamp-ms` instead of computing their own to get correct timestamps during replay.
 
-**Compile-time elimination:** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` eliminates debug calls, they cannot be retroactively surfaced.
+**Compile-time elimination:** not currently implemented (`*compile-time-max-level*` is reserved and has no effect), so buffering is not limited by it.
 
 ### Feature Interactions
 
@@ -673,9 +687,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 #### Behavioral notes
 
-**Compile-time elimination limits buffering.** `with-log-buffer` can only buffer calls that exist in the compiled code. If `*compile-time-max-level*` strips debug/trace calls at compile time, the buffer cannot retroactively surface them at runtime.
-
-**Compile-time elimination is invisible to `level-enabled-p`.** The predicate checks the runtime level threshold only. It can return true for a level whose log calls were eliminated at compile time. If you use both, ensure `*compile-time-max-level*` and your runtime level are consistent.
+**Compile-time elimination is not implemented.** `*compile-time-max-level*` is reserved and currently has no effect, so it neither limits buffering nor affects `level-enabled-p`, which checks the runtime level threshold only.
 
 **Tee filters do not see context.** Per-destination `:filter` functions receive the log level (integer) and per-call fields only — not static context (child logger bindings) or dynamic context (`with-context`). Context is part of formatting, not routing. To route based on identity, use separate loggers.
 
@@ -822,7 +834,7 @@ Explicit logger arg bypasses `*logger*`. Each logger has its own output pipeline
 
 ### Error Recovery
 
-The `:on-error` handler receives the original stream condition (`file-error`, `stream-error`, etc.) — bark passes it through without wrapping. The handler runs on the destination's writer thread, not the caller thread — a slow handler stalls the drain, causing the ring buffer to fill and drop messages (callers are never blocked). Return a new stream to swap and continue, or nil to let the writer exit.
+The `:on-error` handler receives the original stream condition (`file-error`, `stream-error`, etc.) — bark passes it through without wrapping. The handler runs on the destination's writer thread, not the caller thread — a slow handler stalls the drain, causing the ring buffer to fill and drop messages (in the default non-blocking mode callers are never blocked; with `:blocking t` they wait up to `block-timeout`). Return a new stream to swap and continue, or nil to let the writer exit.
 
 Reopen a log file on any error:
 
@@ -1048,7 +1060,7 @@ Every log call formats the message to a finished string in the caller's thread, 
 |-----------|------|
 | Log call (level disabled) | One indirect call to `noop` |
 | Log call (level enabled, async) | Formatting + CAS + semaphore signal |
-| Log call (buffer full, drop) | One `atomic-incf` -- formatting skipped |
+| Log call (buffer full, drop) | Formatting, then a failed push and one `atomic-incf` (the already-formatted line is discarded) |
 | Writer drain (per message) | `write-string` + `force-output` |
 | Field transform (per field) | One `funcall` when non-nil |
 
@@ -1060,7 +1072,7 @@ See [Benchmarks](#benchmarks) to measure on your hardware.
 |----------|---------|---------|
 | `bark:*logger*` | `nil` | Current logger (bind per-thread or globally) |
 | `bark:*log-context*` | `nil` | Dynamic context (managed by `with-context`) |
-| `bark:*compile-time-max-level*` | `0` | When positive, compiler macros eliminate calls below this level |
+| `bark:*compile-time-max-level*` | `0` | Reserved; currently has no effect |
 | `bark:*max-json-depth*` | `4` | Max nesting depth for collections in JSON output |
 | `bark:*max-json-length*` | `20` | Max elements per collection in JSON output |
 | `bark:*max-pretty-depth*` | `4` | Bound as `*print-level*` in pretty-formatter (nil = unlimited) |
@@ -1083,9 +1095,11 @@ Compatible with any implementation supported by [atomics](https://github.com/Shi
 
 The macros `bark:trace`, `bark:debug`, `bark:warn`, and `bark:error` shadow `cl:trace`, `cl:debug`, `cl:warn`, and `cl:error`. This only matters if your package `(:use :bark)`. The recommended approach: don't `(:use :bark)` and call everything with the `bark:` prefix.
 
-## Design Document
+## Documentation
 
-See [multi-output-design.md](docs/multi-output-design.md) for the full design rationale, architecture decisions, and interaction matrix.
+- [API reference](https://ivanbulanov.github.io/cl-bark/) — generated from docstrings (`make docs`).
+- [docs/](docs/README.md) — user guides ([sampling](docs/sampling.md), [blocking mode](docs/blocking-mode.md), [value serialization](docs/value-serialization.md)) and the [design documents](docs/design/overview.md) that record the architecture, rationale and decisions behind each feature.
+- [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LISP: sbcl-bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: 40ants/setup-lisp@v4
+        with:
+          asdf-system: cl-bark
+          qlfile-template: |
+            ql :all :latest
+
+      - name: Run test suites
+        uses: 40ants/run-tests@v2
+        with:
+          asdf-system: cl-bark
+          run-tests: |
+            (asdf:load-system :cl-bark/tests)
+            (asdf:load-system :cl-bark/concurrency-tests)
+            (let ((ok t))
+              (dolist (suite '(("BARK-TESTS" . :bark-tests)
+                               ("BLOCKING-TESTS" . :bark-blocking-tests)
+                               ("SAMPLING-CONCURRENCY-TESTS" . :bark-concurrency-tests)))
+                (let ((results (5am:run (intern (car suite) (cdr suite)))))
+                  (5am:explain! results)
+                  (unless (5am:results-status results)
+                    (setf ok nil))))
+              (unless ok
+                (uiop:quit 1)))

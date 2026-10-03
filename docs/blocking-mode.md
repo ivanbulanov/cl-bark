@@ -31,7 +31,7 @@ Blocking mode adds optional backpressure: when the ring buffer is full, the call
                                                 (audit-stream :blocking t
                                                               :block-timeout 5.0
                                                               :on-block-timeout #'handle-audit-drop)
-                                                (*standard-output* :formatter #'bark:pretty-formatter))))
+                                                (*standard-output* :formatter (bark:make-pretty-formatter)))))
 ```
 
 ## API
@@ -41,10 +41,10 @@ Blocking mode adds optional backpressure: when the ring buffer is full, the call
 | Keyword | Type | Default | Description |
 |---------|------|---------|-------------|
 | `:blocking` | `boolean` | `nil` | Enable backpressure |
-| `:block-timeout` | `(or real null)` | `5.0` | Seconds to wait before dropping. `nil` = wait forever |
+| `:block-timeout` | `(or real null)` | `5.0` | Seconds to wait before dropping (coerced to `double-float`). `nil` = wait forever |
 | `:on-block-timeout` | `(or function null)` | `nil` | `(lambda (message stream))` called on timeout |
 
-**Constraint:** These keywords cannot be used when `:output` is a `tee-output`. Configure blocking per-destination in `bark:tee` instead.
+**Constraint:** These keywords are only valid with a stream output (or the default `*error-output*`). Passing them with a `tee-output` or a function output signals `bark-configuration-error`. Configure blocking per-destination in `bark:tee` instead; function outputs are synchronous and never block.
 
 ### `bark:tee` — same keywords per destination
 
@@ -64,7 +64,7 @@ Each destination spec accepts `:blocking`, `:block-timeout`, and `:on-block-time
 
 ## Design Properties
 
-- **Zero overhead when disabled.** Non-blocking mode adds one `nil` check on the drop path and one `nil` check per writer iteration. No OS resources allocated.
+- **Near-zero overhead when disabled.** Non-blocking mode adds one boolean slot check per push and one `nil` check per writer iteration. No lock or condition variable is created.
 - **Per-destination.** Each tee destination independently chooses blocking or dropping.
 - **Deadline-based timeout.** Total blocking for a single log call never exceeds `:block-timeout`, even under contention.
 - **No message loss in blocking mode** (unless timeout fires). All messages are delivered if the writer keeps up.
