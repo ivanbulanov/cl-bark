@@ -32,13 +32,15 @@ jobs:
           run-tests: |
             (asdf:load-system :cl-bark/tests)
             (asdf:load-system :cl-bark/concurrency-tests)
+            ;; No reader-time 5AM: references: this form is read before fiveam is loaded.
             (let ((ok t))
-              (dolist (suite '(("BARK-TESTS" . :bark-tests)
-                               ("BLOCKING-TESTS" . :bark-blocking-tests)
-                               ("SAMPLING-CONCURRENCY-TESTS" . :bark-concurrency-tests)))
-                (let ((results (5am:run (intern (car suite) (cdr suite)))))
-                  (5am:explain! results)
-                  (unless (5am:results-status results)
+              (dolist (suite '(("BARK-TESTS" . "BARK-TESTS")
+                               ("BLOCKING-TESTS" . "BARK-BLOCKING-TESTS")
+                               ("SAMPLING-CONCURRENCY-TESTS" . "BARK-CONCURRENCY-TESTS")))
+                (let ((results (uiop:symbol-call :fiveam :run
+                                                 (intern (car suite) (find-package (cdr suite))))))
+                  (uiop:symbol-call :fiveam :explain! results)
+                  (unless (uiop:symbol-call :fiveam :results-status results)
                     (setf ok nil))))
               (unless ok
                 (uiop:quit 1)))
