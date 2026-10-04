@@ -37,8 +37,8 @@ signals the same condition.
 
 **Consequences.** Several independent loggers can coexist, each owning its output and writer threads. Lifecycle is
 explicit: `stop` targets one logger. The cost is that `make-logger` is not a pure constructor, since a stream output
-spawns a thread, so a logger that is abandoned without `stop` leaves its writer running (`register-exit-hook` exists
-for image exit). Rejecting async parameters for function and tee outputs, rather than ignoring them, gives up a little
+spawns a thread, so a logger that is abandoned without `stop` leaves its writer running (an automatic exit drain
+covers image exit). Rejecting async parameters for function and tee outputs, rather than ignoring them, gives up a little
 convenience in exchange for catching misconfiguration at construction time.
 
 **Rejected.** An `:async` boolean: the output type already determines the behaviour, and a flag would allow
@@ -261,7 +261,7 @@ not subclassing; a user cannot specialise on the logger or output types.
 authors, and tests.
 
 **Decision.** The package exports what those users need: the level constants, `level-name`, the logging macros,
-`make-logger`, `make-child`, `set-level`, `level-enabled-p`, `flush`, `stop`, `register-exit-hook`, the formatter
+`make-logger`, `make-child`, `set-level`, `level-enabled-p`, `flush`, `stop`, the formatter
 protocol and factories, `make-tee` and `tee`, the sampling constructors with `set-level-sampling` and
 `set-consistent`, `with-context`, `with-captured-logs`, `with-log-buffer` with the buffer-entry readers, `capture`
 and the captured-error readers, the serialization limits, `current-log-timestamp-ms`, and the `bark-*` conditions. It
@@ -317,14 +317,4 @@ describes the current API and is expected to change before 1.0.
 
 ## Known quirks
 
-Behaviour that is correct per the code and now documented consistently, but that a reader may not expect.
-
-- `*compile-time-max-level*` is exported and defined, but no logging macro or compiler macro consults it. It is
-  reserved for a future compile-time elimination feature and setting it has no effect. The README, the user guide
-  and the variable's docstring all say so.
-- The logging macros treat any first argument that is neither a logger nor a keyword as the message, so
-  `(bark:info nil "x")` logs through `*logger*` with a `NIL` message and `"x"` as an (invalid) field key. Only
-  `*logger*` being `NIL` yields a no-op.
-- The default JSON formatter and the default drop handler are internal (`bark::*default-json-formatter*`,
-  `bark::default-on-drop`). The README describes their behaviour without naming them; pass your own `:formatter`
-  or `:on-drop` to replace them.
+No known quirks as of 0.2.0-dev.

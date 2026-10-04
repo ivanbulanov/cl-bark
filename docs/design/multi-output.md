@@ -102,7 +102,7 @@ logger. `stop` drains each output and joins its writer; it is a no-op for `nil`,
 stopped logger and for a synchronous one, and signals `bark-child-operation-error` for a child
 (a `continue` restart ignores it). `flush` signals `bark-async-stopped` if any output is no longer
 running, with a `continue` restart, and waits at most five seconds per output. cl-bark never
-closes a caller's streams. `register-exit-hook` calls `stop` at image exit.
+closes a caller's streams. Every async output is also drained automatically at image exit.
 
 ### Error isolation
 
@@ -195,8 +195,9 @@ string, so the added context appears in every destination.
   vector of a tee logger are in the same order and are never reordered after construction.
 - Filters run on the calling thread and are not wrapped in a handler. A filter that signals
   propagates out of the log call, so filters should be cheap and total.
-- The logger's `:formatter` is ignored for tee output, but it is still stored and copied by
-  `make-child`.
+- Passing `:formatter` to `make-logger` together with a tee output signals
+  `bark-configuration-error` (with a `use-value` restart): each tee destination carries its own
+  formatter, so a logger-level one would be dead configuration.
 - Async keys on `make-logger` (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`,
   `:on-block-timeout`) with a tee or function output signal `bark-configuration-error` with a
   `use-value` restart. Per-destination settings belong in the destination spec.

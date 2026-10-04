@@ -64,7 +64,7 @@ by configuring nothing for `:error`.
 ## The Hot Path
 
 Per call, the closure takes `count` from `(atomics:atomic-incf (windowed-counter-count wc))`,
-checks the clock when `count` is a multiple of the interval, then asks `windowed-allow-p`.
+then asks `windowed-allow-p`. Only a message that would be dropped reads the clock (see below).
 `atomics:atomic-incf` returns the post-increment value, so counts start at 1 and exactly
 `initial` messages pass. Every thread gets a distinct count, which makes the arithmetic exact
 between resets. The `(unsigned-byte 64)` slot type is what SBCL's atomic increment requires.
@@ -80,21 +80,24 @@ thereafter))))`:
   reset; `(plusp thereafter)` also guards `mod` against a zero divisor.
 - `count` advances for dropped events too: it is a window position, not a tally of kept events.
 
-The clock is read only when `count` is a multiple of `+window-check-interval+`, a `defconstant`
-of 64. It must be a power of two because the code masks with `logand` of the interval minus one;
-changing it needs a recompile. Consequences:
+### Clock reads only on drop
 
-- **Expiry is detected late, in events, not in time.** A counter seeing fewer than 64 events per
-  window renews its burst only when its 64th event arrives. The effective window is the larger of
-  `window-seconds` and the time to the next multiple of 64.
-- **The checking event is judged on the old window.** The reset runs before `windowed-allow-p`,
-  but the closure still holds the pre-reset count; the next event sees count 1.
+A message that `windowed-allow-p` accepts never reads the clock. A message about to be dropped reads
+`get-internal-real-time` and calls `maybe-reset-window`; if that resets the window, the closure
+increments again and re-checks, so the message counts in the new window. There is no compile-time
+constant. Consequences:
+
+- **Expiry is noticed by the first would-be-dropped message after it.** A level that never exceeds
+  `initial` within a window never reads the clock, and a level whose count stays under its
+  thresholds keeps counting until it would drop. A low-volume level gets its burst back as soon as
+  a message would otherwise be dropped, not after a fixed number of events.
+- **The cost moves to the drop path.** Under sustained overload every dropped message pays one
+  clock read; accepted messages pay none.
 
 `maybe-reset-window` resets an expired window with a CAS on `window-start` (one resetter wins, a
 loser does nothing) and then a plain `setf` of `count` to 0. The reset is not atomic with
 surrounding increments: threads may judge against the stale count in between, and an increment
-concurrent with the `setf` can be erased. The error per boundary is roughly the check interval
-plus the thread count.
+concurrent with the `setf` can be erased. The error per boundary is roughly the thread count.
 
 ## The Consistent Hash
 
@@ -182,8 +185,9 @@ Trade-offs:
 
 - Absolute-position `thereafter` matches zap and needs no extra state, at the cost of a run of
   `thereafter - initial - 1` consecutive drops after the burst.
-- Checking the clock every 64 events amortizes its cost, but expiry detection depends on traffic
-  and the constant needs a recompile to change. The plain count reset costs boundary precision.
+- Reading the clock only on would-be-drops keeps the accepted path clock-free, but expiry is
+  noticed only when a message would drop, and every drop pays a clock read. The plain count reset
+  costs boundary precision.
 - The shared level-sampler vector makes inheritance free, but parent and child share counters and
   a late parent vector is invisible to existing children.
 - Bypassing the counter for keyed events gives all-or-nothing requests, but `rate` is then the

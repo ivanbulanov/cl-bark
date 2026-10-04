@@ -71,7 +71,7 @@ Do nothing in the hot path. Pre-compute everything at logger creation time, seri
 - **Field redaction** — per-logger `field-transform` drops or masks fields before serialization; composable via child loggers
 - **Windowed rate limiting** — per-level time-windowed counters with initial burst allowance then 1-in-N, checked before serialization
 - **Consistent hash sampling** — deterministic key-based sampling via `make-consistent-sampler`; same key always kept or always dropped
-- **Low overhead** — disabled levels cost one indirect call (`#'noop` slot swap), per-call fields are stack-allocated (`dynamic-extent`), `*compile-time-max-level*` is reserved for compile-time stripping but currently has no effect
+- **Low overhead** — disabled levels cost one indirect call (`#'noop` slot swap), per-call fields are stack-allocated (`dynamic-extent`), `*compile-time-min-level*` strips calls below it at compile time
 - **Request-scoped buffering** — `with-log-buffer` captures all log calls; on success emit only info+, on failure emit everything including debug — zero-config retroactive log level decisions
 
 ## Log Levels
@@ -110,7 +110,7 @@ All six macros (`trace`, `debug`, `info`, `warn`, `error`, `fatal`) accept an op
 ;; => {"level":"info","ts":...,"event":"registration","user-id":42}
 ```
 
-When the first non-logger argument is a literal keyword, the macro emits the fields-only path directly. When it's a variable, a runtime `keywordp` check ensures consistent behavior. When `*logger*` is nil, the call is a no-op.
+When the first non-logger argument is a literal keyword, the macro emits the fields-only path directly. When it's a variable, a runtime `keywordp` check ensures consistent behavior. When `*logger*` is nil, or the first argument is an explicit `nil` (an absent logger), the call is a no-op.
 
 ### Level Predicate
 
@@ -154,11 +154,10 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 ;; Flush pending messages (blocks until written)
 (bark:flush logger)
 
-;; Stop and flush all writer threads (blocks until drained, idempotent)
+;; Stop and flush all writer threads (blocks until drained, idempotent; returns T when every writer exited cleanly)
 (bark:stop logger)
 
-;; Register automatic cleanup on image exit (stop is idempotent, safe with explicit stop)
-(bark:register-exit-hook logger)
+;; Async outputs are drained automatically at image exit; no registration is needed
 ```
 
 `bark:make-logger` is the main entry point. It creates a logger and returns it — assign it to `bark:*logger*` or any other variable. The output type determines whether async I/O is used:
@@ -180,7 +179,9 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 
 `bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals `bark-async-stopped` if any async output has been stopped (a `continue` restart is available to skip stopped outputs).
 
-`bark:register-exit-hook` registers a logger for automatic `bark:stop` on Lisp image exit. Safe to combine with an explicit `bark:stop` call (stop is idempotent). Supports SBCL, CCL, ECL, ABCL, and CLISP.
+Every async output is drained automatically when the image exits, waiting at most `bark:*exit-flush-timeout*` (default 2.0 seconds) per output.
+
+`bark:flush` and `bark:stop` accept `:timeout` (seconds per async output, default 5.0). `bark:flush` returns T when every running async output acknowledged and NIL on timeout; `bark:stop` returns T when every writer exited cleanly and NIL otherwise.
 
 ### Multi-Output
 
@@ -594,7 +595,18 @@ The `on-drop` callback receives the drop count and returns `(values message fiel
 
 ### Compile-Time Elimination
 
-`bark:*compile-time-max-level*` is reserved for future use. It is defined, but no logging macro currently consults it, so setting it has no effect. Use the runtime level (`bark:set-level`) to disable levels.
+`bark:*compile-time-min-level*` (default `nil`) is a compile-time level floor. When it is bound to a level keyword or constant while a logging macro is expanded, calls below that level expand to `nil`: no code is generated and the arguments are never evaluated.
+
+```lisp
+;; Strip trace and debug calls from this compilation
+(let ((bark:*compile-time-min-level* :info))
+  (compile-file "app.lisp"))
+
+;; Or set it globally before loading the code
+(setf bark:*compile-time-min-level* :info)
+```
+
+The variable is read at macroexpansion time, so already-compiled FASLs are unaffected: recompile after changing it. `bark:level-enabled-p` and `bark:set-level` remain runtime-only.
 
 ### Testing
 
@@ -665,7 +677,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **Timestamps:** Flushed entries carry their original log-time timestamps. User-defined formatters should call `bark:current-log-timestamp-ms` instead of computing their own to get correct timestamps during replay.
 
-**Compile-time elimination:** not currently implemented (`*compile-time-max-level*` is reserved and has no effect), so buffering is not limited by it.
+**Compile-time elimination:** calls stripped by `*compile-time-min-level*` expand to `nil` and never reach the buffer; the runtime level still governs every call that remains.
 
 ### Feature Interactions
 
@@ -687,7 +699,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 #### Behavioral notes
 
-**Compile-time elimination is not implemented.** `*compile-time-max-level*` is reserved and currently has no effect, so it neither limits buffering nor affects `level-enabled-p`, which checks the runtime level threshold only.
+**Compile-time elimination happens before buffering.** Calls below `*compile-time-min-level*` are stripped at macroexpansion time and never reach the buffer; the runtime level still governs the rest. `level-enabled-p` checks the runtime level threshold only.
 
 **Tee filters do not see context.** Per-destination `:filter` functions receive the log level (integer) and per-call fields only — not static context (child logger bindings) or dynamic context (`with-context`). Context is part of formatting, not routing. To route based on identity, use separate loggers.
 
@@ -1072,7 +1084,7 @@ See [Benchmarks](#benchmarks) to measure on your hardware.
 |----------|---------|---------|
 | `bark:*logger*` | `nil` | Current logger (bind per-thread or globally) |
 | `bark:*log-context*` | `nil` | Dynamic context (managed by `with-context`) |
-| `bark:*compile-time-max-level*` | `0` | Reserved; currently has no effect |
+| `bark:*compile-time-min-level*` | `nil` | Compile-time level floor; calls below it expand to NIL |
 | `bark:*max-json-depth*` | `4` | Max nesting depth for collections in JSON output |
 | `bark:*max-json-length*` | `20` | Max elements per collection in JSON output |
 | `bark:*max-pretty-depth*` | `4` | Bound as `*print-level*` in pretty-formatter (nil = unlimited) |

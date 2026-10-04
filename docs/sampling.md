@@ -14,7 +14,7 @@ Sampling trades completeness for sustainability. The two strategies address diff
 
 ## Windowed Counter
 
-**What it does:** For a given log level, guarantee the first N messages per time window always pass, then sample 1-in-M thereafter. Counting is 1-based and the clock is only consulted every 64th message (see "Window boundary fuzziness").
+**What it does:** For a given log level, guarantee the first N messages per time window always pass, then sample 1-in-M thereafter. Counting is 1-based and the clock is only read when a message is about to be dropped (see "Window expiry detection").
 
 **Why this shape:** The first few messages in a burst are the most diagnostic — they show what triggered the burst. After that, statistical sampling preserves trends without flooding. This is Go zap's production-proven model.
 
@@ -258,7 +258,7 @@ Sampling runs before formatting and output dispatch. A sampled-out message never
 
 ### Compile-Time Elimination
 
-Compile-time elimination is not currently implemented: `*compile-time-max-level*` is defined but no logging macro consults it, so setting it has no effect on sampling or on the compiled log calls.
+Calls below `*compile-time-min-level*` (default `nil`) are stripped at macroexpansion time and expand to `nil`, so sampling never sees them. See the README section on compile-time elimination.
 
 ### Level Gate
 
@@ -278,13 +278,11 @@ Counts are 1-based: each message increments the counter (via `atomics:atomic-inc
 
 This matches Go zap's behavior and is negligible in practice. If you need a precise rate immediately after the burst, set `initial=0`.
 
-### Window boundary fuzziness
+### Window expiry detection
 
-The windowed counter amortizes clock reads: the clock is checked only when the counter value is a multiple of `+window-check-interval+` (64 by default, a compile-time constant). The counter includes dropped messages, so for a given level the window expiry is noticed on every 64th message at that level, and a reset sets the count back to 0. This means window boundaries are detected up to 64 messages late. At 10K messages/sec, the fuzziness is ~6ms — irrelevant for 1-second windows. At 1M messages/sec, it's ~64 microseconds.
+The clock is read only when a message is about to be dropped. Each call `atomic-incf`s the counter and checks `count <= initial` or a multiple of `thereafter`; a message that passes never touches the clock. A message that would be dropped reads `get-internal-real-time` and, if the window has expired, resets the window (count back to 0), re-increments, and re-checks, so that message is counted in the new window. There is no compile-time constant.
 
-At low volume the delay is much longer in wall-clock time: a level that logs fewer than 64 messages per window will not see its window reset until its counter reaches 64 (or the next multiple of 64) after the window has expired. Until then, a hard cap (`thereafter=0`) keeps dropping and the initial burst is not replenished.
-
-**Recourse:** If you need tighter windows, reduce `+window-check-interval+` before compiling cl-bark. Powers of 2 only (for bit-mask optimization). Lower values increase clock overhead (~0.3ns per check per message).
+Consequences: a level that never exceeds `initial` within a window never reads the clock, and a level whose count stays under its thresholds just keeps counting until a message would be dropped. Expiry is noticed by the first would-be-dropped message after the window ends, so a low-volume level gets its burst back as soon as it would otherwise drop. Under sustained overload every dropped message pays one clock read.
 
 ### Thread-count imprecision at window boundaries
 

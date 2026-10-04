@@ -291,7 +291,7 @@ Trade-offs:
 
 | Feature | Interaction |
 |---------|-------------|
-| Compile-time elimination | `*compile-time-max-level*` removes log calls from the compiled code. The buffer operates at runtime and cannot capture calls that no longer exist. Leave it at 0, or at or below the capture level, in code that uses buffering. This is inherent to compile-time elimination; `set-level` has the same limit |
+| Compile-time elimination | `*compile-time-min-level*` removes log calls from the compiled code. The buffer operates at runtime and cannot capture calls that no longer exist. Leave it `nil`, or at or below the capture level, in code that uses buffering. This is inherent to compile-time elimination; `set-level` has the same limit |
 | `level-enabled-p` | Inside the scope it is evaluated against the buffer-logger, so it reflects the capture level, not the source logger's level |
 | Tee | Destination filters and per-group formatters apply at flush, to each emitted entry. Filters receive the entry's level and its transformed fields |
 | Child loggers | A child passed as the `logger` argument is copied for its static context. Children created before or inside the scope bypass capture |

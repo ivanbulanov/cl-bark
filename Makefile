@@ -40,9 +40,14 @@ docs:
 	@python3 docs/fix-staple.py docs/api/index.html
 	@echo "Generated docs/api/index.html"
 
+# ASDF caches FASLs under $XDG_CACHE_HOME/common-lisp (default ~/.cache).
+# Honour the override so `XDG_CACHE_HOME=... make clean` clears the same
+# cache that `XDG_CACHE_HOME=... make test` populated.
+CL_CACHE ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/common-lisp
+
 clean:
 	find . -name '*.fasl' -delete
-	rm -rf $(HOME)/.cache/common-lisp/sbcl-*/$(CURDIR)/
+	rm -rf $(CL_CACHE)/sbcl-*/$(CURDIR)/
 
 # --- Benchmarks ---
 
