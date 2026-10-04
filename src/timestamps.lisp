@@ -44,6 +44,15 @@ During with-log-buffer replay, this returns the original log-call timestamp;
 a raw clock read would incorrectly return the flush time instead."
   (get-unix-timestamp-ms))
 
+(defun check-timestamp-format (format)
+  "Signal BARK-CONFIGURATION-ERROR unless FORMAT is NIL, :unix-ms or :iso8601.
+   Called by the formatter constructors so a bad keyword fails at construction,
+   not inside a log call."
+  (unless (member format '(nil :unix-ms :iso8601))
+    (cl:error 'bark-configuration-error
+              :detail (format nil ":timestamp must be NIL, :unix-ms or :iso8601, got ~S" format)))
+  (values))
+
 (defun emit-timestamp (format stream)
   "Emit a timestamp to STREAM in the given FORMAT.
    :unix-ms emits milliseconds since epoch as an integer.

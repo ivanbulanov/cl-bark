@@ -35,6 +35,18 @@
 
 (5am:in-suite blocking-tests)
 
+(defmacro with-writer-stalled ((async-output) &body body)
+  "Run BODY while the writer thread of ASYNC-OUTPUT cannot drain its ring.
+   The writer pops lines only under the stream lock (see write-batch), so
+   holding that lock here makes a full ring stay full for the whole BODY.
+   Without this, a freshly started writer races the fill: its first
+   iteration runs immediately and empties the ring before the test's
+   blocking push can time out."
+  (let ((ao (gensym "AO")))
+    `(let ((,ao ,async-output))
+       (bt:with-lock-held ((bark::stream-lock (bark::async-output-stream ,ao)))
+         ,@body))))
+
 ;;; --- ring-buffer-offer ---
 
 (5am:test test-ring-buffer-offer-success
@@ -157,12 +169,10 @@
 
 (5am:test test-blocking-push-timeout-fires
   "Blocking push times out and increments block-dropped."
-  ;; Use 0.01s timeout — well under the writer's 100ms poll cycle,
-  ;; so timeout fires before the writer can drain any entries.
   (let* ((out (make-string-output-stream))
          (ao (make-async-output out :capacity 16 :blocking t :block-timeout 0.01)))
     (unwind-protect
-         (progn
+         (with-writer-stalled (ao)
            ;; Fill the buffer
            (dotimes (i 16)
              (bark::ring-buffer-offer (async-output-ring ao)
@@ -185,7 +195,7 @@
                                   (setf captured-msg msg
                                         captured-stream stream)))))
     (unwind-protect
-         (progn
+         (with-writer-stalled (ao)
            (dotimes (i 16)
              (bark::ring-buffer-offer (async-output-ring ao)
                                       (format nil "fill-~d" i)))
@@ -207,7 +217,8 @@
                                   (declare (ignore msg stream))
                                   (cl:error "callback boom")))))
     (unwind-protect
-         (let ((*error-output* err-out))
+         (with-writer-stalled (ao)
+           (let ((*error-output* err-out))
            (dotimes (i 16)
              (bark::ring-buffer-offer (async-output-ring ao)
                                       (format nil "fill-~d" i)))
@@ -215,7 +226,7 @@
            (5am:finishes (bark::deliver-line ao "err-test"))
            (5am:is (plusp (bark::async-output-block-dropped ao)))
            (5am:is (search "callback boom"
-                           (get-output-stream-string err-out))))
+                           (get-output-stream-string err-out)))))
       (stop-async-output ao))))
 
 (5am:test test-nonblocking-path-unchanged
@@ -262,7 +273,7 @@
          (tee-out (make-tee (list (list :stream out1 :formatter fmt :blocking t)
                                   (list :stream out2 :formatter fmt)))))
     (unwind-protect
-         (let ((lgr (make-logger :level :info :formatter fmt :output tee-out)))
+         (let ((lgr (make-logger :level :info :output tee-out)))
            (funcall (bark::logger-info-fn lgr) lgr "tee-blocking-test")
            ;; Flush both destinations
            (loop for group across (tee-output-groups tee-out)
@@ -361,6 +372,17 @@
     (unwind-protect
          (5am:signals cl:error
            (make-logger :output tee-out :block-timeout 1.0))
+      (stop-tee tee-out))))
+
+(5am:test test-start-formatter-with-tee-signals-error
+  "bark:make-logger with :formatter and a tee-output signals bark-configuration-error;
+   each tee destination carries its own formatter."
+  (let* ((out1 (make-string-output-stream))
+         (out2 (make-string-output-stream))
+         (tee-out (make-tee (list (list :stream out1) (list :stream out2)))))
+    (unwind-protect
+         (5am:signals bark:bark-configuration-error
+           (make-logger :output tee-out :formatter (make-json-formatter :timestamp nil)))
       (stop-tee tee-out))))
 
 (5am:test test-start-on-block-timeout-with-tee-signals-error
@@ -500,7 +522,7 @@
                                         :blocking t :block-timeout 5.0)
                                   (list :stream out-nonblocking :formatter fmt)))))
     (unwind-protect
-         (let ((lgr (make-logger :level :info :formatter fmt :output tee-out)))
+         (let ((lgr (make-logger :level :info :output tee-out)))
            ;; Log several messages
            (dotimes (i 5)
              (funcall (bark::logger-info-fn lgr) lgr (format nil "mixed-~d" i)))
@@ -529,19 +551,21 @@
                                         :blocking t :block-timeout 0.01
                                         :capacity 16)))))
     (unwind-protect
-         (progn
-           ;; Fill the blocking destination's buffer (capacity=16)
-           (let ((blocking-ao
-                   (destination-async-output
-                    (aref (formatter-group-destinations
-                           (aref (tee-output-groups tee-out) 1))
-                          0))))
+         (let ((blocking-ao
+                 (destination-async-output
+                  (aref (formatter-group-destinations
+                         (aref (tee-output-groups tee-out) 1))
+                        0))))
+           ;; Fill the blocking destination's buffer (capacity=16) and log while
+           ;; its writer is stalled; otherwise the writer drains the ring before
+           ;; the blocking push can time out.
+           (with-writer-stalled (blocking-ao)
              (dotimes (i 16)
                (bark::ring-buffer-offer (async-output-ring blocking-ao)
-                                         (format nil "fill-~d" i))))
-           ;; Log through the tee — non-blocking gets it, blocking times out
-           (let ((lgr (make-logger :level :info :formatter fmt :output tee-out)))
-             (funcall (bark::logger-info-fn lgr) lgr "partial-test"))
+                                         (format nil "fill-~d" i)))
+             ;; Log through the tee: non-blocking gets it, blocking times out
+             (let ((lgr (make-logger :level :info :output tee-out)))
+               (funcall (bark::logger-info-fn lgr) lgr "partial-test")))
            ;; Flush non-blocking destination
            (let ((nb-ao (destination-async-output
                          (aref (formatter-group-destinations

@@ -483,8 +483,11 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is-false (eq #'noop (logger-fatal-fn lgr)))))
 
 (5am:test test-set-level-all-disabled
-  "Set level very high, verify all function slots are noop."
-  (let ((lgr (make-logger :level 7)))
+  "Set level to the maximum, verify all function slots are noop; an out-of-range
+level signals bark-configuration-error."
+  (5am:signals bark:bark-configuration-error (make-logger :level 7))
+  (let ((lgr (make-logger :level :fatal)))
+    (bark::wire-level-fns lgr (1+ +fatal+) #'bark::make-log-fn)
     (5am:is (eq #'noop (logger-trace-fn lgr)))
     (5am:is (eq #'noop (logger-debug-fn lgr)))
     (5am:is (eq #'noop (logger-info-fn lgr)))
@@ -517,9 +520,9 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is-true (bark:level-enabled-p lgr :debug))))
 
 (5am:test test-level-enabled-p-invalid-level
-  "level-enabled-p signals type-error for invalid level keyword."
+  "level-enabled-p signals bark-configuration-error for an invalid level keyword."
   (let ((lgr (make-logger :level :info)))
-    (5am:signals type-error (bark:level-enabled-p lgr :bogus))))
+    (5am:signals bark:bark-configuration-error (bark:level-enabled-p lgr :bogus))))
 
 (5am:test test-child-logger
   "Create parent with prepared context, create child with more bindings, verify concatenation."
@@ -906,22 +909,21 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
       (bark::maybe-reset-window wc future-now))
     (5am:is (= 0 (bark::windowed-counter-count wc)))))
 
-(5am:test test-windowed-amortized-clock-check
-  "Window reset only happens on +window-check-interval+ boundaries."
-  (let ((wc (make-windowed-counter :initial 1000 :thereafter 0 :window-seconds 1)))
-    ;; Counts 1..63 should NOT trigger reset (interval check uses logand)
-    (dotimes (i 63)
-      (atomics:atomic-incf (bark::windowed-counter-count wc)))
-    ;; Count is now 63, window-start still original
-    (let ((old-ws (bark::windowed-counter-window-start wc))
-          (future-now (+ (bark::windowed-counter-window-start wc)
-                         (* 2 (bark::windowed-counter-window-ticks wc)))))
-      ;; Simulate the 64th message (count becomes 64, logand with 63 = 0)
-      (let ((count (atomics:atomic-incf (bark::windowed-counter-count wc))))
-        (when (zerop (logand count (1- bark::+window-check-interval+)))
-          (bark::maybe-reset-window wc future-now)))
-      ;; Now window-start should have been updated
-      (5am:is-true (/= old-ws (bark::windowed-counter-window-start wc))))))
+(5am:test test-windowed-reset-on-drop
+  "An expired window is noticed by a would-be-dropped message, which counts in the new window."
+  (multiple-value-bind (collector results-fn) (make-list-collector)
+    (let* ((lgr (make-logger :context '(:name "wr") :level :info :output collector))
+           (wc (make-windowed-counter :initial 2 :thereafter 0 :window-seconds 1)))
+      (set-level-sampling lgr :info wc)
+      (let ((fn (logger-info-fn lgr)))
+        (dotimes (i 5) (funcall fn lgr "m"))
+        (5am:is (= 2 (length (funcall results-fn))))
+        ;; Force expiry by moving window-start into the past.
+        (setf (bark::windowed-counter-window-start wc)
+              (- (bark::windowed-counter-window-start wc)
+                 (* 2 (bark::windowed-counter-window-ticks wc))))
+        (dotimes (i 3) (funcall fn lgr "m"))
+        (5am:is (= 4 (length (funcall results-fn))))))))
 
 ;;; --- Sampling: consistent sampler ---
 
@@ -2103,7 +2105,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     ;; Writer should have exited
     (5am:is-false (bark::async-output-running ao))
     ;; Error should be logged to *error-output*
-    (5am:is-true (search "bark writer-loop error" (get-output-stream-string err-out)))
+    (5am:is-true (search "bark: writer stopped on stream error" (get-output-stream-string err-out)))
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
 
@@ -2636,7 +2638,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-buffer-logger-level-lowered
   "Buffer logger has level lowered to the requested capture level."
   (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (= +trace+ (logger-level buf-lgr)))))
 
@@ -2644,7 +2646,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Buffer logger has field-transform and sampler set to nil."
   (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*
                                 :field-transform (lambda (k v) (declare (ignore k)) v)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (null (logger-field-transform buf-lgr)))
     (5am:is (null (bark::logger-level-sampler buf-lgr)))
@@ -2654,7 +2656,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Buffer logger preserves prepared context and context from original."
   (let* ((parent (make-logger :context '(:name "app") :level :info :output *standard-output*))
          (original (make-child parent :context '(:component "auth")))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (5am:is (string= (logger-prepared original) (logger-prepared buf-lgr)))
     (5am:is (equal (logger-context original) (logger-context buf-lgr)))))
@@ -2662,11 +2664,11 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-buffer-logger-captures-entries
   "Calling log functions on buffer logger pushes entries to buffer vector."
   (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (funcall (logger-info-fn buf-lgr) buf-lgr "hello" :key "val")
-    (5am:is (= 1 (length buffer)))
-    (let ((entry (aref buffer 0)))
+    (5am:is (= 1 (length (bark::log-buffer-entries buffer))))
+    (let ((entry (nth 0 (reverse (bark::log-buffer-entries buffer)))))
       (5am:is (= +info+ (buffer-entry-level entry)))
       (5am:is (string= "hello" (buffer-entry-message entry)))
       (5am:is (equal '(:key "val") (buffer-entry-fields entry))))))
@@ -2674,16 +2676,16 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 (5am:test test-make-buffer-logger-captures-context
   "Buffer logger snapshots *log-context* at log time."
   (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (let ((*log-context* (list (cons :req-id "r1"))))
       (funcall (logger-info-fn buf-lgr) buf-lgr "hello"))
-    (5am:is (equal '((:req-id . "r1")) (buffer-entry-context (aref buffer 0))))))
+    (5am:is (equal '((:req-id . "r1")) (buffer-entry-context (nth 0 (reverse (bark::log-buffer-entries buffer))))))))
 
 (5am:test test-make-buffer-logger-captures-all-levels
   "Buffer logger captures entries at all enabled levels."
   (let* ((original (make-logger :context '(:name "app") :level :info :output *standard-output*))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (buf-lgr (make-buffer-logger original +trace+ buffer)))
     (funcall (logger-trace-fn buf-lgr) buf-lgr "t")
     (funcall (logger-debug-fn buf-lgr) buf-lgr "d")
@@ -2691,9 +2693,9 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (funcall (logger-warn-fn buf-lgr) buf-lgr "w")
     (funcall (logger-error-fn buf-lgr) buf-lgr "e")
     (funcall (logger-fatal-fn buf-lgr) buf-lgr "f")
-    (5am:is (= 6 (length buffer)))
-    (5am:is (= +trace+ (buffer-entry-level (aref buffer 0))))
-    (5am:is (= +fatal+ (buffer-entry-level (aref buffer 5))))))
+    (5am:is (= 6 (length (bark::log-buffer-entries buffer))))
+    (5am:is (= +trace+ (buffer-entry-level (nth 0 (reverse (bark::log-buffer-entries buffer))))))
+    (5am:is (= +fatal+ (buffer-entry-level (nth 5 (reverse (bark::log-buffer-entries buffer))))))))
 
 ;;; --- Flush buffer ---
 
@@ -2701,10 +2703,10 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Normal exit: only entries >= original level are emitted."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
-    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
-    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
-    (vector-push-extend (make-buffer-entry :level +warn+ :message "wrn" :timestamp 300) buffer)
+         (buffer (bark::make-log-buffer)))
+    (push (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +info+ :message "inf" :timestamp 200) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +warn+ :message "wrn" :timestamp 300) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root t nil nil +info+)
     (let ((result (get-output-stream-string out)))
       (5am:is-false (search "dbg" result))
@@ -2715,10 +2717,10 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Abnormal exit with condition: all entries emitted."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (cond (make-condition 'simple-error :format-control "boom")))
-    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
-    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
+    (push (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +info+ :message "inf" :timestamp 200) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root nil cond nil +info+)
     (let ((result (get-output-stream-string out)))
       (5am:is-true (search "dbg" result))
@@ -2728,9 +2730,9 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Non-condition NLX (normal-exit-p=nil, condition=nil): filter like normal exit."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
-    (vector-push-extend (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) buffer)
-    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 200) buffer)
+         (buffer (bark::make-log-buffer)))
+    (push (make-buffer-entry :level +debug+ :message "dbg" :timestamp 100) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +info+ :message "inf" :timestamp 200) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root nil nil nil +info+)
     (let ((result (get-output-stream-string out)))
       (5am:is-false (search "dbg" result))
@@ -2740,8 +2742,8 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Flushed entries use their captured timestamp, not wall clock."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
-    (vector-push-extend (make-buffer-entry :level +info+ :message "test" :timestamp 42) buffer)
+         (buffer (bark::make-log-buffer)))
+    (push (make-buffer-entry :level +info+ :message "test" :timestamp 42) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root t nil nil +info+)
     (let* ((line (get-output-stream-string out))
            (json (yason:parse line)))
@@ -2755,10 +2757,11 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
                                               (if (eq key :secret)
                                                   (values nil nil)
                                                   value))))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
-    (vector-push-extend (make-buffer-entry :level +info+ :message "test"
-                                           :fields '(:user "alice" :secret "pw")
-                                           :timestamp 100) buffer)
+         (buffer (bark::make-log-buffer)))
+    (push (make-buffer-entry :level +info+ :message "test"
+                             :fields '(:user "alice" :secret "pw")
+                             :timestamp 100)
+          (bark::log-buffer-entries buffer))
     (flush-buffer buffer root t nil nil +info+)
     (let* ((line (get-output-stream-string out))
            (json (yason:parse line)))
@@ -2769,13 +2772,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "on-flush callback controls which entries are emitted."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          ;; Only emit warn and above
          (on-flush (lambda (entries condition normal-exit-p)
                      (declare (ignore condition normal-exit-p))
                      (remove-if (lambda (e) (< (buffer-entry-level e) +warn+)) entries))))
-    (vector-push-extend (make-buffer-entry :level +info+ :message "inf" :timestamp 100) buffer)
-    (vector-push-extend (make-buffer-entry :level +warn+ :message "wrn" :timestamp 200) buffer)
+    (push (make-buffer-entry :level +info+ :message "inf" :timestamp 100) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +warn+ :message "wrn" :timestamp 200) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root t nil on-flush +info+)
     (let ((result (get-output-stream-string out)))
       (5am:is-false (search "inf" result))
@@ -2785,13 +2788,13 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "on-flush callback receives entries, condition, and normal-exit-p."
   (let* ((root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter)
                             :output (make-string-output-stream)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0))
+         (buffer (bark::make-log-buffer))
          (cond (make-condition 'simple-error :format-control "err"))
          (captured-args nil)
          (on-flush (lambda (entries condition normal-exit-p)
                      (setf captured-args (list entries condition normal-exit-p))
                      nil)))
-    (vector-push-extend (make-buffer-entry :level +info+ :message "x" :timestamp 1) buffer)
+    (push (make-buffer-entry :level +info+ :message "x" :timestamp 1) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root nil cond on-flush +info+)
     (5am:is (= 1 (length (first captured-args))))
     (5am:is (eq cond (second captured-args)))
@@ -2801,7 +2804,7 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Flushing an empty buffer produces no output."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
+         (buffer (bark::make-log-buffer)))
     (flush-buffer buffer root t nil nil +info+)
     (5am:is (string= "" (get-output-stream-string out)))))
 
@@ -2809,10 +2812,10 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Entries are flushed in the order they were captured."
   (let* ((out (make-string-output-stream))
          (root (make-logger :context '(:name "app") :level :info :formatter (make-json-formatter) :output (sync-output out)))
-         (buffer (make-array 8 :adjustable t :fill-pointer 0)))
-    (vector-push-extend (make-buffer-entry :level +info+ :message "first" :timestamp 100) buffer)
-    (vector-push-extend (make-buffer-entry :level +info+ :message "second" :timestamp 200) buffer)
-    (vector-push-extend (make-buffer-entry :level +info+ :message "third" :timestamp 300) buffer)
+         (buffer (bark::make-log-buffer)))
+    (push (make-buffer-entry :level +info+ :message "first" :timestamp 100) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +info+ :message "second" :timestamp 200) (bark::log-buffer-entries buffer))
+    (push (make-buffer-entry :level +info+ :message "third" :timestamp 300) (bark::log-buffer-entries buffer))
     (flush-buffer buffer root t nil nil +info+)
     (let ((result (get-output-stream-string out)))
       (5am:is (< (search "first" result)

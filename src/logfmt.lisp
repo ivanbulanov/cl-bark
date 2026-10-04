@@ -17,9 +17,15 @@
 (in-package #:bark)
 
 (defun emit-logfmt-key (stream key)
-  "Write a logfmt key to STREAM."
+  "Write a logfmt key to STREAM. logfmt has no quoting for keys, so characters a
+   key cannot carry (space, =, double quote, control characters) are written as _."
   (declare (optimize (speed 3) (safety 1)))
-  (write-string (key-string key) stream))
+  (loop for c of-type character across (the string (key-string key))
+        do (write-char (if (or (char= c #\Space) (char= c #\=) (char= c #\")
+                               (< (char-code c) 32))
+                           #\_
+                           c)
+                       stream)))
 
 (defun logfmt-write-bare-or-quoted (stream string)
   "Write STRING to STREAM, quoting if it contains space, quote, equals, backslash,
@@ -42,7 +48,9 @@
                 (#\Newline (write-string "\\n" stream))
                 (#\Return (write-string "\\r" stream))
                 (#\Tab (write-string "\\t" stream))
-                (t (write-char c stream))))
+                (t (if (< (char-code c) 32)
+                       (format stream "\\u~4,'0X" (char-code c))
+                       (write-char c stream)))))
             (write-char #\" stream))
           (write-string string stream)))))
 
@@ -56,18 +64,15 @@
    (with-output-to-string (s) (write-condition-summary s condition))))
 
 (defun emit-logfmt-value (stream value)
-  "Write VALUE as a logfmt value to STREAM.  Scalars only."
+  "Write VALUE as a logfmt value to STREAM.  Scalars only.
+   Strings, characters and symbols are quoted when they contain characters that
+   would break the key=value grammar; numbers use JSON number syntax."
   (typecase value
     (string (logfmt-write-bare-or-quoted stream value))
-    (character (write-string (string value) stream))
-    (integer (princ value stream))
-    (float (cond
-             ((or (sb-ext:float-nan-p value) (sb-ext:float-infinity-p value))
-              (write-string "null" stream))
-             (t (format stream "~F" value))))
-    (ratio (format stream "~F" (coerce value 'double-float)))
+    (character (logfmt-write-bare-or-quoted stream (string value)))
+    (real (write-json-number stream value))
     (null (write-string "null" stream))
-    (symbol (write-string (key-string value) stream))
+    (symbol (logfmt-write-bare-or-quoted stream (key-string value)))
     (pathname (logfmt-write-bare-or-quoted stream (namestring value)))
     (captured-error (emit-logfmt-condition stream (captured-error-condition value)))
     (condition (emit-logfmt-condition stream value))
@@ -94,7 +99,9 @@
                                     (timestamp-key "ts") (message-key "msg"))
   "Return a logfmt formatter struct with custom keys.
    Level is always string for logfmt. Pre-computes key name strings.
-   Pass :level-key NIL to omit the level field entirely."
+   Pass :level-key NIL to omit the level field entirely.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP."
+  (check-timestamp-format timestamp)
   (let ((level-prefix (when level-key (format nil "~a=" level-key)))
         (ts-prefix (when timestamp (format nil " ~a=" timestamp-key)))
         (ts-prefix-first (when timestamp (format nil "~a=" timestamp-key)))
@@ -105,23 +112,33 @@
      :format-fn
      (lambda (level prepared context message fields)
        (with-format-stream (s)
+         ;; WROTE tracks whether anything precedes the next item, so every
+         ;; separator is a single space and the line never starts with one.
          (let ((wrote nil))
-           (when level-prefix
-             (write-string level-prefix s)
-             (write-string (level-name level) s)
-             (setf wrote t))
-           (when ts-prefix
-             (write-string (if wrote ts-prefix ts-prefix-first) s)
-             (emit-timestamp timestamp s)
-             (setf wrote t))
-           (when (plusp (length (the string prepared)))
-             (write-string prepared s)
-             (setf wrote t))
-           (dolist (pair context) (emit-logfmt-field s (car pair) (cdr pair)))
-           (loop for (k v) on fields by #'cddr do (emit-logfmt-field s k v))
-           (when message
-             (write-string (if wrote msg-prefix msg-prefix-first) s)
-             (emit-logfmt-value s message))))))))
+           (flet ((field (k v)
+                    (when wrote (write-char #\Space s))
+                    (emit-logfmt-key s k)
+                    (unless (eq v t)
+                      (write-char #\= s)
+                      (emit-logfmt-value s v))
+                    (setf wrote t)))
+             (when level-prefix
+               (write-string level-prefix s)
+               (write-string (level-name level) s)
+               (setf wrote t))
+             (when ts-prefix
+               (write-string (if wrote ts-prefix ts-prefix-first) s)
+               (emit-timestamp timestamp s)
+               (setf wrote t))
+             ;; PREPARED is pre-serialized with a leading space per field.
+             (when (plusp (length (the string prepared)))
+               (write-string prepared s :start (if wrote 0 1))
+               (setf wrote t))
+             (dolist (pair context) (field (car pair) (cdr pair)))
+             (loop for (k v) on fields by #'cddr do (field k v))
+             (when message
+               (write-string (if wrote msg-prefix msg-prefix-first) s)
+               (emit-logfmt-value s message)))))))))
 
 (defparameter *default-logfmt-formatter* (make-logfmt-formatter)
   "Default logfmt formatter instance.")

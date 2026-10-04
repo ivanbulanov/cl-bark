@@ -35,53 +35,82 @@
 
 (declaim (ftype (function (list) (values tee-output &optional)) make-tee))
 
+(defun parse-tee-spec (spec)
+  "Validate one destination plist and return it normalized, with :filter
+   resolved and defaults filled in. No writer thread is started here, so a bad
+   spec cannot leak threads for the specs before it."
+  (let ((stream           (getf spec :stream))
+        (formatter        (or (getf spec :formatter) *default-json-formatter*))
+        (filter-fn        (getf spec :filter))
+        (level            (getf spec :level))
+        (capacity         (or (getf spec :capacity) +default-buffer-capacity+))
+        (on-drop          (getf spec :on-drop #'default-on-drop))
+        (on-error         (getf spec :on-error))
+        (blocking         (getf spec :blocking))
+        (block-timeout    (getf spec :block-timeout 5.0))
+        (on-block-timeout (getf spec :on-block-timeout)))
+    (unless (streamp stream)
+      (cl:error 'bark-configuration-error
+                :detail (format nil "Tee destination :stream must be a stream, got ~S" stream)))
+    (unless (formatter-p formatter)
+      (cl:error 'bark-configuration-error
+                :detail (format nil "Tee destination :formatter must be a formatter, got ~S" formatter)))
+    (when (and filter-fn level)
+      (cl:error 'bark-configuration-error
+                :detail "Cannot specify both :filter and :level for a tee destination"))
+    (list :stream stream
+          :formatter formatter
+          :filter (cond
+                    (filter-fn filter-fn)
+                    (level
+                     (let ((threshold (level-value level)))
+                       (lambda (level fields)
+                         (declare (ignore fields))
+                         (>= level threshold))))
+                    (t nil))
+          :capacity capacity
+          :on-drop on-drop
+          :on-error on-error
+          :blocking blocking
+          :block-timeout block-timeout
+          :on-block-timeout on-block-timeout)))
+
 (defun make-tee (destinations)
   "Create a fan-out output from a list of destination plists.
 Each plist accepts :stream (required), :formatter, :filter, :level, :capacity,
-:on-drop, :on-error, :blocking, :block-timeout, :on-block-timeout.
-Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
-  (let ((dests
-          (mapcar
-           (lambda (spec)
-             (let ((stream           (getf spec :stream))
-                   (formatter        (or (getf spec :formatter) *default-json-formatter*))
-                   (filter-fn        (getf spec :filter))
-                   (level-kw         (getf spec :level))
-                   (capacity         (or (getf spec :capacity) +default-buffer-capacity+))
-                   (on-drop          (or (getf spec :on-drop) #'default-on-drop))
-                   (on-error         (getf spec :on-error))
-                   (blocking         (getf spec :blocking))
-                   (block-timeout    (getf spec :block-timeout 5.0))
-                   (on-block-timeout (getf spec :on-block-timeout)))
-               (when (and filter-fn level-kw)
-                 (restart-case
-                     (cl:error 'bark-configuration-error
-                               :detail "Cannot specify both :filter and :level for a tee destination")
-                   (use-value (value)
-                     :report "Supply a replacement tee-output."
-                     :interactive (lambda () (list (make-tee (list (list :stream stream :formatter formatter)))))
-                     (return-from make-tee value))))
-               (let ((actual-filter
-                       (cond
-                         (filter-fn filter-fn)
-                         (level-kw
-                          (let ((threshold (level-from-keyword level-kw)))
-                            (lambda (level fields)
-                              (declare (ignore fields))
-                              (>= level threshold))))
-                         (t nil))))
-                 (make-destination
-                  :async-output (make-async-output stream
-                                                   :capacity capacity
-                                                   :formatter formatter
-                                                   :on-drop on-drop
-                                                   :on-error on-error
-                                                   :blocking blocking
-                                                   :block-timeout block-timeout
-                                                   :on-block-timeout on-block-timeout)
-                  :formatter formatter
-                  :filter actual-filter))))
-           destinations)))
+:on-drop (NIL suppresses drop reports), :on-error, :blocking, :block-timeout,
+:on-block-timeout. Every spec is validated before any writer thread starts;
+BARK-CONFIGURATION-ERROR is signalled for a :stream that is not a stream, an
+unknown :level, or both :level and :filter. A USE-VALUE restart supplies a
+replacement tee-output."
+  (let ((specs (restart-case (mapcar #'parse-tee-spec destinations)
+                 (use-value (value)
+                   :report "Supply a replacement tee-output."
+                   :interactive (lambda () (list (make-tee (list (list :stream *error-output*)))))
+                   (return-from make-tee value))))
+        (dests nil)
+        (complete nil))
+    (unwind-protect
+         (progn
+           (dolist (spec specs)
+             (let ((ao (make-async-output (getf spec :stream)
+                                          :capacity (getf spec :capacity)
+                                          :formatter (getf spec :formatter)
+                                          :on-drop (getf spec :on-drop)
+                                          :on-error (getf spec :on-error)
+                                          :blocking (getf spec :blocking)
+                                          :block-timeout (getf spec :block-timeout)
+                                          :on-block-timeout (getf spec :on-block-timeout))))
+               (push (make-destination :async-output ao
+                                       :formatter (getf spec :formatter)
+                                       :filter (getf spec :filter))
+                     dests)))
+           (setf dests (nreverse dests)
+                 complete t))
+      ;; A non-local exit while starting writers must not leak the ones started.
+      (unless complete
+        (dolist (dest dests)
+          (ignore-errors (stop-async-output (destination-async-output dest) :timeout 1.0)))))
     ;; Group by eq formatter for shared-formatter optimization
     (let ((groups (make-hash-table :test 'eq))
           (order nil))
@@ -140,13 +169,21 @@ Specifying both :level and :filter signals BARK-CONFIGURATION-ERROR."
 ;;; --- Dispatch ---
 
 (defun deliver-line (output line)
-  "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function)."
+  "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function).
+   An async output that was stopped cleanly takes the line synchronously; one
+   whose writer failed counts it as dropped."
   (if (async-output-p output)
-      (if (async-output-blocking-p output)
-          (blocking-deliver output line)
-          (progn
-            (ring-buffer-push (async-output-ring output) line)
-            (bt:signal-semaphore (async-output-notify output))))
+      (case (async-output-state output)
+        ((:running :stopping)
+         (if (async-output-blocking-p output)
+             (blocking-deliver output line)
+             (progn
+               (ring-buffer-push (async-output-ring output) line)
+               (notify-writer output))))
+        (:stopped
+         (write-line-synchronously output line))
+        (t
+         (atomics:atomic-incf (ring-buffer-dropped (async-output-ring output)))))
       (etypecase output
         (stream (write-string line output) (terpri output) (force-output output))
         (function (funcall output line)))))

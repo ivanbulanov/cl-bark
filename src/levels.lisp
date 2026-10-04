@@ -51,14 +51,30 @@
 (declaim (ftype (function (keyword) (values fixnum &optional)) level-from-keyword))
 
 (defun level-from-keyword (keyword)
-  "Convert a level keyword like :TRACE to its numeric value."
-  (ecase keyword
+  "Convert a level keyword like :TRACE to its numeric value.
+Signals BARK-CONFIGURATION-ERROR for any other keyword."
+  (case keyword
     (:trace +trace+)
     (:debug +debug+)
     (:info  +info+)
     (:warn  +warn+)
     (:error +error+)
-    (:fatal +fatal+)))
+    (:fatal +fatal+)
+    (t (cl:error 'bark-configuration-error
+                 :detail (format nil "Unknown log level ~S (expected :trace, :debug, :info, :warn, :error or :fatal)"
+                                 keyword)))))
+
+(declaim (ftype (function ((or fixnum keyword)) (values fixnum &optional)) level-value))
+
+(defun level-value (level)
+  "Normalize LEVEL, a keyword or a level constant, to its numeric value.
+Signals BARK-CONFIGURATION-ERROR for an unknown keyword or an out-of-range number."
+  (etypecase level
+    (keyword (level-from-keyword level))
+    (fixnum (if (<= +trace+ level +fatal+)
+                level
+                (cl:error 'bark-configuration-error
+                          :detail (format nil "Log level ~D is out of range ~D..~D" level +trace+ +fatal+))))))
 
 (declaim (ftype (function (fixnum) (values string &optional)) level-name))
 

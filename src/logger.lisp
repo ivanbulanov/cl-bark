@@ -16,10 +16,6 @@
 
 (in-package #:bark)
 
-(defconstant +window-check-interval+ 64
-  "How often the windowed counter reads the clock (in messages).
-   Must be power of 2 for bit-and optimization.")
-
 ;;; --- Sampling ---
 
 (defstruct (windowed-counter (:constructor %make-windowed-counter))
@@ -73,11 +69,12 @@ hash decision."
              (zerop (mod count thereafter))))))
 
 (defun maybe-reset-window (wc now)
-  "Reset window if expired. CAS ensures only one thread resets."
+  "Reset the window if it has expired. Returns T when this call performed the
+   reset; a CAS on window-start ensures only one thread resets."
   (let ((ws (windowed-counter-window-start wc)))
-    (when (>= (- now ws) (windowed-counter-window-ticks wc))
-      (when (atomics:cas (windowed-counter-window-start wc) ws now)
-        (setf (windowed-counter-count wc) 0)))))
+    (and (>= (- now ws) (windowed-counter-window-ticks wc))
+         (atomics:cas (windowed-counter-window-start wc) ws now)
+         (progn (setf (windowed-counter-count wc) 0) t))))
 
 (defun noop (logger message &rest fields)
   "No-op log function for disabled levels."
@@ -97,6 +94,9 @@ hash decision."
   (level-sampler   nil   :type (or null simple-vector))
   (consistent      nil   :type (or null consistent-sampler))
   (field-transform nil   :type (or null function))
+  ;; For a buffer-logger (see with-log-buffer): the logger it stands in for.
+  ;; Children are always derived from the source, never from the stand-in.
+  (source          nil   :type (or null logger) :read-only t)
   (trace-fn        #'noop :type function)
   (debug-fn        #'noop :type function)
   (info-fn         #'noop :type function)
@@ -112,14 +112,20 @@ hash decision."
 
 (defvar *log-context* nil "Dynamic context bindings for the current log scope.")
 
+;;; A field transform returns (values new-value) to keep a field, (values x nil)
+;;; to drop it, and — treated the same as a drop — no values at all. The RECEIVE
+;;; helpers below decode that protocol without consing a value list.
+
 (defun apply-field-transform-plist (transform plist)
   "Apply TRANSFORM to each key-value pair in PLIST. Returns a new plist with
-   transformed values. Pairs where TRANSFORM returns NIL as second value are dropped."
+   transformed values. Pairs where TRANSFORM returns NIL as second value (or no
+   values) are dropped."
   (declare (type function transform))
   (let (new-val drop-p)
-    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+    (flet ((receive (&optional (val nil val-supplied-p) (keep-p t keep-supplied-p))
              (setf new-val val
-                   drop-p (and keep-supplied-p (not keep-p)))))
+                   drop-p (or (not val-supplied-p)
+                              (and keep-supplied-p (not keep-p))))))
       (declare (dynamic-extent #'receive))
       (loop for (k v) on plist by #'cddr
             do (multiple-value-call #'receive (funcall transform k v))
@@ -127,12 +133,13 @@ hash decision."
 
 (defun apply-field-transform-alist (transform alist)
   "Apply TRANSFORM to each pair in ALIST (dynamic context). Returns a new alist.
-   Pairs where TRANSFORM returns NIL as second value are dropped."
+   Pairs where TRANSFORM returns NIL as second value (or no values) are dropped."
   (declare (type function transform))
   (let (new-val drop-p)
-    (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+    (flet ((receive (&optional (val nil val-supplied-p) (keep-p t keep-supplied-p))
              (setf new-val val
-                   drop-p (and keep-supplied-p (not keep-p)))))
+                   drop-p (or (not val-supplied-p)
+                              (and keep-supplied-p (not keep-p))))))
       (declare (dynamic-extent #'receive))
       (loop for (k . v) in alist
             do (multiple-value-call #'receive (funcall transform k v))
@@ -146,9 +153,10 @@ hash decision."
     ((null inner) outer)
     (t (lambda (key value)
          (let (inner-val drop-p)
-           (flet ((receive (val &optional (keep-p nil keep-supplied-p))
+           (flet ((receive (&optional (val nil val-supplied-p) (keep-p t keep-supplied-p))
                     (setf inner-val val
-                          drop-p (and keep-supplied-p (not keep-p)))))
+                          drop-p (or (not val-supplied-p)
+                                     (and keep-supplied-p (not keep-p))))))
              (declare (dynamic-extent #'receive))
              (multiple-value-call #'receive (funcall inner key value)))
            (if drop-p
@@ -181,10 +189,15 @@ hash decision."
               (let ((wc (aref ls level-index)))
                 (when wc
                   (let ((count (atomics:atomic-incf (windowed-counter-count wc))))
-                    (when (zerop (logand count (1- +window-check-interval+)))
-                      (maybe-reset-window wc (get-internal-real-time)))
                     (unless (windowed-allow-p count wc)
-                      (return-from log-fn (values)))))))))
+                      ;; Only a message about to be dropped pays for a clock
+                      ;; read. If the window has expired, reset it and count
+                      ;; this message in the new window, so a low-volume level
+                      ;; always gets its burst back as soon as time has passed.
+                      (when (maybe-reset-window wc (get-internal-real-time))
+                        (setf count (atomics:atomic-incf (windowed-counter-count wc))))
+                      (unless (windowed-allow-p count wc)
+                        (return-from log-fn (values))))))))))
         (let ((output (logger-output lgr))
               (transform (logger-field-transform lgr)))
           (when output
@@ -197,21 +210,25 @@ hash decision."
               (dispatch-to-output output (logger-formatter lgr)
                                   level-value
                                   (logger-prepared lgr)
-                                  ctx message flds))))
+                                  ctx (message-string message) flds))))
         (values)))))
 
 (declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter (or null formatter))
                                 (:context list) (:field-transform (or null function))
                                 (:capacity fixnum) (:on-drop (or null function))
+                                (:on-error (or null function))
                                 (:blocking boolean) (:block-timeout t)
                                 (:on-block-timeout (or null function))
                                 (:level-sampler (or null simple-vector))
                                 (:consistent (or null consistent-sampler)))
                           (values logger &optional)) make-logger))
 
-(defun make-logger (&key output (level :info) (formatter *default-json-formatter*)
+(defun make-logger (&key output (level :info)
+                        (formatter *default-json-formatter* formatter-supplied-p)
                         context field-transform
-                        (capacity +default-buffer-capacity+) (on-drop #'default-on-drop)
+                        (capacity +default-buffer-capacity+)
+                        (on-drop #'default-on-drop on-drop-supplied-p)
+                        on-error
                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                         level-sampler consistent)
   "Create a root logger. Multiple root loggers can coexist — each owns its own
@@ -228,7 +245,8 @@ LEVEL (keyword or fixnum, default :info):
 
 FORMATTER (formatter struct, default *default-json-formatter*):
   Formatter with prepare-fn/format-fn protocol. Use make-json-formatter,
-  make-logfmt-formatter, or make-pretty-formatter for customization.
+  make-logfmt-formatter, or make-pretty-formatter for customization. Not
+  accepted with a tee-output, whose destinations carry their own formatters.
 
 CONTEXT (plist or NIL):
   Static context fields pre-serialized at creation time via formatter's
@@ -241,6 +259,10 @@ FIELD-TRANSFORM (function or NIL):
 CAPACITY (fixnum, default 8192): Ring buffer size in messages. Stream output only.
 ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
   dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
+ON-ERROR (function or NIL): Called as (funcall on-error condition) in the writer
+  thread when writing to the stream fails. Return a replacement stream to keep
+  going, or NIL to stop the writer. Without it the writer prints the error to
+  *error-output* and stops.
 BLOCKING (boolean): When T, callers block on a full buffer instead of dropping.
 BLOCK-TIMEOUT (real, default 5.0): Seconds to wait when blocking before giving up.
 ON-BLOCK-TIMEOUT (function or NIL): Called when block-timeout expires.
@@ -251,18 +273,29 @@ CONSISTENT (consistent-sampler or NIL): From make-consistent-sampler —
   deterministic hash-based sampling.
 
 Async parameters (CAPACITY through ON-BLOCK-TIMEOUT) are only valid with stream
-output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ERROR."
+output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ERROR,
+as does an unknown LEVEL. All validation happens before any writer thread is started."
+  ;; Validate LEVEL first so a bad value cannot leak a writer thread.
+  (level-value level)
   (when (and (or (functionp output) (tee-output-p output))
-             (or blocking on-block-timeout block-timeout-supplied-p
-                 (/= capacity +default-buffer-capacity+)
-                 (not (eq on-drop #'default-on-drop))))
+             (or blocking on-block-timeout block-timeout-supplied-p on-error
+                 on-drop-supplied-p
+                 (/= capacity +default-buffer-capacity+)))
     (restart-case
         (cl:error 'bark-configuration-error
-                  :detail (format nil "Cannot specify async parameters (:capacity, :on-drop, :blocking, ~
+                  :detail (format nil "Cannot specify async parameters (:capacity, :on-drop, :on-error, :blocking, ~
                :block-timeout, :on-block-timeout) with a ~:[function~;tee-output~]. ~
                ~:*~:[Function outputs are synchronous — async parameters do not apply.~;~
                Configure these per-destination in bark:tee.~]"
                                   (tee-output-p output)))
+      (use-value (value)
+        :report "Supply a replacement logger."
+        :interactive (lambda () (list (make-logger)))
+        (return-from make-logger value))))
+  (when (and (tee-output-p output) formatter-supplied-p)
+    (restart-case
+        (cl:error 'bark-configuration-error
+                  :detail "Cannot specify :formatter with a tee-output; each tee destination carries its own formatter.")
       (use-value (value)
         :report "Supply a replacement logger."
         :interactive (lambda () (list (make-logger)))
@@ -275,7 +308,7 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
                                               :capacity capacity
                                               :formatter formatter
                                               :on-drop on-drop
-                                              :on-error nil
+                                              :on-error on-error
                                               :blocking blocking
                                               :block-timeout block-timeout
                                               :on-block-timeout on-block-timeout))
@@ -330,20 +363,20 @@ output. Passing them with a function or tee-output signals BARK-CONFIGURATION-ER
 
 (defun set-level (logger level)
   "Set the minimum log level for LOGGER. Accepts a keyword (:trace through :fatal)
-or a fixnum level constant. Takes effect immediately."
-  (let ((level-val (etypecase level
-                     (fixnum level)
-                     (keyword (level-from-keyword level)))))
+or a fixnum level constant. Takes effect immediately. Does not affect existing
+child loggers, which copy the level at creation.
+Signals BARK-CONFIGURATION-ERROR for an unknown level."
+  (let ((level-val (level-value level)))
     (setf (logger-level logger) level-val)
     (wire-level-fns logger level-val #'make-log-fn)))
 
 (defun level-enabled-p (logger level)
-  "Return T if LEVEL is enabled on LOGGER. NIL when LOGGER is nil.
-Checks the level threshold only — does not account for sampling or
-per-destination filters."
-  (and logger
-       (>= (level-from-keyword level)
-           (logger-level logger))))
+  "Return T if LEVEL (keyword or level constant) is enabled on LOGGER. NIL when
+LOGGER is nil. Checks the level threshold only — does not account for sampling
+or per-destination filters. Signals BARK-CONFIGURATION-ERROR for an unknown level."
+  (let ((level-val (level-value level)))
+    (and logger
+         (>= level-val (logger-level logger)))))
 
 ;;; --- Sampling API ---
 
@@ -396,8 +429,10 @@ KEY-FN is (lambda (context) ...) where CONTEXT is the logger's
 static context plist (set via :context on make-logger/make-child). It should
 return a string, symbol, or number for deterministic hashing, or NIL to skip
 consistent sampling and fall through to the windowed counter.
-Signals BARK-CONFIGURATION-ERROR if RATE < 1."
-  (check-type key-fn function)
+Signals BARK-CONFIGURATION-ERROR if KEY-FN is not a function or RATE < 1."
+  (unless (functionp key-fn)
+    (cl:error 'bark-configuration-error
+              :detail (format nil "consistent-sampler :key-fn must be a function, got ~S" key-fn)))
   (when (< rate 1)
     (restart-case
         (cl:error 'bark-configuration-error
@@ -408,23 +443,23 @@ Signals BARK-CONFIGURATION-ERROR if RATE < 1."
         (return-from make-consistent-sampler value))))
   (%make-consistent-sampler :key-fn key-fn :rate rate))
 
+(defun ensure-level-sampler (logger)
+  "Return LOGGER's level-sampler vector, allocating an empty one when it is NIL.
+   Thread-safe via CAS on the nil->vector transition."
+  (loop
+    (let ((ls (logger-level-sampler logger)))
+      (when ls
+        (return ls))
+      (let ((new-ls (make-array +level-slot-count+ :initial-element nil)))
+        (when (atomics:cas (logger-level-sampler logger) nil new-ls)
+          (return new-ls))))))
+
 (defun set-level-sampling (logger level windowed-counter)
   "Set sampling for LEVEL to WINDOWED-COUNTER on LOGGER (nil to remove).
-   Thread-safe via CAS on nil->vector transition."
-  (let ((level-index (etypecase level
-                      (fixnum level)
-                      (keyword (level-from-keyword level)))))
-    (loop
-      (let ((ls (logger-level-sampler logger)))
-        (cond
-          (ls
-           (setf (aref ls level-index) windowed-counter)
-           (return))
-          (t
-           (let ((new-ls (make-array +level-slot-count+ :initial-element nil)))
-             (setf (aref new-ls level-index) windowed-counter)
-             (when (atomics:cas (logger-level-sampler logger) nil new-ls)
-               (return)))))))))
+   The level-sampler vector is shared between a logger and its children, so the
+   change applies to the whole family. Thread-safe."
+  (setf (aref (ensure-level-sampler logger) (level-value level)) windowed-counter)
+  windowed-counter)
 
 (defun set-consistent (logger consistent-sampler)
   "Set or replace the consistent sampler on LOGGER.
@@ -441,20 +476,27 @@ CONSISTENT-SAMPLER is a sampler from make-consistent-sampler, or NIL to disable.
 
 PARENT (logger): the root or child logger to derive from.
 CONTEXT (plist or NIL): static fields pre-serialized at creation time, appended
-  to the parent's context. Zero per-call cost.
-LEVEL (keyword, fixnum, or NIL): minimum log level. NIL inherits from parent.
+  to the parent's context. Zero per-call cost. A key that also appears in the
+  parent's context is overridden: the child's value is what a consistent-sampler
+  KEY-FN sees, and the last occurrence in the output line.
+LEVEL (keyword, fixnum, or NIL): minimum log level. NIL copies the parent's
+  current level; later set-level calls on the parent do not propagate.
 FIELD-TRANSFORM (function or NIL): composes with parent's transform (parent runs
   first, then child). Applied to CONTEXT fields at creation time.
 
-Inherits the parent's formatter, output, level-sampler, and consistent sampler
-(snapshots at creation time — later changes to the parent are not reflected)."
-  (let* ((parent-transform (logger-field-transform parent))
+Inherits the parent's formatter and output. The level-sampler vector is SHARED
+with the parent: set-level-sampling on either affects both. The consistent
+sampler is copied by reference at creation; set-consistent on the parent later
+does not affect the child."
+  (let* ((parent (or (logger-source parent) parent))
+         (parent-transform (logger-field-transform parent))
          (composed-transform (compose-field-transforms field-transform parent-transform))
          (effective-bindings (if (and context composed-transform)
                                  (apply-field-transform-plist composed-transform context)
                                  context))
          (parent-formatter (logger-formatter parent))
-         (new-context (append (logger-context parent) effective-bindings))
+         (new-context (append (remove-plist-keys (logger-context parent) effective-bindings)
+                              effective-bindings))
          (new-prepared
            (if (tee-output-p (logger-output parent))
                (let ((parent-vec (logger-prepared parent))
@@ -478,7 +520,7 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
                  :prepared new-prepared
                  :formatter parent-formatter
                  :output (logger-output parent)
-                 :level-sampler (logger-level-sampler parent)
+                 :level-sampler (ensure-level-sampler parent)
                  :consistent (logger-consistent parent)
                  :field-transform composed-transform)))
     (set-level child child-level)
@@ -512,138 +554,193 @@ Inherits the parent's formatter, output, level-sampler, and consistent sampler
 
 ;;; --- Lifecycle ---
 
-(defun flush (logger)
-  "Flush LOGGER, blocking until all pending messages are written.
+(defun flush (logger &key (timeout 5.0))
+  "Flush LOGGER, blocking until all pending messages are written or TIMEOUT
+seconds pass per async output. Returns T when every running async output
+acknowledged the flush, NIL when any timed out. Passing NIL is a no-op that
+returns T; so is flushing a synchronous (function-output) logger.
 Signals BARK-ASYNC-STOPPED if any async output has been stopped.
 A CONTINUE restart is available to skip stopped outputs."
-  (let ((has-stopped nil))
-    (flet ((flush-one (ao)
-             (if (async-output-running ao)
-                 (flush-async-output ao)
-                 (setf has-stopped t))))
-      (do-async-outputs (logger-output logger) #'flush-one))
+  (let ((has-stopped nil)
+        (all-acked t))
+    (when logger
+      (flet ((flush-one (ao)
+               (if (async-output-running ao)
+                   (unless (flush-async-output ao timeout)
+                     (setf all-acked nil))
+                   (setf has-stopped t))))
+        (do-async-outputs (logger-output logger) #'flush-one)))
     (when has-stopped
       (restart-case
           (cl:error 'bark-async-stopped)
         (continue ()
           :report "Skip stopped outputs."
-          nil)))))
+          nil)))
+    all-acked))
 
-(defun stop (logger)
+(defun stop (logger &key (timeout 5.0))
   "Stop writer threads for LOGGER. Blocks until pending messages are drained and
-threads have exited. Idempotent — calling stop on an already-stopped or sync
-logger is a no-op. Passing NIL is a no-op.
+threads have exited, waiting at most TIMEOUT seconds per output for each step.
+Returns T when every writer exited cleanly, NIL otherwise. Idempotent — calling
+stop on an already-stopped or sync logger is a no-op returning T, and so is
+passing NIL. After a clean stop the logger keeps working: lines are written
+synchronously on the calling thread.
 Signals BARK-CHILD-OPERATION-ERROR if LOGGER is a child.
 A CONTINUE restart is available to silently ignore the operation."
-  (when logger
-    (unless (logger-root-p logger)
-      (restart-case
-          (cl:error 'bark-child-operation-error :operation :stop)
-        (continue ()
-          :report "Ignore stop on child logger."
-          (return-from stop nil))))
-    (do-async-outputs (logger-output logger) #'stop-async-output))
-  nil)
-
-(defun register-exit-hook (logger)
-  "Register LOGGER for automatic cleanup on Lisp image exit.
-   Calls bark:stop on the logger when the implementation's exit hook fires.
-   Safe to combine with an explicit bark:stop call (stop is idempotent)."
-  (let ((fn (lambda () (stop logger))))
-    #+sbcl      (push fn sb-ext:*exit-hooks*)
-    #+ccl       (push fn ccl:*lisp-cleanup-functions*)
-    #+ecl       (push fn ext:*exit-hooks*)
-    #+abcl      (push fn ext:*exit-hooks*)
-    #+clisp     (push fn custom:*fini-hooks*)
-    #-(or sbcl ccl ecl abcl clisp)
-    (cl:warn "cl-bark: no exit-hook support on this implementation"))
-  (values))
+  (let ((clean t))
+    (when logger
+      (unless (logger-root-p logger)
+        (restart-case
+            (cl:error 'bark-child-operation-error :operation :stop)
+          (continue ()
+            :report "Ignore stop on child logger."
+            (return-from stop nil))))
+      (flet ((stop-one (ao)
+               (when (async-output-running ao)
+                 (unless (stop-async-output ao :timeout timeout)
+                   (setf clean nil)))))
+        (do-async-outputs (logger-output logger) #'stop-one)))
+    clean))
 
 ;;; --- Context ---
 
+(defun remove-plist-keys (plist keys-plist)
+  "Return PLIST without the pairs whose key appears as a key in KEYS-PLIST
+   (compared with EQUAL, so string keys match too)."
+  (if (null keys-plist)
+      plist
+      (loop for (k v) on plist by #'cddr
+            unless (loop for (key) on keys-plist by #'cddr
+                           thereis (equal key k))
+              collect k and collect v)))
+
+(defun remove-context-keys (alist keys)
+  "Return ALIST without the pairs whose key is in KEYS (compared with EQUAL)."
+  (if (and keys (null (cdr keys)))
+      (let ((key (car keys)))
+        (remove key alist :key #'car :test #'equal))
+      (remove-if (lambda (pair) (member (car pair) keys :test #'equal)) alist)))
+
 (defmacro with-context ((&rest pairs) &body body)
   "Bind dynamic log context fields for the duration of BODY.
-Inner bindings shadow outer bindings with the same key — like CL LET."
-  (let ((new-keys (loop for (k) on pairs by #'cddr collect k)))
-    `(let ((*log-context* (list* ,@(loop for (k v) on pairs by #'cddr
-                                         collect `(cons ,k ,v))
-                                 ,(if (= (length new-keys) 1)
-                                      `(remove ,(first new-keys) *log-context* :key #'car)
-                                      `(remove-if (lambda (pair)
-                                                    (member (car pair)
-                                                            '(,@new-keys)))
-                                                  *log-context*)))))
-       ,@body)))
+PAIRS is key1 value1 key2 value2 ...; key and value forms are evaluated once
+each, in order, so keys may be variables. Inner bindings shadow outer bindings
+with the same key (compared with EQUAL) — like CL LET."
+  (when (oddp (length pairs))
+    (cl:error "with-context: PAIRS must have an even number of elements, got ~S" pairs))
+  (let* ((keys (loop for (k) on pairs by #'cddr collect k))
+         (vals (loop for (nil v) on pairs by #'cddr collect v))
+         (key-vars (loop for nil in keys collect (gensym "KEY"))))
+    `(let (,@(mapcar #'list key-vars keys))
+       (let ((*log-context* (list* ,@(mapcar (lambda (kv v) `(cons ,kv ,v)) key-vars vals)
+                                   (remove-context-keys *log-context* (list ,@key-vars)))))
+         ,@body))))
 
 ;;; --- Utilities ---
 
-(defmacro with-captured-logs ((&optional (var 'logs) (formatter '*default-json-formatter*)) &body body)
+(defmacro with-captured-logs ((&optional (var (intern "LOGS" *package*))
+                                         (formatter '*default-json-formatter*))
+                              &body body)
   "Execute BODY with a test logger that captures log output.
-   Binds VAR to a function that returns the list of logged strings.
-   FORMATTER defaults to *default-json-formatter* but can be any formatter struct."
-  `(multiple-value-bind (collector results-fn) (make-list-collector)
-     (let* ((*logger* (make-logger :level :trace
-                                   :formatter ,formatter :output collector
-                                   :context '(:name "test"))))
-       (let ((,var results-fn))
-         ,@body))))
+   Binds VAR to a function that returns the list of logged strings; VAR defaults
+   to the symbol LOGS in the current package. The function may be called any
+   number of times. FORMATTER defaults to *default-json-formatter* but can be any
+   formatter struct. The logger has the static context (:name \"test\")."
+  (let ((collector (gensym "COLLECTOR"))
+        (results-fn (gensym "RESULTS-FN")))
+    `(multiple-value-bind (,collector ,results-fn) (make-list-collector)
+       (let* ((*logger* (make-logger :level :trace
+                                     :formatter ,formatter :output ,collector
+                                     :context '(:name "test"))))
+         (let ((,var ,results-fn))
+           ,@body)))))
 
-(defvar *compile-time-max-level* 0
-  "Reserved. Intended to eliminate log calls below this level at compile time,
-   but no logging macro currently consults it, so it has no effect.")
+(defvar *compile-time-min-level* nil
+  "Minimum log level compiled in, or NIL to compile every call (the default).
+   When bound to a level keyword or level constant at macroexpansion time, the
+   logging macros trace through fatal expand to NIL for calls below that level:
+   no code is generated and the arguments are never evaluated. Set it before
+   compiling the code that should be stripped; it has no effect on code that
+   was already compiled, so recompile (and discard stale FASLs) after changing it.")
 
 (declaim (ftype (function nil (values function function &optional)) make-list-collector))
 
 (defun make-list-collector ()
   "Create a list-collecting output function and its result accessor.
-   Returns (values collector-fn get-results-fn)."
-  (let ((results nil))
+   Returns (values collector-fn get-results-fn). The collector is safe to call
+   from several threads; the accessor returns a fresh list in log order and may
+   be called repeatedly."
+  (let ((cell (list nil)))
     (values
-     (lambda (line) (push line results))
-     (lambda () (nreverse results)))))
+     (lambda (line) (atomics:atomic-push line (car cell)))
+     (lambda () (reverse (car cell))))))
 
 ;;; --- Convenience API ---
 
-(macrolet ((define-log-macro (name accessor)
+;;; Each logging macro expands to a level check on the target logger followed by
+;;; a call through the logger's per-level function slot. The level check is what
+;;; makes argument evaluation lazy: message and field forms are only evaluated
+;;; when the level is enabled. The first argument is classified at expansion
+;;; time when it is a literal string or keyword, otherwise at runtime.
+
+(macrolet ((define-log-macro (name accessor level)
              `(defmacro ,name (&rest args)
                 ,(format nil "Log at ~A level. See bark:info for call forms and semantics."
                          (string-upcase name))
-                (when args
-                  (if (keywordp (car args))
-                      ;; Compile-time: literal keyword first → fields-only, use *logger*
-                      `(when *logger*
-                         (funcall (,',accessor *logger*) *logger* nil ,@args))
-                      ;; First arg needs runtime dispatch
-                      (let ((g (gensym "FIRST"))
-                            (rest-forms (cdr args)))
-                        ;; Pre-compute the logger branch outside the template
-                        (let ((logger-branch
-                                (cond
-                                  ((null rest-forms)
-                                   `(funcall (,',accessor ,g) ,g nil))
-                                  ((keywordp (car rest-forms))
-                                   `(funcall (,',accessor ,g) ,g nil ,@rest-forms))
-                                  (t
-                                   (let ((g2 (gensym "ARG")))
-                                     `(let ((,g2 ,(car rest-forms)))
-                                        (if (keywordp ,g2)
-                                            (funcall (,',accessor ,g) ,g nil ,g2 ,@(cdr rest-forms))
-                                            (funcall (,',accessor ,g) ,g ,g2 ,@(cdr rest-forms)))))))))
-                          `(let ((,g ,(car args)))
-                             (cond
-                               ((logger-p ,g) ,logger-branch)
-                               ((keywordp ,g)
-                                (when *logger*
-                                  (funcall (,',accessor *logger*) *logger* nil ,g ,@rest-forms)))
-                               (t
-                                (when *logger*
-                                  (funcall (,',accessor *logger*) *logger* ,g ,@rest-forms))))))))))))
-  (define-log-macro trace logger-trace-fn)
-  (define-log-macro debug logger-debug-fn)
-  (define-log-macro info  logger-info-fn)
-  (define-log-macro warn  logger-warn-fn)
-  (define-log-macro error logger-error-fn)
-  (define-log-macro fatal logger-fatal-fn))
+                (cond
+                  ;; Compile-time elimination: no code, no argument evaluation.
+                  ((and *compile-time-min-level*
+                        (< ,level (level-value *compile-time-min-level*)))
+                   nil)
+                  ((null args) nil)
+                  ;; Literal keyword first: fields only, through *logger*.
+                  ((keywordp (car args))
+                   (let ((lgr (gensym "LGR")))
+                     `(let ((,lgr *logger*))
+                        (when (and ,lgr (>= ,',level (logger-level ,lgr)))
+                          (funcall (,',accessor ,lgr) ,lgr nil ,@args)))))
+                  ;; Literal string first: message, through *logger*.
+                  ((stringp (car args))
+                   (let ((lgr (gensym "LGR")))
+                     `(let ((,lgr *logger*))
+                        (when (and ,lgr (>= ,',level (logger-level ,lgr)))
+                          (funcall (,',accessor ,lgr) ,lgr ,@args)))))
+                  ;; Anything else is classified at runtime.
+                  (t
+                   (let* ((g (gensym "FIRST"))
+                          (lgr (gensym "LGR"))
+                          (rest-forms (cdr args))
+                          (logger-branch
+                            (cond
+                              ((null rest-forms)
+                               `(funcall (,',accessor ,g) ,g nil))
+                              ((keywordp (car rest-forms))
+                               `(funcall (,',accessor ,g) ,g nil ,@rest-forms))
+                              (t
+                               (let ((g2 (gensym "ARG")))
+                                 `(let ((,g2 ,(car rest-forms)))
+                                    (if (keywordp ,g2)
+                                        (funcall (,',accessor ,g) ,g nil ,g2 ,@(cdr rest-forms))
+                                        (funcall (,',accessor ,g) ,g ,g2 ,@(cdr rest-forms)))))))))
+                     `(let ((,g ,(car args)))
+                        (cond
+                          ;; NIL where a logger is expected: no-op.
+                          ((null ,g) nil)
+                          ((logger-p ,g)
+                           (when (>= ,',level (logger-level ,g))
+                             ,logger-branch))
+                          (t
+                           (let ((,lgr *logger*))
+                             (when (and ,lgr (>= ,',level (logger-level ,lgr)))
+                               (if (keywordp ,g)
+                                   (funcall (,',accessor ,lgr) ,lgr nil ,g ,@rest-forms)
+                                   (funcall (,',accessor ,lgr) ,lgr ,g ,@rest-forms)))))))))))))
+  (define-log-macro trace logger-trace-fn +trace+)
+  (define-log-macro debug logger-debug-fn +debug+)
+  (define-log-macro info  logger-info-fn  +info+)
+  (define-log-macro warn  logger-warn-fn  +warn+)
+  (define-log-macro error logger-error-fn +error+)
+  (define-log-macro fatal logger-fatal-fn +fatal+))
 
 (setf (documentation 'info 'function)
       "Log at INFO level. All six logging macros (trace, debug, info, warn, error,
@@ -653,11 +750,16 @@ fatal) share the same calling convention:
   (bark:info logger \"msg\" :key value ...) — log through an explicit logger
   (bark:info :key value ...)               — fields only, no message, via *logger*
 
-The first argument is dispatched at runtime: if it satisfies logger-p, it is
-used as the logger; if it is a keyword, it starts a fields-only plist with no
-message; otherwise (including NIL) it is the message and the call logs through
-*logger*.
+The first argument is dispatched at runtime unless it is a literal string or
+keyword: NIL is a no-op (an absent logger); a logger is used as the logger; a
+keyword starts a fields-only plist with no message; anything else is the
+message and the call logs through *logger*. A message that is not a string is
+printed with PRINC.
 
-When *logger* is NIL, the call is a no-op — logging macros never signal. An
-explicit NIL first argument is not a logger; it is treated as the message.
-*compile-time-max-level* is reserved and currently has no effect.")
+Message and field forms are evaluated only when the level is enabled on the
+target logger (the first argument itself is always evaluated when it is not a
+literal, since it selects the logger). When *logger* is NIL, the call is a
+no-op — logging macros never signal.
+
+Binding *compile-time-min-level* at macroexpansion time removes calls below
+that level from the compiled code entirely.")

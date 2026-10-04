@@ -34,15 +34,16 @@
    #:formatter #:make-formatter #:formatter-p #:formatter-prepare-fn #:formatter-format-fn
    #:json-formatter #:logfmt-formatter #:pretty-formatter
    #:make-json-formatter #:make-logfmt-formatter #:make-pretty-formatter
+   #:*default-json-formatter* #:*default-logfmt-formatter* #:*default-pretty-formatter*
    ;; output
-   #:make-tee #:tee
+   #:make-tee #:tee #:default-on-drop
    ;; logger
-   #:*logger* #:*log-context* #:*compile-time-max-level*
-   #:logger-p
+   #:*logger* #:*log-context* #:*compile-time-min-level*
+   #:logger #:logger-p
    #:make-logger #:make-child #:set-level #:level-enabled-p
    #:make-windowed-counter #:make-level-sampler #:set-level-sampling
    #:make-consistent-sampler #:set-consistent
-   #:flush #:stop #:register-exit-hook
+   #:flush #:stop #:*exit-flush-timeout*
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
    ;; buffer

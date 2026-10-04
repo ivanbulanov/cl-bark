@@ -40,6 +40,16 @@
          (slots (make-array actual :initial-element nil)))
     (%make-ring-buffer :slots slots :mask (1- actual))))
 
+(declaim (inline ring-buffer-capacity ring-buffer-empty-p))
+
+(defun ring-buffer-capacity (rb)
+  "Number of slots in RB."
+  (1+ (ring-buffer-mask rb)))
+
+(defun ring-buffer-empty-p (rb)
+  "True when no claimed slot is waiting to be popped."
+  (= (ring-buffer-head rb) (ring-buffer-tail rb)))
+
 (defun ring-buffer-pop (rb)
   "Pop the next value from the ring buffer. Returns NIL if empty. Single-consumer only.
    Spins briefly if a producer has claimed a slot but not yet written the value,
@@ -56,6 +66,9 @@
                      (progn #+sbcl (sb-ext:spin-loop-hint))
                      (bt:thread-yield))
                  (setf val (svref (ring-buffer-slots rb) idx)))
+        ;; Pairs with the write barrier in the producer: the value's contents
+        ;; are visible once its pointer is. A no-op on x86 (TSO), required on ARM.
+        (sb-thread:barrier (:read))
         (setf (svref (ring-buffer-slots rb) idx) nil)
         (atomics:atomic-incf (ring-buffer-tail rb))
         val))))
@@ -76,8 +89,14 @@
           (when track-drops
             (atomics:atomic-incf (ring-buffer-dropped rb)))
           (return nil))
-        (when (atomics:cas (ring-buffer-head rb) head (1+ head))
-          (setf (svref slots (logand head mask)) value)
+        ;; Claim and publish as one unit. An interrupt between the CAS and the
+        ;; store (with-timeout, interrupt-thread, terminate-thread) would leave
+        ;; the claimed slot empty forever and wedge the consumer on it.
+        (when (sb-sys:without-interrupts
+                (when (atomics:cas (ring-buffer-head rb) head (1+ head))
+                  (sb-thread:barrier (:write))
+                  (setf (svref slots (logand head mask)) value)
+                  t))
           (return t))))))
 
 (declaim (ftype (function (ring-buffer t) (values boolean &optional)) ring-buffer-push ring-buffer-offer))

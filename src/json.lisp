@@ -68,8 +68,32 @@
   (write-string "\"type\":\"" stream)
   (write-json-escaped-string (type-name-string condition) stream)
   (write-string "\",\"msg\":\"" stream)
-  (write-json-escaped-string (princ-to-string condition) stream)
+  (write-json-escaped-string (condition-message-string condition) stream)
   (write-char #\" stream))
+
+(defun write-json-float (stream value)
+  "Write float VALUE to STREAM in JSON number syntax: the shortest digits that
+   read back to the same value, with an E exponent marker when needed."
+  ;; PRIN1 omits the exponent marker only when the float's type is the default
+  ;; read format, so bind it to match the value.
+  (let ((*read-default-float-format* (if (typep value 'double-float)
+                                         'double-float
+                                         'single-float)))
+    (prin1 value stream)))
+
+(defun write-json-number (stream value)
+  "Write a real VALUE as a JSON number. NaN and infinities become null; a ratio
+   is written as a double, or as a string when it does not fit one."
+  (etypecase value
+    (integer (princ value stream))
+    (float (if (or (sb-ext:float-nan-p value) (sb-ext:float-infinity-p value))
+               (write-string "null" stream)
+               (write-json-float stream value)))
+    (ratio (let ((d (handler-case (coerce value 'double-float)
+                      (cl:error () nil))))
+             (if d
+                 (write-json-float stream d)
+                 (write-json-string stream (princ-to-string value)))))))
 
 (defun emit-json-stack-frame (stream frame)
   "Write one stack frame as a JSON object {\"call\":...,\"file\":...,\"line\":...}."
@@ -133,12 +157,7 @@
   (typecase value
     (string    (write-json-string stream value))
     (character (write-json-string stream (string value)))
-    (integer (princ value stream))
-    (float (cond
-             ((or (sb-ext:float-nan-p value) (sb-ext:float-infinity-p value))
-              (write-string "null" stream))
-             (t (format stream "~F" value))))
-    (ratio (format stream "~F" (coerce value 'double-float)))
+    (real (write-json-number stream value))
     ((eql t) (write-string "true" stream))
     (null (write-string "null" stream))
     (symbol    (write-json-string stream (key-string value)))
@@ -234,7 +253,7 @@
                 (declare (ignore parent-prepared delta-context))
                 "")
               :type function :read-only t)
-  (format-fn  (cl:error "format-fn is required")
+  (format-fn  (cl:error 'bark-configuration-error :detail "make-formatter: :format-fn is required")
               :type function :read-only t))
 
 (setf (documentation 'formatter-p 'function) "Return T if OBJECT is a formatter."
@@ -290,7 +309,12 @@
                                   (message-key "msg"))
   "Return a JSON formatter struct with custom keys and formats.
    Pre-computes level prefix vector, timestamp key fragment, and message key fragment.
-   Pass :level-key NIL to omit the level field entirely."
+   Pass :level-key NIL to omit the level field entirely.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or LEVEL-FORMAT."
+  (check-timestamp-format timestamp)
+  (unless (member level-format '(:numeric :string))
+    (cl:error 'bark-configuration-error
+              :detail (format nil ":level-format must be :numeric or :string, got ~S" level-format)))
   (let ((prefixes (when level-key
                     (build-json-level-prefixes level-key level-format)))
         (ts-key (when timestamp (format nil "\"~a\":" timestamp-key)))

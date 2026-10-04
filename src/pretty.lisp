@@ -88,7 +88,9 @@
 (defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t))
   "Return a pretty formatter struct with optional timestamp display.
    TIMESTAMP is nil (no timestamp), :iso8601, or :unix-ms.
-   Level is always colored string. Pass :show-level NIL to omit it."
+   Level is always colored string. Pass :show-level NIL to omit it.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP."
+  (check-timestamp-format timestamp)
   (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc)))
         (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
     (make-formatter
@@ -101,8 +103,12 @@
                 (*print-circle* t)
                 (stacks nil)
                 (wrote nil))
+           ;; WROTE tracks whether anything precedes the next item, so the
+           ;; line never starts with a separator space.
            (flet ((write-key (k)
-                    (format s " ~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc))
+                    (when wrote (write-char #\Space s))
+                    (format s "~c[2m~a~c[0m=" #\Esc (key-string k) #\Esc)
+                    (setf wrote t))
                   (write-val (k v)
                     (cond
                       ((captured-error-p v)
@@ -120,11 +126,13 @@
                (emit-timestamp timestamp s)
                (setf wrote t))
              (when message
-               (write-char #\Space s)
-               (write-string message s))
-             ;; Splice pre-serialized static context
+               (when wrote (write-char #\Space s))
+               (write-string message s)
+               (setf wrote t))
+             ;; Splice pre-serialized static context (leading space per field)
              (when (plusp (length (the string prepared)))
-               (write-string prepared s))
+               (write-string prepared s :start (if wrote 0 1))
+               (setf wrote t))
              ;; Dynamic context
              (dolist (pair context)
                (write-key (car pair)) (write-val (car pair) (cdr pair)))
