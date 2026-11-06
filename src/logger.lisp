@@ -578,6 +578,25 @@ A CONTINUE restart is available to skip stopped outputs."
           nil)))
     all-acked))
 
+(defun dropped-count (logger)
+  "Return how many lines the async outputs of LOGGER have dropped so far: the
+sum over its async outputs of the lines lost to a full buffer, to a failed
+writer and, in blocking mode, to a block timeout. The count only grows: it
+includes lines already announced by a drop warning, and reading it resets
+nothing. It can briefly read low while the writer thread moves a count into
+the announced total. Passing NIL, a child or a logger without async outputs is
+allowed (a child reports the outputs it shares with its root). Returns 0 for a
+synchronous logger.
+Example: (bark:dropped-count bark:*logger*)"
+  (let ((total 0))
+    (when logger
+      (flet ((add (ao)
+               (incf total (+ (ring-buffer-dropped (async-output-ring ao))
+                              (async-output-dropped-reported ao)
+                              (async-output-block-dropped ao)))))
+        (do-async-outputs (logger-output logger) #'add)))
+    total))
+
 (defun stop (logger &key (timeout 5.0))
   "Stop writer threads for LOGGER. Blocks until pending messages are drained and
 threads have exited, waiting at most TIMEOUT seconds per output for each step.

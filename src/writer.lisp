@@ -100,7 +100,13 @@
   (on-block-timeout  nil   :type (or null function))
   (block-dropped     0     :type (unsigned-byte 64))
   (space-lock        nil   :type t)
-  (space-available   nil   :type t))
+  (space-available   nil   :type t)
+  ;; Set by the save hook: how to find the stream again after the image is
+  ;; restored. NIL, :STDOUT, :STDERR or (:FILE . PATHNAME).
+  (restart-key       nil   :type t)
+  ;; Lines already announced by a drop warning. The ring counter restarts from
+  ;; zero after each warning; this one only grows, for DROPPED-COUNT.
+  (dropped-reported  0     :type (unsigned-byte 64)))
 
 (declaim (inline async-output-running))
 
@@ -171,6 +177,17 @@
 
 ;;; --- Construction ---
 
+(defun start-writer-thread (async-output)
+  "Start the writer thread of ASYNC-OUTPUT and record it in the output. The
+   thread reports through the *ERROR-OUTPUT* of the calling thread."
+  (let ((err-output *error-output*))
+    (setf (async-output-thread async-output)
+          (bt:make-thread (lambda ()
+                            (let ((*error-output* err-output))
+                              (writer-loop async-output)))
+                          :name "bark-writer")))
+  async-output)
+
 (declaim (ftype (function (t &key (:capacity fixnum) (:formatter (or null formatter))
                                   (:on-drop (or null function)) (:on-error (or null function))
                                   (:blocking boolean) (:block-timeout t)
@@ -206,12 +223,7 @@ The output is drained automatically when the image exits."
                                  (bt:make-condition-variable
                                   :name "bark-space-available")))))
     (register-live-output ao)
-    (let ((err-output *error-output*))
-      (setf (async-output-thread ao)
-            (bt:make-thread (lambda ()
-                              (let ((*error-output* err-output))
-                                (writer-loop ao)))
-                            :name "bark-writer")))
+    (start-writer-thread ao)
     ao))
 
 ;;; --- Producer side ---
@@ -436,6 +448,8 @@ The output is drained automatically when the image exits."
                   when (atomics:cas (ring-buffer-dropped ring) old 0)
                     return old))
           (on-drop (async-output-on-drop async-output)))
+      (atomics:atomic-incf (async-output-dropped-reported async-output)
+                           actual-dropped)
       (unless on-drop
         (return-from emit-drop-warning (values)))
       (multiple-value-bind (message fields)
@@ -503,3 +517,97 @@ The output is drained automatically when the image exits."
           (cl:error (e)
             (%report "bark: on-block-timeout handler failed: ~a~%" e)))))
     (atomics:atomic-incf (async-output-block-dropped ao))))
+
+;;; --- Save and restore ---
+
+(defvar *saved-outputs* nil
+  "Weak pointers to the async outputs the save hook stopped, to be restarted by
+   the init hook. Guarded by *LIFECYCLE-LOCK*.")
+
+(defvar *lifecycle-lock* (bt:make-lock "bark-lifecycle")
+  "Serializes the save and init hooks.")
+
+(defun restart-key (stream)
+  "Describe how to find STREAM again in a restored image. Synonym streams and
+   streams of unknown kind are kept as they are (NIL); the standard streams are
+   found again by name; file streams by their pathname."
+  (cond
+    ((typep stream 'synonym-stream) nil)
+    ((eq stream sb-sys:*stdout*) :stdout)
+    ((eq stream sb-sys:*stderr*) :stderr)
+    ((and (typep stream 'file-stream) (output-stream-p stream))
+     (let ((path (ignore-errors (pathname stream))))
+       (and path (list :file path (stream-external-format stream)))))
+    (t nil)))
+
+(defun restored-stream (async-output)
+  "Return the stream ASYNC-OUTPUT must write to in the restored image, or NIL
+   when a file stream cannot be reopened. The standard streams are recreated by
+   SBCL at startup, so the old objects are stale. A file stream is reopened for
+   appending, because its descriptor does not survive the save."
+  (let ((key (async-output-restart-key async-output)))
+    (case key
+      (:stdout sb-sys:*stdout*)
+      (:stderr sb-sys:*stderr*)
+      (t
+       (if (consp key)
+           (handler-case
+               (open (second key) :direction :output :if-exists :append
+                                  :if-does-not-exist :create
+                                  :external-format (third key))
+             (cl:error (e)
+               (%report "bark: cannot reopen ~a after restore: ~a~%" (second key) e)
+               nil))
+           (async-output-stream async-output))))))
+
+(defun save-live-outputs ()
+  "Save hook (sb-ext:*save-hooks*): stop the writer thread of every running
+   async output, draining its pending lines, so that save-lisp-and-die is not
+   refused for lack of a single thread. Each output stopped here is remembered
+   and restarted by RESTART-SAVED-OUTPUTS in the restored image. Outputs that
+   are already stopped or failed are left alone. Idempotent."
+  (bt:with-lock-held (*lifecycle-lock*)
+    (dolist (wp (bt:with-lock-held (*live-outputs-lock*) (copy-list *live-outputs*)))
+      (let ((ao (sb-ext:weak-pointer-value wp)))
+        (when (and ao (async-output-running ao))
+          (setf (async-output-restart-key ao)
+                (restart-key (async-output-stream ao)))
+          (if (ignore-errors (stop-async-output ao :timeout *exit-flush-timeout*))
+              (push (sb-ext:make-weak-pointer ao) *saved-outputs*)
+              (%report "bark: writer did not stop cleanly before save; not restarting it~%"))))))
+  (values))
+
+(defun restart-saved-outputs ()
+  "Init hook (sb-ext:*init-hooks*): restart the writer thread of every async
+   output that SAVE-LIVE-OUTPUTS stopped. The standard streams are looked up
+   again, because SBCL recreates them at startup; a file stream is reopened for
+   appending. An output whose file cannot be reopened is marked failed and
+   counts later lines as dropped. Idempotent: each output restarts once."
+  (bt:with-lock-held (*lifecycle-lock*)
+    (let ((saved *saved-outputs*))
+      (setf *saved-outputs* nil)
+      (dolist (wp saved)
+        (let ((ao (sb-ext:weak-pointer-value wp)))
+          (when (and ao (eq (async-output-state ao) :stopped))
+            (let ((stream (restored-stream ao)))
+              (cond
+                (stream
+                 (setf (async-output-stream ao) stream
+                       (async-output-quit ao) nil
+                       (async-output-sleeping ao) nil
+                       (async-output-flush-acks ao) nil
+                       (async-output-notify ao) (bt:make-semaphore :name "bark-notify"))
+                 (register-live-output ao)
+                 (start-writer-thread ao)
+                 (setf (async-output-state ao) :running))
+                (t
+                 (setf (async-output-state ao) :failed)))))))))
+  (values))
+
+(pushnew 'save-live-outputs sb-ext:*save-hooks*)
+
+(pushnew 'restart-saved-outputs sb-ext:*init-hooks*)
+
+(progn
+  (pushnew 'save-live-outputs sb-ext:*save-hooks*)
+  (pushnew 'restart-saved-outputs sb-ext:*init-hooks*))

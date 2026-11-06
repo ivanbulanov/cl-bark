@@ -36,6 +36,14 @@ minor versions, and such changes are listed under **Changed**.
 
 ### Added
 
+- Add `sb-ext:*save-hooks*` and `sb-ext:*init-hooks*` functions: `save-lisp-and-die` no longer fails while an async
+  logger runs; the save hook drains and joins every running writer thread, and the init hook restarts them in the
+  restored image (standard streams rebound to SBCL's new `*stdout*`/`*stderr*`, file streams reopened for appending;
+  outputs stopped before the save stay stopped).
+- Add and export `dropped-count`, the cumulative number of lines a logger's async outputs have dropped; reading it
+  resets nothing.
+- Document that `:blocking t` can stall a producer up to `:block-timeout` per call, that `make-child` shares the
+  parent's level-sampler vector, and why `bt:*default-special-bindings*` is still extended at load time.
 - Add `*exit-flush-timeout*` (default 2.0 seconds), the per-output wait of the automatic exit drain.
 - Export `default-on-drop`, `logger`, and `*default-json-formatter*`, `*default-logfmt-formatter*` and
   `*default-pretty-formatter*`.

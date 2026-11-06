@@ -143,6 +143,8 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 ;; Create child logger with static context (pre-serialized fields)
 ;; Children share the parent's output — no threads, no cleanup needed (just let GC collect).
 ;; Do not call bark:stop on a child; always stop the root logger.
+;; A child has no sampler or rate limit of its own: it shares the parent's level-sampler vector (windowed counters
+;; and their budget), so a noisy child spends the parent's budget.
 (bark:make-child parent &key context field-transform level)
 
 ;; Change level at runtime (swaps function slots)
@@ -180,6 +182,23 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 `bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals `bark-async-stopped` if any async output has been stopped (a `continue` restart is available to skip stopped outputs).
 
 Every async output is drained automatically when the image exits, waiting at most `bark:*exit-flush-timeout*` (default 2.0 seconds) per output.
+
+`bark:dropped-count` returns how many lines the async outputs of a logger have dropped so far (full buffer, failed writer, and blocking-mode timeouts), summed over its outputs. The count only grows: lines already announced by a drop warning stay in it, and reading it resets nothing. It returns 0 for NIL and for a synchronous (function) logger.
+
+```lisp
+(bark:dropped-count bark:*logger*)
+```
+
+#### Saving a core with `save-lisp-and-die`
+
+SBCL refuses to save a core while other threads run, and a writer thread would not survive the save anyway. cl-bark installs a function on `sb-ext:*save-hooks*` that drains and joins the writer thread of every running async output, and a function on `sb-ext:*init-hooks*` that starts the writer threads again in the restored image, so no call is needed from the application and no lines are lost.
+
+- Only outputs that were running at save time are restarted. An output stopped earlier with `bark:stop` stays stopped (synchronous writes), and a failed one stays failed.
+- Between the save hook and the end of the save, and until the init hook has run, lines are written synchronously on the caller's thread.
+- Standard streams: an output whose stream is `sb-sys:*stdout*` or `sb-sys:*stderr*` is rebound to SBCL's freshly created standard stream, because the old stream object is stale in the restored image. Synonym streams (`*standard-output*`, `*error-output*`) keep working as they are.
+- File streams: the descriptor does not survive a save, so an output on a file stream (a `file-stream` with a pathname) is reopened for appending by the init hook, with the same external format. If the file cannot be reopened, the output is marked failed and later lines count as dropped (see `bark:dropped-count`). Any other stream (string streams, sockets, pipes) is kept as it is and is not valid in the restored image unless it survives a save by itself; give such an output an `:on-error` handler, or stop the logger before saving and make a new one after the restore.
+- If `save-lisp-and-die` fails after the save hook ran (for example because an unrelated thread is running), the outputs stay stopped and write synchronously until the init hook runs; the process keeps logging.
+- A logger created before the save and held by a global variable keeps working after the restore; a logger no longer referenced is not restarted.
 
 `bark:flush` and `bark:stop` accept `:timeout` (seconds per async output, default 5.0). `bark:flush` returns T when every running async output acknowledged and NIL on timeout; `bark:stop` returns T when every writer exited cleanly and NIL otherwise.
 
@@ -565,7 +584,7 @@ See [docs/sampling.md](docs/sampling.md) for windowed counters, consistent sampl
 
 **Async mode (default).** Each destination has a bounded ring buffer. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
 
-**Blocking mode** (`:blocking t` on `make-logger`, or per destination in `make-tee` / `tee`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes.
+**Blocking mode** (`:blocking t` on `make-logger`, or per destination in `make-tee` / `tee`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes. Each log call can stall its thread for up to `:block-timeout` seconds while the writer is stuck, so do not log in blocking mode from code that holds a lock others need, or from a library that must never wait on its log destination; in those places keep the default drop-on-full mode.
 
 **Async drop handling:**
 
@@ -1091,6 +1110,16 @@ See [Benchmarks](#benchmarks) to measure on your hardware.
 | `bark:*max-pretty-length*` | `20` | Bound as `*print-length*` in pretty-formatter (nil = unlimited) |
 | `bark:*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output (nil = unlimited) |
 | `bark:*max-pretty-stack-frames*` | `20` | Max stack frames in pretty condition output (nil = unlimited) |
+
+## Thread-local state
+
+cl-bark keeps a per-thread cached string stream for formatting in `bark::*format-stream*`, and it makes the binding
+for every thread by pushing it onto `bt:*default-special-bindings*` when the system is loaded. As a result, threads
+created through bordeaux-threads after the load, including those of other libraries, get that (nil) binding. This is
+kept on purpose: without a per-thread binding the cache would be one global slot shared by all threads, every
+formatting call would compete for it with a compare-and-swap, and under contention callers would allocate a fresh
+stream, which breaks the allocation-free hot path. Threads started by other means (for example `sb-thread:make-thread`
+directly) have no binding and share the global slot, which is correct but slower.
 
 ## Dependencies
 

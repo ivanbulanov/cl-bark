@@ -43,7 +43,7 @@
    #:make-logger #:make-child #:set-level #:level-enabled-p
    #:make-windowed-counter #:make-level-sampler #:set-level-sampling
    #:make-consistent-sampler #:set-consistent
-   #:flush #:stop #:*exit-flush-timeout*
+   #:flush #:stop #:dropped-count #:*exit-flush-timeout*
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
    ;; buffer

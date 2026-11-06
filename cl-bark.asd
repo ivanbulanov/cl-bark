@@ -48,7 +48,8 @@
   ((:module "tests"
     :components
     ((:file "tests")
-     (:file "blocking-tests")))))
+     (:file "blocking-tests")
+     (:file "save-restore-tests")))))
 
 (asdf:defsystem #:cl-bark/concurrency-tests
   :depends-on (#:cl-bark #:fiveam #:bordeaux-threads)
