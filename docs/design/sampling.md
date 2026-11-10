@@ -127,7 +127,7 @@ Configure samplers on the root before creating children. `set-level-sampler` tak
 keyword level (`level-from-keyword`), the fixnum being the index. If a vector exists it writes in
 place with one `setf aref`. If none exists it
 allocates one and installs it with `atomics:cas` from nil; a CAS loser loops and writes into the
-winner's vector, so no update is lost (`test-set-level-sampling-cas-race`). The vector is never
+winner's vector, so no update is lost (`test-set-level-sampler-cas-race`). The vector is never
 replaced once it exists, which is what lets children share it. Concurrent writers to the same
 index are last-writer-wins. A replacement counter restarts that level's window. `set-consistent`
 is a single slot write; nil removes the sampler.

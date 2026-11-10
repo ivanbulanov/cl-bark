@@ -164,7 +164,7 @@ which destination failed.
 
 No user calls it, so the rename is free now. The pair becomes `make-level-sampler` and `set-level-sampler`.
 
-- [ ] Rename, with a Migration line.
+- [x] Rename, with a Changed line; the Migration subsection (1.1) lists it.
 
 ## Phase 3. Output size control (application)
 

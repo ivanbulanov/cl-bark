@@ -20,7 +20,7 @@
   (:use #:cl)
   (:import-from #:bark
    #:make-logger #:make-windowed-counter #:make-level-sampler
-   #:set-level-sampling #:logger-debug-fn
+   #:set-level-sampler #:logger-debug-fn
    #:make-json-formatter #:make-child))
 
 (in-package #:bark-concurrency-tests)
@@ -78,8 +78,8 @@
 
 ;;; --- set-level-sampling CAS race ---
 
-(5am:test test-set-level-sampling-cas-race
-  "Concurrent set-level-sampling from nil: exactly one vector allocated, all counters present."
+(5am:test test-set-level-sampler-cas-race
+  "Concurrent set-level-sampler from nil: exactly one vector allocated, all counters present."
   (let ((lgr (make-logger :context '(:name "cas") :level :debug))
         (counters (make-array 7 :initial-element nil)))
     ;; 6 threads, one per level (trace=1 through fatal=6)
@@ -90,7 +90,7 @@
             (setf (aref counters level-index) wc)
             (push (bt:make-thread
                    (lambda ()
-                     (set-level-sampling lgr level-index wc))
+                     (set-level-sampler lgr level-index wc))
                    :name (format nil "cas-~d" tid))
                   thread-list))))
       (dolist (th thread-list) (bt:join-thread th)))

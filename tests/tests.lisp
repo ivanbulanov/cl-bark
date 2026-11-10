@@ -63,7 +63,7 @@
    #:logger-field-transform #:compose-field-transforms
    ;; Public API (non-conflicting)
    #:make-logger #:make-child #:set-level #:stop
-   #:set-level-sampling #:set-consistent
+   #:set-level-sampler #:set-consistent
    #:make-windowed-counter #:make-level-sampler #:make-consistent-sampler
    #:windowed-counter-window-ticks
    #:json-formatter #:logfmt-formatter #:pretty-formatter
@@ -914,7 +914,7 @@ level signals bark-configuration-error."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (let* ((lgr (make-logger :context '(:name "wr") :level :info :output collector))
            (wc (make-windowed-counter :initial 2 :thereafter 0 :window-seconds 1)))
-      (set-level-sampling lgr :info wc)
+      (set-level-sampler lgr :info wc)
       (let ((fn (logger-info-fn lgr)))
         (dotimes (i 5) (funcall fn lgr "m"))
         (5am:is (= 2 (length (funcall results-fn))))
@@ -1069,9 +1069,9 @@ level signals bark-configuration-error."
          (ch (make-child lgr :context '(:component "child"))))
     ;; Same vector object
     (5am:is (eq (bark::logger-level-sampler lgr) (bark::logger-level-sampler ch)))
-    ;; In-place mutation via set-level-sampling on parent visible to child
+    ;; In-place mutation via set-level-sampler on parent visible to child
     (let ((new-wc (make-windowed-counter :initial 10 :thereafter 50)))
-      (set-level-sampling lgr :debug new-wc)
+      (set-level-sampler lgr :debug new-wc)
       (5am:is (eq new-wc (aref (bark::logger-level-sampler ch) 2))))))
 
 (5am:test test-child-snapshots-consistent
@@ -1086,8 +1086,8 @@ level signals bark-configuration-error."
     ;; Child still has original
     (5am:is (eq cs (bark::logger-consistent ch)))))
 
-(5am:test test-set-level-sampling-runtime-swap
-  "Replacing sampler via set-level-sampling takes effect on next log call."
+(5am:test test-set-level-sampler-runtime-swap
+  "Replacing sampler via set-level-sampler takes effect on next log call."
   (multiple-value-bind (collector results-fn) (make-list-collector)
     (let ((lgr (make-logger :context '(:name "swap") :level :debug :output collector
                             :level-sampler (make-level-sampler
@@ -1099,7 +1099,7 @@ level signals bark-configuration-error."
         (dotimes (i 10) (funcall fn lgr "dropped")))
       (5am:is (= 0 (length (funcall results-fn))))
       ;; Swap to permissive counter
-      (set-level-sampling lgr :debug
+      (set-level-sampler lgr :debug
                           (make-windowed-counter :initial 1000 :thereafter 0
                                                 :window-seconds 60))
       (let ((fn (logger-debug-fn lgr)))

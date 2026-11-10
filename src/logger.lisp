@@ -454,7 +454,7 @@ Signals BARK-CONFIGURATION-ERROR if KEY-FN is not a function or RATE < 1."
         (when (atomics:cas (logger-level-sampler logger) nil new-ls)
           (return new-ls))))))
 
-(defun set-level-sampling (logger level windowed-counter)
+(defun set-level-sampler (logger level windowed-counter)
   "Set sampling for LEVEL to WINDOWED-COUNTER on LOGGER (nil to remove).
    The level-sampler vector is shared between a logger and its children, so the
    change applies to the whole family. Thread-safe."
@@ -485,7 +485,7 @@ FIELD-TRANSFORM (function or NIL): composes with parent's transform (parent runs
   first, then child). Applied to CONTEXT fields at creation time.
 
 Inherits the parent's formatter and output. The level-sampler vector is SHARED
-with the parent: set-level-sampling on either affects both. The consistent
+with the parent: set-level-sampler on either affects both. The consistent
 sampler is copied by reference at creation; set-consistent on the parent later
 does not affect the child."
   (let* ((parent (or (logger-source parent) parent))
