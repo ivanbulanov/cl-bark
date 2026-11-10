@@ -54,7 +54,8 @@ Which concerns stay in the library:
 | No logging while a lock is held | Library | Concurrency hygiene. |
 
 For cl-bark this means: sql-zealot needs only 2.1. The other items in phases 2 and 3 are justified by the
-application.
+application. Since 2026-11-11 sql-zealot's adapter is the only code of it that loads cl-bark; it calls `emit`,
+`level-enabled-p` and `*logger*`, and its tests also `make-logger`, `set-level` and `with-log-buffer`.
 
 ## Phase 1. Release and distribution
 
@@ -99,6 +100,9 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
   review also found that the key-name pass of `mask-log-field` cannot fire, because no catalogue field name contains
   a secret word; confirm and delete it.
   Done in sql-zealot 4ba8f80: section L of `lisp/ROADMAP.md`, items L1 to L7 open, L8 (the key-name pass) done.
+  L1 to L7 done 2026-11-11: the client takes `:log-sink` and `:log-level` and no longer depends on cl-bark; its
+  fallback sink writes JSON lines to stderr; the adapter system `sql-zealot-postgres/cl-bark` uses `bark:emit` and
+  `bark:level-enabled-p` on `bark:*logger*` and has its own tests, which cover a `with-log-buffer` scope.
   - State event for `zl.pool.connect-failed`: log when failures start, again every 60 s with the count while they
     last, again when the error class changes, and on recovery at the same level as the failure (at `:debug` the
     recovery would be invisible at the default threshold). `zl.pool.timeout` has no state edge under load and stays
@@ -335,7 +339,7 @@ owner is ready. Nothing in phases 1 to 5 depends on them.
 | sql-zealot | Cannot tell which cl-bark is loaded | Export fixed; version 1.2 |
 | sql-zealot F109 | Not in Quicklisp | Postponed; 1.3 |
 | sql-zealot | Deploy scripts read writer internals | 2.3 |
-| sql-zealot | Optional fields through `with-context` branches | 2.1 |
+| sql-zealot | Optional fields through `with-context` branches | 2.1; gone with its adapter (1.4) |
 | application | Calls `bark::logger-info-fn` | 2.1 |
 | application | Lazy stack frames, `bark::%make-captured-error` | 2.2 |
 | application | Process-wide serialization limits | 3.1 |
