@@ -134,11 +134,12 @@ dissect reads the arguments and locals of every frame at `(dissect:stack)`; file
 prints only call, file and line, yet a captured error retains every frame's arguments, which can be secrets, for as
 long as it lives.
 
-- [ ] `(capture condition &key (max-frames *capture-max-frames*))`, default 50. Each frame becomes plain data: a call
+- [x] `(capture condition &key (max-frames *capture-max-frames*))`, default 50. Each frame becomes plain data: a call
   string, a file namestring or NIL, a line or NIL. No dissect object is kept. A frame that fails to print becomes
   `"#<unprintable frame>"`. Formatter limits cut further. Breaking: `captured-error-stack` changes element type.
-- [ ] Fix `internal-frame-p`: it drops leading frames whose printed call contains "BARK", so a user function named
-  `EMBARK` at the top of the stack is dropped. Compare the frame function's package instead.
+  Each frame is a plist `(:call :file :line)`. (98b91bb)
+- [x] Fix `internal-frame-p`: it drops leading frames whose printed call contains "BARK", so a user function named
+  `EMBARK` at the top of the stack is dropped. Compare the frame function's package instead. (98b91bb)
 - Later, only on evidence: walk with `sb-debug:map-backtrace` and stop at `max-frames`, which bounds the walk and reads
   no arguments.
 
