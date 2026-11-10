@@ -3804,3 +3804,20 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
   "Empty string produces two quotes."
   (5am:is (string= "\"\""
                     (with-output-to-string (s) (bark::write-json-string s "")))))
+
+;;; --- Public API ---
+
+(5am:test test-every-export-has-a-docstring
+  "Every symbol BARK exports names a definition, and each of its definitions has a docstring."
+  (let ((missing '()))
+    (do-external-symbols (s "BARK")
+      (let ((kinds (append (when (fboundp s) '(function))
+                           (when (boundp s) '(variable))
+                           (when (or (find-class s nil) (sb-ext:valid-type-specifier-p s))
+                             '(type)))))
+        (if (null kinds)
+            (push (list s :defines-nothing) missing)
+            (dolist (kind kinds)
+              (unless (documentation s kind)
+                (push (list s kind) missing))))))
+    (5am:is (null missing) "Exports without a docstring: ~S" missing)))
