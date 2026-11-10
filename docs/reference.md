@@ -23,7 +23,7 @@ lists the special variables and gives one line for each exported symbol, with th
 
 | Symbols | Page |
 |---------|------|
-| `trace` `debug` `info` `warn` `error` `fatal`, `logger`, `logger-p`, `*logger*` | [README](../README.md) |
+| `trace` `debug` `info` `warn` `error` `fatal`, `emit`, `logger`, `logger-p`, `*logger*` | [README](../README.md), [lifecycle.md](lifecycle.md#logging-with-fields-built-at-run-time) |
 | `+trace+` `+debug+` `+info+` `+warn+` `+error+` `+fatal+` (level constants), `level-name` (level number to name string) | [README](../README.md) |
 | `make-logger`, `make-child`, `set-level`, `current-level`, `level-enabled-p`, `flush`, `stop`, `dropped-count`, `default-on-drop` | [lifecycle.md](lifecycle.md) |
 | `bark-error`, `bark-configuration-error`, `bark-lifecycle-error`, `bark-async-stopped`, `bark-child-operation-error` | [lifecycle.md](lifecycle.md) |

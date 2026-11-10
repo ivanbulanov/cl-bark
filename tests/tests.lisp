@@ -3828,6 +3828,68 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
 
 ;;; --- Public API ---
 
+(5am:test test-emit-writes-message-and-run-time-fields
+  "emit logs a message with a field plist built at run time; LEVEL may be a keyword or a level constant."
+  (let* ((first-out (make-string-output-stream))
+         (second-out (make-string-output-stream))
+         (fields (list :user "alice" :n 3)))
+    (5am:is (null (multiple-value-list
+                   (bark:emit (make-logger :level :info :formatter (make-json-formatter)
+                                           :output (sync-output first-out))
+                              :info "login" fields))))
+    (bark:emit (make-logger :level :info :formatter (make-json-formatter)
+                            :output (sync-output second-out))
+               bark:+warn+ 42 '())
+    (let ((first-line (yason:parse (get-output-stream-string first-out)))
+          (second-line (yason:parse (get-output-stream-string second-out))))
+      (5am:is (string= "login" (gethash "msg" first-line)))
+      (5am:is (string= "alice" (gethash "user" first-line)))
+      (5am:is (= 3 (gethash "n" first-line)))
+      (5am:is (string= "warn" (gethash "level" second-line)))
+      (5am:is (string= "42" (gethash "msg" second-line))))))
+
+(5am:test test-emit-respects-the-level-and-a-nil-logger
+  "emit drops a line below the level, does nothing for a nil logger, and rejects an unknown level."
+  (let* ((out (make-string-output-stream))
+         (lgr (make-logger :level :info :output (sync-output out))))
+    (bark:emit lgr :debug "hidden" '(:a 1))
+    (5am:is (string= "" (get-output-stream-string out)))
+    (5am:is (null (multiple-value-list (bark:emit nil :info "nobody" '(:a 1)))))
+    (5am:signals bark:bark-configuration-error (bark:emit lgr :verbose "x" '()))
+    (5am:signals bark:bark-configuration-error (bark:emit nil :verbose "x" '()))
+    (5am:signals bark:bark-configuration-error (bark:emit lgr 99 "x" '()))))
+
+(5am:test test-emit-applies-samplers-and-the-field-transform
+  "emit goes through the level functions, so the windowed sampler and the field transform apply."
+  (let* ((out (make-string-output-stream))
+         (lgr (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)
+                           :field-transform (lambda (key value)
+                                              (if (eq key :secret) (values nil nil) value))
+                           :level-sampler (make-level-sampler
+                                           :warn (make-windowed-counter :initial 0 :thereafter 0
+                                                                        :window-seconds 60)))))
+    (bark:emit lgr :warn "sampled away" '())
+    (bark:emit lgr :info "kept" (list :user "alice" :secret "pw"))
+    (let* ((text (get-output-stream-string out))
+           (json (yason:parse text)))
+      (5am:is-false (search "sampled away" text))
+      (5am:is (string= "alice" (gethash "user" json)))
+      (5am:is (null (nth-value 1 (gethash "secret" json)))))))
+
+(5am:test test-emit-joins-a-log-buffer-through-the-special
+  "Inside with-log-buffer, emit on bark:*logger* is buffered; emit on the root logger is not."
+  (let* ((out (make-string-output-stream))
+         (root (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out)))
+         (bark:*logger* root))
+    (ignore-errors
+      (bark:with-log-buffer (bark:*logger*)
+        (bark:emit bark:*logger* :debug "buffered trail" '(:step 1))
+        (bark:emit root :debug "direct debug" '())
+        (cl:error "boom")))
+    (let ((text (get-output-stream-string out)))
+      (5am:is-true (search "buffered trail" text))
+      (5am:is-false (search "direct debug" text)))))
+
 (5am:test test-every-export-has-a-docstring
   "Every symbol BARK exports names a definition, and each of its definitions has a docstring."
   (let ((missing '()))

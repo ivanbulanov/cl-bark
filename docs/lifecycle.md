@@ -61,6 +61,23 @@ Every async output is drained automatically when the image exits, waiting at mos
 (bark:dropped-count bark:*logger*)
 ```
 
+## Logging with fields built at run time
+
+The logging macros take their fields as literal arguments. When the field set is built at run time, use `emit`, which takes the fields as one plist:
+
+```lisp
+(bark:emit logger level message fields)
+
+(bark:emit bark:*logger* :warn "slow query"
+           (append (list :ms elapsed) (when user (list :user user))))
+```
+
+- The line goes through the logger's level functions, so the level threshold, the samplers and the field transform apply as for the macros.
+- A nil `logger` does nothing. `level` is a keyword or a level constant; an unknown one signals `bark-configuration-error`, also with a nil logger.
+- `message` may be NIL, a string or any other object, which is printed with `princ`.
+- Inside `with-log-buffer`, pass `bark:*logger*` (evaluated at call time) to join the buffer. Any other logger, the root logger included, writes at once, and its samplers apply.
+- `*compile-time-min-level*` does not apply, and the fields are evaluated before the call. Guard expensive fields with `level-enabled-p`.
+
 ## Saving a core with `save-lisp-and-die`
 
 SBCL refuses to save a core while other threads run, and a writer thread would not survive the save anyway. cl-bark installs a function on `sb-ext:*save-hooks*` that drains and joins the writer thread of every running async output, and a function on `sb-ext:*init-hooks*` that starts the writer threads again in the restored image, so no call is needed from the application and no lines are lost.
@@ -92,7 +109,7 @@ Conditions are signaled at configuration time or on lifecycle misuse. Logging ma
 
 | Source | Condition | Restart | When |
 |--------|-----------|---------|------|
-| `make-logger`, `set-level`, `level-enabled-p`, `set-level-sampler`, `make-tee` | `bark-configuration-error` | none | Unknown level keyword or out-of-range level number |
+| `make-logger`, `set-level`, `level-enabled-p`, `emit`, `set-level-sampler`, `make-tee` | `bark-configuration-error` | none | Unknown level keyword or out-of-range level number |
 | `make-json-formatter`, `make-logfmt-formatter`, `make-pretty-formatter` | `bark-configuration-error` | none | Unknown `:timestamp` or `:level-format` value |
 | `make-formatter` | `bark-configuration-error` | none | `:format-fn` missing |
 | `make-consistent-sampler` | `bark-configuration-error` | none | `:key-fn` is not a function |

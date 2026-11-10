@@ -100,6 +100,12 @@ To guard expensive argument computation, use `level-enabled-p`. It checks the le
   (bark:debug "state dump" :snapshot (expensive-serialize state)))
 ```
 
+When the fields are only known at run time, `emit` takes them as a list. It goes through the same level check, samplers and field transform as the macros, but the caller has already evaluated the fields, and `*compile-time-min-level*` does not apply:
+
+```lisp
+(bark:emit bark:*logger* :info "request done" (list* :status status extra-fields))
+```
+
 ### Creating and stopping loggers
 
 ```lisp

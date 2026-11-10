@@ -790,3 +790,29 @@ no-op — logging macros never signal.
 
 Binding *compile-time-min-level* at macroexpansion time removes calls below
 that level from the compiled code entirely.")
+
+(defun emit (logger level message fields)
+  "Log MESSAGE with FIELDS, a plist built at run time, at LEVEL on LOGGER.
+The function form of the logging macros, for a field set that is only known at
+run time: (bark:emit logger :info \"user login\" (list :user id :ip ip)).
+
+LEVEL is a keyword (:trace through :fatal) or a level constant; an unknown one
+signals BARK-CONFIGURATION-ERROR, also when LOGGER is nil. LOGGER nil does
+nothing. MESSAGE may be NIL, a string, or any object, which is printed with
+PRINC.
+
+The line goes through LOGGER's level functions, so the level threshold, the
+samplers and the field transform apply as for the macros, and a buffer logger
+collects it. Inside WITH-LOG-BUFFER, pass BARK:*LOGGER* to join the buffer.
+*COMPILE-TIME-MIN-LEVEL* does not apply, and the caller has already evaluated
+FIELDS: guard expensive ones with LEVEL-ENABLED-P. Returns no values."
+  (let ((level-val (level-value level)))
+    (when (and logger (>= level-val (logger-level logger)))
+      (apply (cond ((= level-val +trace+) (logger-trace-fn logger))
+                   ((= level-val +debug+) (logger-debug-fn logger))
+                   ((= level-val +info+)  (logger-info-fn logger))
+                   ((= level-val +warn+)  (logger-warn-fn logger))
+                   ((= level-val +error+) (logger-error-fn logger))
+                   (t                     (logger-fatal-fn logger)))
+             logger message fields)))
+  (values))
