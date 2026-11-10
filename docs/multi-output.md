@@ -154,6 +154,24 @@ Dispatch on condition type for different recovery strategies:
               (t nil)))                         ; unknown, give up
 ```
 
+## Log rotation
+
+cl-bark does not rotate files and has no call that reopens a stream on a signal. Two setups work without one:
+
+- Under systemd, log to `*error-output*` (or `*standard-output*`) and let journald keep the lines; it stores and rotates them, and `journalctl -o cat` prints the JSON lines as written. There is no file to rotate.
+- For a file, use logrotate with `copytruncate`, and open the stream with `:if-exists :append`. logrotate copies the file and truncates it in place; the stream keeps its file descriptor, and because SBCL opens an `:append` stream with `O_APPEND`, the next write lands at the new end of the file. A stream opened with `:if-exists :supersede` or `:overwrite` keeps its old offset instead and leaves a run of NUL bytes at the start of the truncated file. Lines written between the copy and the truncation are lost; that is the cost of `copytruncate`.
+
+```
+/var/log/app.jsonl {
+    daily
+    rotate 7
+    compress
+    copytruncate
+}
+```
+
+logrotate's default (rename the file, then create a new one) does not work alone: the stream keeps writing to the renamed file. To use it, make a new logger on a new stream after the rename, store it where the old one was, then `bark:stop` the old logger and close its stream. Children of the old logger stay on the old output, so make them again from the new one.
+
 ## Diagrams
 
 ### Mirror with different formatters

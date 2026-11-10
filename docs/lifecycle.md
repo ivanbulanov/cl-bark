@@ -85,6 +85,33 @@ Every async output is drained automatically when the image exits, waiting at mos
      (zerop (bark:dropped-count bark:*logger*)))
 ```
 
+## Which calls block or take a lock
+
+A logging call formats its line on the calling thread, then hands it to the output. What the hand-off costs depends on the output:
+
+| Output | What the logging call does | Lock taken | How long it can wait |
+|---|---|---|---|
+| Stream, async, drop mode (the default) | Puts the line in the ring buffer with a compare-and-swap; a full buffer drops it | None for the line. When the writer thread sleeps, waking it signals a semaphore, which holds that semaphore's internal mutex for a moment | Does not wait |
+| Stream, async, `:blocking t` | The same; when the buffer is full, waits for space | The output's space lock, while it waits | Up to `:block-timeout` seconds; with `:block-timeout nil`, until there is space or the output stops |
+| Stream with `:async nil` | Writes the line and forces it out on the calling thread | The per-stream lock, which the writer threads of every output on that stream also take for each batch | For the write itself (a full pipe or a stalled disk holds it there), plus any wait for the lock while another thread writes to the same stream. `:block-timeout` does not apply |
+| Async stream after `bark:stop` | As with `:async nil` | The per-stream lock | As with `:async nil` |
+| Async stream whose writer failed | Counts the line as dropped | None | Does not wait |
+| Function | Calls the function on the calling thread | Whatever the function takes | Whatever the function does |
+
+A tee applies the row of each destination in turn. User code also runs on the calling thread before the hand-off: a `:field-transform`, a custom formatter, a tee `:filter`, the `key-fn` of a consistent sampler, and `print-object` of field values the formatter prints; with `:async nil`, the `:on-error` handler too.
+
+`bark:flush` waits up to its `:timeout` (default 5 seconds) for each async output. `bark:stop` waits up to its `:timeout` for the drain and up to the same time again for the writer thread to exit, then writes what is left under the per-stream lock. The exit drain waits up to `bark:*exit-flush-timeout*` for each output.
+
+GC finalizers: SBCL runs finalizers in a thread of their own, so a finalizer may log like any other thread. A blocking or `:async nil` output makes the finalizers queued behind it wait as well; a drop-mode output does not.
+
+Interrupts disabled (inside `sb-sys:without-interrupts`, or in code that an interrupt runs, such as a handler of `sb-thread:interrupt-thread` or `sb-ext:with-timeout`):
+
+- Drop mode is safe. The push itself runs with interrupts disabled, so an interrupt cannot leave a half-claimed slot behind.
+- In blocking mode the wait still ends after `:block-timeout`, but nothing can interrupt it before then; with `:block-timeout nil` and a writer that never catches up, it never ends.
+- With `:async nil` (or after `bark:stop`) the write cannot be interrupted either. An interrupt that logs to such an output while its thread is writing to the same stream finds the per-stream lock held by its own thread. SBCL then signals a recursive lock error, which cl-bark treats as a stream error: an `:async nil` output calls `:on-error`, or without one is marked failed; after `bark:stop` the line is counted as dropped. Log from interrupt handlers through a drop-mode async output.
+
+Do not log inside `sb-sys:without-gcing`: formatting conses, and a thread that waits there for a lock can deadlock with the thread that holds it and waits for the GC.
+
 ## Logging with fields built at run time
 
 The logging macros take their fields as literal arguments. When the field set is built at run time, use `emit`, which takes the fields as one plist:

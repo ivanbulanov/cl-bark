@@ -46,6 +46,20 @@ dynamic context:  request-id=req-123, tenant=acme     (per request)
 per-call fields:  query="SELECT ...", duration-ms=42   (this event)
 ```
 
+### What a child copies and what it shares
+
+| Setting | At `bark:make-child` | Later change on the parent | Later change on the child |
+|---|---|---|---|
+| Level | Copied from the parent, unless `:level` gives one (lower or higher than the parent's) | `bark:set-level` does not reach existing children | `bark:set-level` changes the child only, and the children made from it afterwards |
+| Level samplers (the vector of windowed counters) | Shared. A parent that has none gets an empty vector first, so the two always share one | `bark:set-level-sampler` applies to every child, made before or after | `bark:set-level-sampler` applies to the parent and to all its other children as well |
+| Windowed counter budget | Shared with the vector: one count per level for the whole family, so a noisy child spends the budget of all | | |
+| Consistent sampler | Copied by reference | `bark:set-consistent` does not reach existing children | `bark:set-consistent` changes the child only |
+| Static context | The parent's context plus `:context`; a key in both takes the child's value. Serialized once | No call changes it | No call changes it |
+| Field transform | The parent's, then the child's `:field-transform`, composed | No call changes it | No call changes it |
+| Formatter and output | Shared | Replacing the root logger (a new `bark:make-logger`) leaves existing children on the old output | `bark:stop` on a child signals `bark-child-operation-error`; stop the root |
+
+A child of a child works the same way: it copies the level of its direct parent and shares the one sampler vector of the family. Inside `with-log-buffer`, a child made from `bark:*logger*` derives from the logger being buffered, not from the buffer, so its lines are written at once and not buffered (see [request-scoped buffering](request-scoped-buffering.md)).
+
 ### Key shadowing
 
 Nested `with-context` forms shadow outer keys with the same name, like CL `let`:

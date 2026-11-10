@@ -168,7 +168,7 @@ Startup logs and health checks lack `:request-id`, so they fall through to the w
 
 ### Microservice with Component Loggers
 
-`make-child` snapshots both sampling configurations at creation time. The child shares the parent's level-sampler vector and consistent sampler object as they were when the child was created:
+`make-child` shares the parent's level-sampler vector and copies its consistent sampler by reference:
 
 ```lisp
 ;; Root logger with sampling
@@ -195,7 +195,7 @@ Startup logs and health checks lack `:request-id`, so they fall through to the w
   (bark:debug db-log "query executed" :sql "SELECT ..."))
 ```
 
-Because the snapshot is taken at creation, a later `set-consistent` on the parent does not reach existing children. `set-level-sampler` on the parent reaches existing children only if the parent already had a level-sampler when the child was created (the vector is shared); if the parent had none, the call installs a new vector that existing children do not see. Windowed counters are shared objects, so children created from the same parent draw from the same counter for a given level.
+A later `set-consistent` on the parent does not reach existing children. `set-level-sampler` on the parent, or on any child, reaches the whole family: when the parent has no level-sampler vector yet, `make-child` gives it an empty one, and the parent and every child share that vector. Windowed counters are shared objects, so children created from the same parent draw from the same counter for a given level. [What a child copies and what it shares](context.md#what-a-child-copies-and-what-it-shares) has the full table.
 
 ## Caveats
 
