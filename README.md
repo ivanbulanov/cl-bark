@@ -126,8 +126,9 @@ The `:output` argument decides how a logger writes:
 | A function | Called synchronously with each line; no thread |
 | A tee from `bark:tee` or `bark:make-tee` | One writer per destination ([multi-output](docs/multi-output.md)) |
 | `nil` | `*error-output*`, as a stream |
+| A stream or `nil` with `:async nil` | Written and forced out on the caller's thread, under the stream lock; no thread, no buffer. A logged line survives a crash or SIGKILL ([lifecycle](docs/lifecycle.md#synchronous-stream-output)) |
 
-Async outputs are drained at image exit, and writer threads are restarted after `save-lisp-and-die`. A child shares its parent's output and must not be stopped; stop the root logger. The signatures, `bark:dropped-count` and `bark:healthy-p`, timeouts and conditions are in [lifecycle.md](docs/lifecycle.md).
+Async outputs are drained at image exit (not by `(sb-ext:exit :abort t)`: call `bark:flush` first), and writer threads are restarted after `save-lisp-and-die`. A child shares its parent's output and must not be stopped; stop the root logger. The signatures, `bark:dropped-count` and `bark:healthy-p`, timeouts and conditions are in [lifecycle.md](docs/lifecycle.md).
 
 ### Context
 

@@ -71,7 +71,8 @@
 ;;; --- Async output ---
 
 (defstruct (async-output (:constructor %make-async-output))
-  "Writer thread + ring buffer for async log delivery."
+  "Writer thread + ring buffer for async log delivery. An output made with
+   :async nil has neither thread nor writer: its ring only counts dropped lines."
   (ring              nil   :type (or null ring-buffer))
   (thread            nil   :type (or null bt:thread))
   (stream            nil   :type (or null stream))
@@ -80,7 +81,9 @@
   ;; :stopped  — clean stop; later lines are written synchronously by the caller.
   ;; :failed   — the writer died (unrecoverable stream error or thread death);
   ;;             later lines are counted as dropped.
-  (state             :running :type (member :running :stopping :stopped :failed))
+  ;; :sync     — made with :async nil: no writer; each line is written and
+  ;;             forced by the caller under the stream lock.
+  (state             :running :type (member :running :stopping :stopped :failed :sync))
   ;; Set by stop; the writer loop exits when it sees it.
   (quit              nil   :type boolean)
   ;; True while the writer is (about to be) waiting on NOTIFY. Producers only
@@ -141,9 +144,10 @@
   "Seconds the exit hook waits per async output for its writer to drain and exit.")
 
 (defun live-output-p (weak-pointer)
-  "True when WEAK-POINTER still points at an async output that is not stopped."
+  "True when WEAK-POINTER still points at an async output that is not stopped:
+   one whose writer runs, or one made with :async nil."
   (let ((ao (sb-ext:weak-pointer-value weak-pointer)))
-    (and ao (member (async-output-state ao) '(:running :stopping)) t)))
+    (and ao (member (async-output-state ao) '(:running :stopping :sync)) t)))
 
 (defun register-live-output (async-output)
   "Track ASYNC-OUTPUT for the exit hook, pruning entries that are gone or stopped."
@@ -302,19 +306,84 @@ The output is drained automatically when the image exits."
       (unregister-live-output async-output)
       clean)))
 
+(declaim (ftype (function (list) (values (or null string) &optional)) sync-option-conflicts))
+(defun sync-option-conflicts (options)
+  "OPTIONS is a plist of the queue keywords (:capacity, :on-drop, :blocking,
+   :block-timeout, :on-block-timeout) and whether each was given. Return the
+   message for BARK-CONFIGURATION-ERROR when any was given together with
+   :async nil, or NIL when none was."
+  (let ((given (loop for (key value) on options by #'cddr
+                     when value collect key)))
+    (when given
+      (format nil "Cannot specify ~{~S~^, ~} with :async nil: a synchronous output ~
+                   has no queue and no writer thread." given))))
+
+(declaim (ftype (function (t &key (:on-error (or null function))) (values async-output &optional)) make-sync-output))
+(defun make-sync-output (stream &key on-error)
+  "Create an output for make-logger :async nil: no writer thread and no queue.
+Each line is written on the caller's thread under the stream lock and forced
+out at once, so it reaches the stream even if the process is killed right
+after. ON-ERROR is called on the caller's thread with the stream error; return
+a replacement stream to write the line there and continue, or NIL to mark the
+output failed. The output is tracked so that a saved core reopens its stream."
+  (let ((ao (%make-async-output
+             :ring (make-ring-buffer 16)
+             :stream stream
+             :on-error on-error
+             :state :sync)))
+    (register-live-output ao)
+    ao))
+
+(declaim (ftype (function (t string) (values (or null condition) &optional)) write-line-locked))
+(defun write-line-locked (stream line)
+  "Write LINE and a newline to STREAM under its stream lock and force it out.
+   Return NIL, or the error that writing signaled."
+  (handler-case
+      (progn
+        (bt:with-lock-held ((stream-lock stream))
+          (write-string line stream)
+          (terpri stream)
+          (force-output stream))
+        nil)
+    (cl:error (condition) condition)))
+
+(declaim (ftype (function (async-output string condition) (values &optional)) handle-sync-stream-error))
+(defun handle-sync-stream-error (async-output line condition)
+  "Handle a stream error of an output made with :async nil. The first thread to
+   see the error marks the output failed and calls the on-error hook (as the
+   writer thread does); when the hook returns a replacement stream, LINE is
+   written there once more and the output goes back to :sync. Lines that arrive
+   meanwhile, also from the hook itself, are counted as dropped, and so is LINE
+   when it cannot be written."
+  (let ((ring (async-output-ring async-output)))
+    (if (and (atomics:cas (async-output-state async-output) :sync :failed)
+             (handle-stream-error async-output condition))
+        (let ((retry-error (write-line-locked (async-output-stream async-output) line)))
+          (cond
+            (retry-error
+             (%report "bark: replacement stream failed too: ~a~%" retry-error)
+             (atomics:atomic-incf (ring-buffer-dropped ring)))
+            (t
+             (setf (async-output-state async-output) :sync))))
+        (atomics:atomic-incf (ring-buffer-dropped ring))))
+  (values))
+
+(declaim (ftype (function (async-output string) (values &optional)) write-sync-line))
+(defun write-sync-line (async-output line)
+  "Write LINE for an output made with :async nil, on the caller's thread.
+   A stream error goes to HANDLE-SYNC-STREAM-ERROR."
+  (let ((condition (write-line-locked (async-output-stream async-output) line)))
+    (when condition
+      (handle-sync-stream-error async-output line condition)))
+  (values))
+
 (declaim (ftype (function (async-output string) (values &optional)) write-line-synchronously))
 
 (defun write-line-synchronously (async-output line)
   "After a clean stop the writer is gone: write LINE on the caller's thread,
    under the stream lock. Never signals; a failing stream counts the line as dropped."
-  (let ((stream (async-output-stream async-output)))
-    (handler-case
-        (bt:with-lock-held ((stream-lock stream))
-          (write-string line stream)
-          (terpri stream)
-          (force-output stream))
-      (cl:error ()
-        (atomics:atomic-incf (ring-buffer-dropped (async-output-ring async-output))))))
+  (when (write-line-locked (async-output-stream async-output) line)
+    (atomics:atomic-incf (ring-buffer-dropped (async-output-ring async-output))))
   (values))
 
 ;;; --- Writer thread ---
@@ -401,7 +470,8 @@ The output is drained automatically when the image exits."
           (values written e))))))
 
 (defun handle-stream-error (async-output error)
-  "Handle a stream write ERROR on the writer thread. Calls the on-error hook,
+  "Handle a stream write ERROR on the writer thread, or on the caller's thread
+   for an output made with :async nil. Calls the on-error hook,
    which may return a replacement stream. Returns T when writing can continue,
    NIL when the writer must stop."
   (let ((on-error (async-output-on-error async-output)))
@@ -417,7 +487,7 @@ The output is drained automatically when the image exits."
             (%report "bark: on-error handler failed: ~a (original: ~a)~%" handler-error error)
             nil))
         (progn
-          (%report "bark: writer stopped on stream error: ~a~%" error)
+          (%report "bark: output stopped on stream error: ~a~%" error)
           nil))))
 
 (defun signal-ready-acks (async-output written-through)
@@ -564,33 +634,42 @@ The output is drained automatically when the image exits."
   "Save hook (sb-ext:*save-hooks*): stop the writer thread of every running
    async output, draining its pending lines, so that save-lisp-and-die is not
    refused for lack of a single thread. Each output stopped here is remembered
-   and restarted by RESTART-SAVED-OUTPUTS in the restored image. Outputs that
-   are already stopped or failed are left alone. Idempotent."
+   and restarted by RESTART-SAVED-OUTPUTS in the restored image. An output made
+   with :async nil has no thread; it is remembered too, so that its stream is
+   looked up again. Outputs that are already stopped or failed are left alone.
+   Idempotent."
   (bt:with-lock-held (*lifecycle-lock*)
     (dolist (wp (bt:with-lock-held (*live-outputs-lock*) (copy-list *live-outputs*)))
       (let ((ao (sb-ext:weak-pointer-value wp)))
-        (when (and ao (async-output-running ao))
+        (when (and ao (member (async-output-state ao) '(:running :sync)))
           (setf (async-output-restart-key ao)
                 (restart-key (async-output-stream ao)))
-          (if (ignore-errors (stop-async-output ao :timeout *exit-flush-timeout*))
-              (push (sb-ext:make-weak-pointer ao) *saved-outputs*)
-              (%report "bark: writer did not stop cleanly before save; not restarting it~%"))))))
+          (cond
+            ((eq (async-output-state ao) :sync)
+             (pushnew wp *saved-outputs*))
+            ((ignore-errors (stop-async-output ao :timeout *exit-flush-timeout*))
+             (push (sb-ext:make-weak-pointer ao) *saved-outputs*))
+            (t
+             (%report "bark: writer did not stop cleanly before save; not restarting it~%")))))))
   (values))
 
 (defun restart-saved-outputs ()
   "Init hook (sb-ext:*init-hooks*): restart the writer thread of every async
    output that SAVE-LIVE-OUTPUTS stopped. The standard streams are looked up
    again, because SBCL recreates them at startup; a file stream is reopened for
-   appending. An output whose file cannot be reopened is marked failed and
-   counts later lines as dropped. Idempotent: each output restarts once."
+   appending. An output made with :async nil gets its stream back the same way,
+   without a thread. An output whose file cannot be reopened is marked failed
+   and counts later lines as dropped. Idempotent: each output restarts once."
   (bt:with-lock-held (*lifecycle-lock*)
     (let ((saved *saved-outputs*))
       (setf *saved-outputs* nil)
       (dolist (wp saved)
         (let ((ao (sb-ext:weak-pointer-value wp)))
-          (when (and ao (eq (async-output-state ao) :stopped))
+          (when (and ao (member (async-output-state ao) '(:stopped :sync)))
             (let ((stream (restored-stream ao)))
               (cond
+                ((and stream (eq (async-output-state ao) :sync))
+                 (setf (async-output-stream ao) stream))
                 (stream
                  (setf (async-output-stream ao) stream
                        (async-output-quit ao) nil

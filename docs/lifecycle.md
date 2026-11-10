@@ -5,7 +5,7 @@
 (setf bark:*logger*
       (bark:make-logger &key output (level :info) (formatter bark:*default-json-formatter*)
                              context field-transform
-                             (capacity 8192) (on-drop #'bark:default-on-drop) on-error
+                             (capacity 8192) (on-drop #'bark:default-on-drop) on-error (async t)
                              blocking (block-timeout 5.0) on-block-timeout
                              level-sampler consistent))
 
@@ -42,18 +42,35 @@
 | Function | Called synchronously, no thread, no buffer |
 | `tee-output` | Used as-is (already contains async-outputs internally) |
 | NIL | Defaults to `*error-output*`, wrapped in async-output |
+| Stream or NIL with `:async nil` | Written on the caller's thread under the stream lock and forced out, no thread, no buffer |
 
 `:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:on-error`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals `bark-configuration-error`.
+
+### Synchronous stream output
+
+`:async nil` gives a stream output with no writer thread and no queue. Each line is written on the thread that logs it, under the same per-stream lock the writer threads use, and forced out before the logging call returns:
+
+```lisp
+(defvar *diagnostics*
+  (bark:make-logger :output (open "diagnostics.log" :direction :output :if-exists :append
+                                                     :if-does-not-exist :create)
+                    :level :error :async nil))
+```
+
+- A line that was logged is on the stream (for a file, in the kernel) even if the process is then killed with SIGKILL or crashes, which no exit hook can cover. Use it for a rare, important stream such as an error log; every call pays for the write and the flush.
+- `:on-error` works as for an async output, but runs on the caller's thread: return a replacement stream and the failed line is written there, then the logger goes on; return NIL, or give no handler, and the output is marked failed (`bark:healthy-p` returns NIL) and later lines are counted by `bark:dropped-count`. Lines logged while the handler runs, also by the handler itself, are counted as dropped.
+- `:capacity`, `:on-drop`, `:blocking`, `:block-timeout` and `:on-block-timeout` have nothing to configure and signal `bark-configuration-error` with `:async nil`. A function output is already synchronous, so `:async nil` changes nothing there. A tee-output refuses `:async`; give `:async nil` to a destination of `bark:tee` or `bark:make-tee` instead (see [multiple outputs](multi-output.md)).
+- `bark:flush` returns T at once and `bark:stop` is a no-op returning T: nothing is pending. The exit drain has nothing to do either.
 
 `:context`, when provided, is a plist of static context fields pre-serialized into the root logger. Zero per-call cost.
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](context.md#field-redaction).
 
-`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent, stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals `bark-child-operation-error`; the `continue` restart makes `stop` return NIL. Always stop the root logger.
+`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent, stopping an already-stopped or sync logger (a function output, or `:async nil`) is a no-op. Calling on a child logger signals `bark-child-operation-error`; the `continue` restart makes `stop` return NIL. Always stop the root logger.
 
 `bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger, global or user-created. Handles both single-output and tee-output loggers. Signals `bark-async-stopped` if any async output has been stopped (a `continue` restart is available to skip stopped outputs).
 
-Every async output is drained automatically when the image exits, waiting at most `bark:*exit-flush-timeout*` (default 2.0 seconds) per output.
+Every async output is drained automatically when the image exits, waiting at most `bark:*exit-flush-timeout*` (default 2.0 seconds) per output. The drain runs from `sb-ext:*exit-hooks*`, which `(sb-ext:exit :abort t)` skips: call `bark:flush` (or `bark:stop`) before an abort exit, or lines still in the buffer are lost. An output made with `:async nil` has none to lose.
 
 `bark:dropped-count` returns how many lines the async outputs of a logger have dropped so far (full buffer, failed writer, and blocking-mode timeouts), summed over its outputs. The count only grows: lines already announced by a drop warning stay in it, and reading it resets nothing. It returns 0 for NIL and for a synchronous (function) logger.
 
@@ -90,6 +107,7 @@ The logging macros take their fields as literal arguments. When the field set is
 SBCL refuses to save a core while other threads run, and a writer thread would not survive the save anyway. cl-bark installs a function on `sb-ext:*save-hooks*` that drains and joins the writer thread of every running async output, and a function on `sb-ext:*init-hooks*` that starts the writer threads again in the restored image, so no call is needed from the application and no lines are lost.
 
 - Only outputs that were running at save time are restarted. An output stopped earlier with `bark:stop` stays stopped (synchronous writes), and a failed one stays failed.
+- An output made with `:async nil` has no thread to stop. The save hook remembers it and the init hook gives it its stream back by the same rules as below; it stays synchronous.
 - Between the save hook and the end of the save, and until the init hook has run, lines are written synchronously on the caller's thread.
 - Standard streams: an output whose stream is `sb-sys:*stdout*` or `sb-sys:*stderr*` is rebound to SBCL's freshly created standard stream, because the old stream object is stale in the restored image. Synonym streams (`*standard-output*`, `*error-output*`) keep working as they are.
 - File streams: the descriptor does not survive a save, so an output on a file stream (a `file-stream` with a pathname) is reopened for appending by the init hook, with the same external format. If the file cannot be reopened, the output is marked failed (`bark:healthy-p` returns NIL) and later lines count as dropped (see `bark:dropped-count`). Any other stream (string streams, sockets, pipes) is kept as it is and is not valid in the restored image unless it survives a save by itself; give such an output an `:on-error` handler, or stop the logger before saving and make a new one after the restore.
@@ -127,6 +145,8 @@ Conditions are signaled at configuration time or on lifecycle misuse. Logging ma
 | `tee` | `bark-configuration-error` | none | Same, at macro expansion time |
 | `make-logger` | `bark-configuration-error` | none | `:output` is not a stream, function, `tee-output`, or `nil` |
 | `make-logger` | `bark-configuration-error` | none | Async parameters with a function or `tee-output` |
+| `make-logger` | `bark-configuration-error` | none | `:async nil` with a `tee-output`, or with `:capacity`, `:on-drop`, `:blocking`, `:block-timeout` or `:on-block-timeout` |
+| `make-tee` | `bark-configuration-error` | none | `:async nil` on a destination together with one of those queue keys |
 | `make-consistent-sampler` | `bark-configuration-error` | none | Rate < 1 |
 | `make-level-sampler` | `bark-configuration-error` | none | Non-windowed-counter value |
 | `make-windowed-counter` | `bark-configuration-error` | none | Window ticks exceed fixnum range |

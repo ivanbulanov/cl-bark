@@ -216,7 +216,7 @@ hash decision."
 (declaim (ftype (function (&key (:output t) (:level (or fixnum keyword)) (:formatter (or null formatter))
                                 (:context list) (:field-transform (or null function))
                                 (:capacity fixnum) (:on-drop (or null function))
-                                (:on-error (or null function))
+                                (:on-error (or null function)) (:async t)
                                 (:blocking boolean) (:block-timeout t)
                                 (:on-block-timeout (or null function))
                                 (:level-sampler (or null simple-vector))
@@ -228,7 +228,7 @@ hash decision."
                         context field-transform
                         (capacity +default-buffer-capacity+)
                         (on-drop #'default-on-drop on-drop-supplied-p)
-                        on-error
+                        on-error (async t)
                         blocking (block-timeout 5.0 block-timeout-supplied-p) on-block-timeout
                         level-sampler consistent)
   "Create a root logger. Multiple root loggers can coexist — each owns its own
@@ -236,8 +236,9 @@ output and writer thread(s). Assign to *logger* for implicit use by logging
 macros, or pass explicitly as the first argument to bark:info etc.
 
 OUTPUT (stream, function, tee-output, or NIL):
-  Stream/NIL — wrapped in async-output (background writer thread + ring buffer).
-  NIL defaults to *error-output*. Function — called synchronously, no thread.
+  Stream/NIL — wrapped in async-output (background writer thread + ring buffer),
+  or written on the caller's thread with ASYNC NIL. NIL defaults to
+  *error-output*. Function — called synchronously, no thread.
   tee-output — from bark:tee or bark:make-tee, used as-is.
 
 LEVEL (keyword or fixnum, default :info):
@@ -261,9 +262,14 @@ CAPACITY (fixnum, default 8192): Ring buffer size in messages, rounded up to a
 ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
   dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
 ON-ERROR (function or NIL): Called as (funcall on-error condition) in the writer
-  thread when writing to the stream fails. Return a replacement stream to keep
-  going, or NIL to stop the writer. Without it the writer prints the error to
+  thread (the caller's thread with ASYNC NIL) when writing to the stream fails.
+  Return a replacement stream to keep going, or NIL to stop the writer. Without it the writer prints the error to
   *error-output* and stops.
+ASYNC (boolean, default T): With NIL a stream output has no writer thread and no
+  queue: each line is written under the stream lock and forced out before the
+  logging call returns, so it survives a crash or SIGKILL right after. Not
+  accepted with a tee-output (give :async per destination) nor together with
+  CAPACITY, ON-DROP, BLOCKING, BLOCK-TIMEOUT or ON-BLOCK-TIMEOUT.
 BLOCKING (boolean): When T, callers block on a full buffer instead of dropping.
 BLOCK-TIMEOUT (real, default 5.0): Seconds to wait when blocking before giving up.
 ON-BLOCK-TIMEOUT (function or NIL): Called when block-timeout expires.
@@ -293,6 +299,22 @@ as does an unknown LEVEL. All validation happens before any writer thread is sta
         :report "Supply a replacement logger."
         :interactive (lambda () (list (make-logger)))
         (return-from make-logger value))))
+  (unless async
+    (let ((detail (if (tee-output-p output)
+                      "Cannot specify :async with a tee-output; give :async per destination in bark:tee."
+                      (sync-option-conflicts
+                       (list :capacity (/= capacity +default-buffer-capacity+)
+                             :on-drop on-drop-supplied-p
+                             :blocking blocking
+                             :block-timeout block-timeout-supplied-p
+                             :on-block-timeout on-block-timeout)))))
+      (when detail
+        (restart-case
+            (cl:error 'bark-configuration-error :detail detail)
+          (use-value (value)
+            :report "Supply a replacement logger."
+            :interactive (lambda () (list (make-logger)))
+            (return-from make-logger value))))))
   (when (and (tee-output-p output) formatter-supplied-p)
     (restart-case
         (cl:error 'bark-configuration-error
@@ -304,6 +326,8 @@ as does an unknown LEVEL. All validation happens before any writer thread is sta
   (let* ((actual-output (cond
                           ((functionp output) output)
                           ((tee-output-p output) output)
+                          ((and (not async) (or (streamp output) (null output)))
+                           (make-sync-output (or output *error-output*) :on-error on-error))
                           ((or (streamp output) (null output))
                            (make-async-output (or output *error-output*)
                                               :capacity capacity
@@ -538,8 +562,8 @@ does not affect the child."
   "Print async-output without descending into stream/thread slots."
   (print-unreadable-object (ao stream :type t :identity t)
     (let ((ring (async-output-ring ao)))
-      (format stream "~:[stopped~;running~] ~D pending ~D dropped"
-              (async-output-running ao)
+      (format stream "~(~A~) ~D pending ~D dropped"
+              (async-output-state ao)
               (if ring (- (ring-buffer-head ring) (ring-buffer-tail ring)) 0)
               (if ring (ring-buffer-dropped ring) 0)))))
 
@@ -566,17 +590,20 @@ does not affect the child."
   "Flush LOGGER, blocking until all pending messages are written or TIMEOUT
 seconds pass per async output. Returns T when every running async output
 acknowledged the flush, NIL when any timed out. Passing NIL is a no-op that
-returns T; so is flushing a synchronous (function-output) logger.
+returns T; so is flushing a synchronous logger (a function output, or one made
+with :async nil, whose lines are already forced out).
 Signals BARK-ASYNC-STOPPED if any async output has been stopped.
 A CONTINUE restart is available to skip stopped outputs."
   (let ((has-stopped nil)
         (all-acked t))
     (when logger
       (flet ((flush-one (ao)
-               (if (async-output-running ao)
-                   (unless (flush-async-output ao timeout)
-                     (setf all-acked nil))
-                   (setf has-stopped t))))
+               (case (async-output-state ao)
+                 (:running
+                  (unless (flush-async-output ao timeout)
+                    (setf all-acked nil)))
+                 (:sync nil)
+                 (t (setf has-stopped t)))))
         (do-async-outputs (logger-output logger) #'flush-one)))
     (when has-stopped
       (restart-case
@@ -609,6 +636,8 @@ Example: (bark:dropped-count bark:*logger*)"
   "Return T when no async writer of LOGGER has failed, NIL when one has. A writer
 fails on a stream error that :on-error does not repair, when its thread dies,
 or when it cannot be restarted after the image is restored from a saved core.
+An output made with :async nil fails the same way on a stream error that
+:on-error does not repair.
 The lines sent to a failed writer are counted by DROPPED-COUNT; together they
 make a health check. A stopped logger is healthy: after STOP, lines are written
 on the caller's thread. Passing NIL, a child (which reports the outputs it

@@ -74,7 +74,7 @@ When a line is dropped for any reason, `bark:dropped-count` counts it; see [life
 | `:block-timeout` | `(or real null)` | `5.0` | Seconds to wait before dropping (coerced to `double-float`). `nil` = wait forever |
 | `:on-block-timeout` | `(or function null)` | `nil` | `(lambda (message stream))` called on timeout |
 
-Constraint: These keywords are only valid with a stream output (or the default `*error-output*`). Passing them with a `tee-output` or a function output signals `bark-configuration-error`. Configure blocking per-destination in `bark:tee` instead; function outputs are synchronous and never block.
+Constraint: These keywords are only valid with a stream output (or the default `*error-output*`). Passing them with a `tee-output` or a function output signals `bark-configuration-error`. Configure blocking per-destination in `bark:tee` instead; function outputs are synchronous and never block. With `:async nil` there is no buffer to wait on, so these keywords signal `bark-configuration-error` there too.
 
 ### `bark:tee`: same keywords per destination
 
@@ -108,4 +108,5 @@ For blocking mode with N concurrent producer threads, set `:capacity >= 2N` to m
 - Writer thread dies: However the writer ends (a stream error the `:on-error` hook does not replace, or a terminated thread), its cleanup marks the output failed and wakes every blocked producer. Each one gives up at once: `:on-block-timeout` runs and the line counts as block-dropped, even with `:block-timeout nil`. Lines delivered after that are counted as dropped.
 - `bark:stop` with blocked producers: All producers are woken via broadcast. Messages from producers blocked during stop go through the timeout/callback path. Call as `(bark:stop bark:*logger*)` or pass the logger returned by `bark:make-logger`.
 - Tee with mixed blocking/non-blocking: If a non-blocking destination succeeds and a blocking destination times out, the message is delivered to the first but dropped for the second. The `on-block-timeout` callback fires for the failing destination.
+- Synchronous outputs and the stream lock: an output made with `:async nil` (and a logger after `bark:stop`) writes on the caller's thread while holding the per-stream lock that the writer threads take for each batch. A caller can therefore wait for that lock while a writer thread or another caller writes to the same stream, and a slow stream (a full pipe, a stalled disk) blocks it for as long as the write takes. `:block-timeout` does not apply to that wait.
 - `with-log-buffer` + blocking: Buffer flush replays through the root logger. If the root output is blocking, flush can block. This is correct behavior.

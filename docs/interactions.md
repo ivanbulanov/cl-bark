@@ -12,6 +12,8 @@ Nested buffering is a no-op. If already inside a `with-log-buffer` scope, inner 
 
 Async parameters with function or tee output. `:capacity`, `:on-drop`, `:on-error`, `:blocking`, `:block-timeout`, and `:on-block-timeout` on `make-logger` are only valid with stream output. Function outputs are synchronous (no ring buffer or writer thread). Tee outputs configure these per-destination.
 
+`:async nil` with queue parameters or a tee output. A stream output made with `:async nil` has no ring buffer and no writer thread, so `:capacity`, `:on-drop`, `:blocking`, `:block-timeout` and `:on-block-timeout` signal `bark-configuration-error` with it; `:on-error` is accepted and runs on the caller's thread. A tee output refuses `:async`; set it per destination.
+
 ## Contradictory settings
 
 Sampling and blocking mode. Blocking mode (`:blocking t`) exists to prevent message loss in audit trails, compliance logs and billing events. Sampling drops messages. Do not configure both on the same logger.

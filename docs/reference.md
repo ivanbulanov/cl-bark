@@ -15,7 +15,7 @@ formatter, and all three constructors take `:max-string-length` (see
 | `bark:*logger*` | `nil` | The logger the logging macros use when none is passed. Bind it per thread or set it globally. |
 | `bark:*log-context*` | `nil` | Dynamic context, managed by `with-context`. |
 | `bark:*compile-time-min-level*` | `nil` | Compile-time level floor; calls below it expand to NIL. |
-| `bark:*exit-flush-timeout*` | `2.0` | Seconds to wait per async output when the image exits. |
+| `bark:*exit-flush-timeout*` | `2.0` | Seconds to wait per async output when the image exits (`sb-ext:exit :abort t` skips the drain). |
 | `bark:*max-json-depth*` | `4` | Maximum nesting depth of collections in JSON output. |
 | `bark:*max-json-length*` | `20` | Maximum elements per collection in JSON output. |
 | `bark:*max-pretty-depth*` | `4` | Bound to `*print-level*` in the pretty formatter (NIL is unlimited). |

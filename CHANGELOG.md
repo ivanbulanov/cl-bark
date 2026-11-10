@@ -12,6 +12,9 @@ minor versions, and such changes are listed under **Changed**.
 - Rename `*compile-time-max-level*` to `*compile-time-min-level*` (breaking); it now works: bound at macroexpansion time
   to a level, the logging macros expand to NIL below it and never evaluate arguments.
 - Rename `set-level-sampling` to `set-level-sampler` (breaking), to match the `:level-sampler` argument.
+- Report a stream error without `:on-error` as `bark: output stopped on stream error` (was `bark: writer stopped ...`),
+  since an `:async nil` output has no writer. The printed form of an async output names its state (`running`,
+  `stopping`, `stopped`, `failed`, `sync`).
 - Make `capture` return plain data (breaking): `captured-error-stack` is a list of plists `(:call string :file
   namestring-or-NIL :line integer-or-NIL)` instead of `dissect` frames, made while the frames are live, so a captured
   error formatted later (stored, or replayed from `with-log-buffer`) no longer touches dead frames, and no frame
@@ -43,6 +46,10 @@ minor versions, and such changes are listed under **Changed**.
 
 ### Added
 
+- Add `make-logger :async nil` and an `:async` key for tee destinations: a stream output with no writer thread and
+  no queue, each line written on the caller's thread under the stream lock and forced out before the call returns, so
+  it survives SIGKILL or a crash. `:on-error` runs on the caller's thread; the queue keywords are refused with it.
+- Document that `(sb-ext:exit :abort t)` skips the exit drain; call `bark:flush` first.
 - Add and export `*max-string-length*` (default NIL) and a `:max-string-length` argument to all three formatter
   constructors: a longer string value, condition message or message is written as its head, a
   `...[N chars cut]...` marker and its tail, without a copy.

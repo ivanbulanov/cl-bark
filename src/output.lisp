@@ -48,7 +48,8 @@
         (on-error         (getf spec :on-error))
         (blocking         (getf spec :blocking))
         (block-timeout    (getf spec :block-timeout 5.0))
-        (on-block-timeout (getf spec :on-block-timeout)))
+        (on-block-timeout (getf spec :on-block-timeout))
+        (async            (getf spec :async t)))
     (unless (streamp stream)
       (cl:error 'bark-configuration-error
                 :detail (format nil "Tee destination :stream must be a stream, got ~S" stream)))
@@ -58,6 +59,12 @@
     (when (and filter-fn level)
       (cl:error 'bark-configuration-error
                 :detail "Cannot specify both :filter and :level for a tee destination"))
+    (unless async
+      (let ((detail (sync-option-conflicts
+                     (loop for key in '(:capacity :on-drop :blocking :block-timeout :on-block-timeout)
+                           append (list key (and (get-properties spec (list key)) t))))))
+        (when detail
+          (cl:error 'bark-configuration-error :detail detail))))
     (list :stream stream
           :formatter formatter
           :filter (cond
@@ -73,13 +80,15 @@
           :on-error on-error
           :blocking blocking
           :block-timeout block-timeout
-          :on-block-timeout on-block-timeout)))
+          :on-block-timeout on-block-timeout
+          :async async)))
 
 (defun make-tee (destinations)
   "Create a fan-out output from a list of destination plists.
 Each plist accepts :stream (required), :formatter, :filter, :level, :capacity,
 :on-drop (NIL suppresses drop reports), :on-error, :blocking, :block-timeout,
-:on-block-timeout. Every spec is validated before any writer thread starts;
+:on-block-timeout and :async (default T; NIL writes that destination on the
+caller's thread, as make-logger :async nil does, and refuses the queue keys). Every spec is validated before any writer thread starts;
 BARK-CONFIGURATION-ERROR is signalled for a :stream that is not a stream, an
 unknown :level, or both :level and :filter. A USE-VALUE restart supplies a
 replacement tee-output."
@@ -93,14 +102,17 @@ replacement tee-output."
     (unwind-protect
          (progn
            (dolist (spec specs)
-             (let ((ao (make-async-output (getf spec :stream)
-                                          :capacity (getf spec :capacity)
-                                          :formatter (getf spec :formatter)
-                                          :on-drop (getf spec :on-drop)
-                                          :on-error (getf spec :on-error)
-                                          :blocking (getf spec :blocking)
-                                          :block-timeout (getf spec :block-timeout)
-                                          :on-block-timeout (getf spec :on-block-timeout))))
+             (let ((ao (if (getf spec :async)
+                           (make-async-output (getf spec :stream)
+                                              :capacity (getf spec :capacity)
+                                              :formatter (getf spec :formatter)
+                                              :on-drop (getf spec :on-drop)
+                                              :on-error (getf spec :on-error)
+                                              :blocking (getf spec :blocking)
+                                              :block-timeout (getf spec :block-timeout)
+                                              :on-block-timeout (getf spec :on-block-timeout))
+                           (make-sync-output (getf spec :stream)
+                                             :on-error (getf spec :on-error)))))
                (push (make-destination :async-output ao
                                        :formatter (getf spec :formatter)
                                        :filter (getf spec :filter))
@@ -130,7 +142,8 @@ replacement tee-output."
 
 (defmacro tee (&rest destination-specs)
   "Syntax sugar over make-tee. Each spec is
-(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout)."
+(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout
+             async)."
   `(make-tee
     (list ,@(loop for spec in destination-specs
                   for (stream-expr . keys) = spec
@@ -171,7 +184,8 @@ replacement tee-output."
 (defun deliver-line (output line)
   "Deliver a formatted log LINE to OUTPUT (async-output, stream, or function).
    An async output that was stopped cleanly takes the line synchronously; one
-   whose writer failed counts it as dropped."
+   whose writer failed counts it as dropped. An output made with :async nil
+   writes it on the caller's thread."
   (if (async-output-p output)
       (case (async-output-state output)
         ((:running :stopping)
@@ -180,13 +194,16 @@ replacement tee-output."
              (progn
                (ring-buffer-push (async-output-ring output) line)
                (notify-writer output))))
+        (:sync
+         (write-sync-line output line))
         (:stopped
          (write-line-synchronously output line))
         (t
          (atomics:atomic-incf (ring-buffer-dropped (async-output-ring output)))))
       (etypecase output
         (stream (write-string line output) (terpri output) (force-output output))
-        (function (funcall output line)))))
+        (function (funcall output line))))
+  (values))
 
 (declaim (ftype (function (t (or null formatter) fixnum t list (or null string) list) (values &optional))
                 dispatch-to-output))

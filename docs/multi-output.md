@@ -18,6 +18,7 @@ A tee output sends each log line to several destinations. Each destination has i
 - `:on-drop`: `(lambda (count) ...)` called when messages are dropped due to a full buffer. Returns a warning message string, or NIL to suppress. Can optionally return extra fields as a second value: `(values message fields)`. See [drop warnings](blocking-mode.md#drop-mode-and-drop-warnings) for the full return protocol. Defaults to a handler that writes one warning line through the same destination reporting how many messages were dropped
 - `:on-error`: `(lambda (condition) ...)` called in the writer thread when a stream write fails. Return a new stream to swap and continue writing, or nil to stop the writer thread (subsequent log calls silently drop messages). The condition is the original `file-error` or `stream-error`; bark does not wrap it. When omitted, the writer logs to `*error-output*` and stops.
 - `:blocking`, `:block-timeout`, `:on-block-timeout`: per-destination blocking mode; see [drop warnings](blocking-mode.md#drop-mode-and-drop-warnings)
+- `:async`: NIL makes this destination synchronous: no ring buffer and no writer thread, each line written on the caller's thread under the stream lock and forced out, as with `make-logger :async nil` (see [synchronous stream output](lifecycle.md#synchronous-stream-output)). Its `:on-error` then runs on the caller's thread. `:capacity`, `:on-drop` and the blocking keys signal `bark-configuration-error` together with `:async nil`. Defaults to T
 
 `bark:stop` tears down all writer threads. Streams are not closed. The caller who opened them closes them.
 
@@ -27,7 +28,7 @@ A tee output sends each log line to several destinations. Each destination has i
 (bark:tee &rest destination-specs) -> tee-output
 ```
 
-Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout)`:
+Syntax sugar over `make-tee`. Each destination spec has the form `(stream-expr &key formatter filter level capacity on-drop on-error blocking block-timeout on-block-timeout async)`:
 
 ```lisp
 (bark:tee
@@ -127,7 +128,7 @@ Explicit logger arg bypasses `*logger*`. Each logger has its own output pipeline
 
 ## Error recovery
 
-The `:on-error` handler receives the original stream condition (`file-error`, `stream-error`, etc.), bark passes it through without wrapping. The handler runs on the destination's writer thread, not the caller thread, a slow handler stalls the drain, causing the ring buffer to fill and drop messages (in the default non-blocking mode callers are never blocked; with `:blocking t` they wait up to `block-timeout`). Return a new stream to swap and continue, or nil to let the writer exit.
+The `:on-error` handler receives the original stream condition (`file-error`, `stream-error`, etc.), bark passes it through without wrapping. The handler runs on the destination's writer thread, not the caller thread (except for a destination with `:async nil`, which has no writer thread), a slow handler stalls the drain, causing the ring buffer to fill and drop messages (in the default non-blocking mode callers are never blocked; with `:blocking t` they wait up to `block-timeout`). Return a new stream to swap and continue, or nil to let the writer exit.
 
 Reopen a log file on any error:
 

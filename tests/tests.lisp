@@ -2112,6 +2112,119 @@ level signals bark-configuration-error."
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
 
+(5am:test test-async-nil-writes-each-line-before-the-call-returns
+  "make-logger :async nil starts no writer: each line is on the stream when the
+   logging call returns, flush and stop are no-ops returning T, and the logger
+   keeps working after stop."
+  (let* ((s (make-string-output-stream))
+         (lgr (bark:make-logger :output s :async nil))
+         (ao (bark::logger-output lgr)))
+    (5am:is (eq :sync (bark::async-output-state ao)))
+    (5am:is (null (bark::async-output-thread ao)))
+    (bark:info lgr "first line")
+    (5am:is (search "first line" (get-output-stream-string s)))
+    (5am:is-true (bark:flush lgr))
+    (5am:is-true (bark:stop lgr))
+    (5am:is (eq :sync (bark::async-output-state ao)))
+    (bark:info lgr "after stop")
+    (5am:is (search "after stop" (get-output-stream-string s)))
+    (5am:is-true (bark:healthy-p lgr))
+    (5am:is (= 0 (bark:dropped-count lgr)))))
+
+(5am:test test-async-nil-refuses-queue-options-and-tee-output
+  "The queue keywords and a tee-output are refused with :async nil; a function
+   output, which is synchronous anyway, is accepted."
+  (dolist (args (list '(:capacity 64) '(:on-drop nil) '(:blocking t)
+                      '(:block-timeout 1.0) (list :on-block-timeout #'identity)))
+    (5am:signals bark:bark-configuration-error
+      (apply #'bark:make-logger :output (make-string-output-stream) :async nil args)))
+  (let ((tee (bark:make-tee (list (list :stream (make-string-output-stream) :async nil)))))
+    (5am:signals bark:bark-configuration-error
+      (bark:make-logger :output tee :async nil)))
+  (let ((lines nil))
+    (bark:info (bark:make-logger :output (lambda (line) (push line lines)) :async nil) "fn")
+    (5am:is (= 1 (length lines))))
+  (5am:signals bark:bark-configuration-error
+    (bark:make-tee (list (list :stream (make-string-output-stream) :async nil :capacity 64)))))
+
+(5am:test test-async-nil-stream-error-marks-the-output-failed
+  "Without :on-error a stream error is reported once, the line is counted as
+   dropped and the output fails; later lines are dropped too."
+  (let* ((err-out (make-string-output-stream))
+         (*error-output* err-out)
+         (s (make-string-output-stream))
+         (lgr (bark:make-logger :output s :async nil)))
+    (close s)
+    (bark:info lgr "lost")
+    (bark:info lgr "also lost")
+    (5am:is (eq :failed (bark::async-output-state (bark::logger-output lgr))))
+    (5am:is-false (bark:healthy-p lgr))
+    (5am:is (= 2 (bark:dropped-count lgr)))
+    (5am:is (= 1 (count-substrings "bark: output stopped on stream error"
+                                   (get-output-stream-string err-out))))))
+
+(5am:test test-async-nil-on-error-replacement-gets-the-line
+  "With :async nil, :on-error runs on the caller's thread; the line that failed
+   is written to the replacement stream it returns, and so are later lines."
+  (let* ((s (make-string-output-stream))
+         (replacement (make-string-output-stream))
+         (caller (bt:current-thread))
+         (hook-thread nil)
+         (lgr (bark:make-logger :output s :async nil
+                                :on-error (lambda (e)
+                                            (declare (ignore e))
+                                            (setf hook-thread (bt:current-thread))
+                                            replacement))))
+    (close s)
+    (bark:info lgr "retried")
+    (bark:info lgr "next")
+    (let ((text (get-output-stream-string replacement)))
+      (5am:is (search "retried" text))
+      (5am:is (search "next" text)))
+    (5am:is (eq caller hook-thread))
+    (5am:is (eq :sync (bark::async-output-state (bark::logger-output lgr))))
+    (5am:is (= 0 (bark:dropped-count lgr)))))
+
+(5am:test test-tee-destination-with-async-nil-writes-synchronously
+  "A tee destination with :async nil has no writer thread; the line is on its
+   stream when the logging call returns, while an async destination still queues."
+  (let* ((sync-stream (make-string-output-stream))
+         (async-stream (make-string-output-stream))
+         (lgr (bark:make-logger :output (bark:make-tee (list (list :stream sync-stream :async nil)
+                                                             (list :stream async-stream))))))
+    (unwind-protect
+         (progn
+           (bark:info lgr "both")
+           (5am:is (search "both" (get-output-stream-string sync-stream)))
+           (5am:is-true (bark:flush lgr))
+           (5am:is (search "both" (get-output-stream-string async-stream))))
+      (bark:stop lgr))))
+
+(5am:test test-async-nil-file-stream-is-reopened-after-restore
+  "An :async nil output is remembered by the save hook and gets its file back,
+   reopened for appending, from the init hook; it stays without a thread."
+  (uiop:with-temporary-file (:stream s :pathname path :keep t :direction :output)
+    (let ((ao (bark::make-sync-output s)))
+      (unwind-protect
+           (progn
+           (bark::deliver-line ao "first")
+           (bark::save-live-outputs)
+           (bark::save-live-outputs)
+           (5am:is (equal (pathname s) (second (bark::async-output-restart-key ao))))
+           (close s)
+           (bark::restart-saved-outputs)
+           (5am:is (eq :sync (bark::async-output-state ao)))
+           (5am:is (null (bark::async-output-thread ao)))
+           (5am:is (not (eq s (bark::async-output-stream ao))))
+           (bark::deliver-line ao "second")
+           (close (bark::async-output-stream ao))
+           (let ((text (uiop:read-file-string path)))
+             (5am:is (search "first" text))
+             (5am:is (search "second" text))))
+        ;; A later save test must not reopen the deleted file.
+        (bark::unregister-live-output ao)
+        (ignore-errors (delete-file path))))))
+
 (5am:test test-no-on-error-default-behavior
   "Without on-error, writer logs to *error-output* and exits."
   (let* ((err-out (make-string-output-stream))
@@ -2126,7 +2239,7 @@ level signals bark-configuration-error."
     ;; Writer should have exited
     (5am:is-false (bark::async-output-running ao))
     ;; Error should be logged to *error-output*
-    (5am:is-true (search "bark: writer stopped on stream error" (get-output-stream-string err-out)))
+    (5am:is-true (search "bark: output stopped on stream error" (get-output-stream-string err-out)))
     (when (bark::async-output-thread ao)
       (bt:join-thread (bark::async-output-thread ao)))))
 
