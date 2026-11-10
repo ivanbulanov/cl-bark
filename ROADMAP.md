@@ -260,7 +260,7 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 
 ## Phase 5. Small fixes
 
-- [ ] *0.2.0*: `src/writer.lisp` pushes the save and init hooks twice, once bare and once inside a `progn`. Delete one.
+- [x] *0.2.0*: `src/writer.lisp` pushes the save and init hooks twice, once bare and once inside a `progn`. Delete one. (5a426a1)
 
 ## Parked (no user yet)
 
