@@ -282,13 +282,20 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 The application is under active development, so changes to it wait until the cl-bark work above is done and its
 owner is ready. Nothing in phases 1 to 5 depends on them.
 
-- [ ] Pin the 0.2.0 tag in its `qlfile` and run `qlot update cl-bark`.
-- [ ] Replace its uses of `bark::` with the public API from phase 2 (`emit`, plain-data `capture`), and its `setf` of
+- [x] Pin the 0.2.0 tag in its `qlfile` and run `qlot update cl-bark`. Done 2026-11-11 (`:tag v0.2.0`).
+- [x] Replace its uses of `bark::` with the public API from phase 2 (`emit`, plain-data `capture`), and its `setf` of
   the serialization specials with per-formatter limits (3.1) and `:max-string-length` (3.2). Consider `:async nil`
   for its diagnostics logger (3.3).
-- [ ] Test, in its own suite, loading a renamed vendored copy next to the normal one and saving an image with a live
+  Done 2026-11-11; no `bark::` is left. The three events with run-time fields go through `emit` (the four branches
+  are one call). `capture` is called with `:max-frames nil`, and the code that forced each frame is deleted. Each
+  logger has its own formatter (`:max-length 100`; the diagnostics one also `:max-stack-frames :unlimited`). The
+  result cap binds `*max-string-length*` around the one event that needs it, which works because a line is
+  formatted on the calling thread; its own head-and-tail cut is deleted. The diagnostics logger is `:async nil`.
+- [x] Test, in its own suite, loading a renamed vendored copy next to the normal one and saving an image with a live
   async logger in each. Each copy has its own `*stream-locks*`, so two copies writing to stderr do not serialize
   against each other.
+  Done 2026-11-11: the saved image starts, and each logger's file has its line from before the save and its line
+  from after the restore.
 
 ## Parked (no user yet)
 
@@ -334,4 +341,4 @@ owner is ready. Nothing in phases 1 to 5 depends on them.
 | application | Process-wide serialization limits | 3.1 |
 | application | No string cap (10 MB result) | 3.2 |
 | application | Diagnostics must survive a crash; `:abort t` skips the drain | 3.3 |
-| application | No `flush` timeout or result in the pinned version | Fixed in `dc44995`; pin 6 |
+| application | No `flush` timeout or result in the pinned version | Fixed in `dc44995`; pinned (6) |
