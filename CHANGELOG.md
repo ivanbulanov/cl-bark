@@ -7,6 +7,33 @@ minor versions, and such changes are listed under **Changed**.
 
 ## [Unreleased]
 
+### Migration from 0.1.0
+
+- Rename `*compile-time-max-level*` to `*compile-time-min-level*` where you bind it before compiling. It now strips the
+  calls below that level.
+- Rename `set-level-sampling` to `set-level-sampler`; the arguments are the same.
+- Delete calls to `register-exit-hook`. Async outputs are drained at image exit without one, waiting at most
+  `*exit-flush-timeout*` (2.0 seconds) per output.
+- `flush` and `stop` now give up after `:timeout` seconds (default 5.0) per output and return T or NIL. Pass a larger
+  `:timeout` where a drain may take longer, and check the result where a lost line matters.
+- `captured-error-stack` returns plists `(:call :file :line)` instead of `dissect` frames: replace `dissect:call`,
+  `dissect:file` and `dissect:line` on its elements with `getf`. `:call` is a string. `capture` keeps at most
+  `*capture-max-frames*` (50) frames; pass `:max-frames nil` to keep all.
+- The message and field forms of a logging call are evaluated only when its level is enabled. Move side effects out of
+  log arguments.
+- A NIL first argument of a logging macro now means no logger, and the call logs nothing; it was taken as the message.
+- An `:on-flush` function of `with-log-buffer` receives the entries as a simple-vector in log order and must return a
+  sequence of the entries to emit. Replace list operations such as `dolist` or `car` on them with sequence functions.
+- `with-captured-logs` binds `LOGS` in your package by default, not `bark::logs`.
+- A bad argument to a constructor or a level function (an unknown level, a bad `:timestamp` or `:level-format`, a
+  non-function `:key-fn`) signals `bark-configuration-error` where it used to signal a type error, an `ecase` error,
+  or nothing. `make-logger` refuses `:formatter`, and an explicit `:on-drop`, with a tee output, and `:on-drop` with a
+  function output: give them to each tee destination.
+- Log lines changed in ways a parser or an alert rule can see: stack calls carry their package (`MYAPP::RUN`); logfmt
+  quotes string, character and symbol values, escapes control characters and replaces space, `=` and `"` in keys; a
+  symbol key with lower-case letters keeps its case; floats print with the shortest round-trip digits; a stream error
+  without `:on-error` reports `bark: output stopped on stream error` (was `bark: writer stopped ...`).
+
 ### Changed
 
 - Rename `*compile-time-max-level*` to `*compile-time-min-level*` (breaking); it now works: bound at macroexpansion time
