@@ -62,7 +62,7 @@ application.
 
 - [x] Tag `v0.1.0` at `67e1b91` (local, annotated, dated at the commit). The two CI commits after it change only
   `ci.yml`.
-- [ ] *Owner*: push the tag and `main` (after `git offhours plan`).
+- [x] *Owner*: push the tag and `main` (after `git offhours plan`). Pushed with `main` at e59a6bc.
 - [ ] *0.2.0*: a Migration subsection in the 0.2.0 changelog entry: `*compile-time-max-level*` is now
   `*compile-time-min-level*`, `register-exit-hook` is removed, `flush` and `stop` return a value, and every other
   rename in the release.
@@ -214,7 +214,9 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 - [x] `docs/value-serialization.md` lists internal functions as exported and says the pretty formatter prints
   symbols in lower case (it binds `:upcase`). (a0ac761)
 - [x] `docs/design/decisions.md` "Known quirks" says "as of 0.2.0-dev". (a0ac761)
-- [ ] CONTRIBUTING and `cl-bark.asd` name `verbose` for the comparative bench, which has no verbose adapter.
+- [x] CONTRIBUTING and `cl-bark.asd` name `verbose` for the comparative bench, which has no verbose adapter.
+  Removed from the `.asd`, the feature check and the bench header; the design doc's verbose section is gone. A
+  stray "verbose adapter" comment block stays in `bench/comparative.lisp`. (8f81a7d)
 - [x] `docs/blocking-mode.md`: with `:block-timeout nil` a producer waits forever when the writer dies. (a0ac761)
 - [ ] Docstrings: `stop`'s `continue` restart returns NIL; `make-logger` rounds `:capacity` up to a power of two;
   `make-buffer-logger` says samplers apply at flush time (they do not); the exported struct accessors and predicates
@@ -227,7 +229,7 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 - [x] `BENCHMARKS.md` predates the writer rewrite. Delete it; the method stays in the benchmarks doc. Re-run the
   comparative bench and date the numbers the README quotes, or remove them. Deleted in 583d626; the README numbers now carry their date (4956ce7).
 - [ ] A test that every exported symbol has a docstring, in `make test`.
-- [ ] `.gitignore`: `.serena/`. Untrack the local tool configuration directory.
+- [x] `.gitignore`: `.serena/`. Untrack the local tool configuration directory. (f541965)
 
 ### 4.3 Duplication and padding
 
