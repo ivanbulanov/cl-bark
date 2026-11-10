@@ -176,9 +176,12 @@ The application needs `*max-json-length*` 100 for tool arguments, and unlimited 
 but not on its events log. The limits are process-wide specials, so it `setf`s them, which changes them for both of
 its loggers and for any other cl-bark user in the image.
 
-- [ ] Add `:max-depth`, `:max-length` and `:max-stack-frames` to the three formatter constructors. A slot left NIL
+- [x] Add `:max-depth`, `:max-length` and `:max-stack-frames` to the three formatter constructors. A slot left NIL
   means "read the special when the line is formatted", today's behaviour, so existing `setf` and `let` of the
   specials keep working, also for formatters made before them.
+  Done in c8f4453, on `make-json-formatter` and `make-pretty-formatter` only: logfmt writes collections as `<type>`
+  placeholders and conditions without a stack, so the three limits would do nothing there. `:unlimited` is accepted
+  where the special accepts NIL (stack frames, pretty depth and length).
 
 ### 3.2 A string length cap
 
