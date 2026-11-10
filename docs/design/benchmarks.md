@@ -8,9 +8,9 @@ The harness lets every performance statement be reproduced on the reader's machi
 
 Three questions drive the design:
 
-- **How much time does the logging framework add on the calling thread?** Formatting, field handling, enqueue or blocking write. Disk and terminal behaviour are excluded on purpose.
-- **Where does the cost go?** Disabled check, simple message, field count, child context, formatter choice, tee fan-out, buffer saturation, blocking mode, concurrent producers.
-- **Roughly how does that compare with other Common Lisp loggers?** An honest, caveated comparison, not a ranking.
+- How much time does the logging framework add on the calling thread? Formatting, field handling, enqueue or blocking write. Disk and terminal behaviour are excluded on purpose.
+- Where does the cost go? Disabled check, simple message, field count, child context, formatter choice, tee fan-out, buffer saturation, blocking mode, concurrent producers.
+- Roughly how does that compare with other Common Lisp loggers? An honest, caveated comparison, not a ranking.
 
 Each question has a different failure mode. Sub-microsecond operations are below the resolution of a naive timer. A comparison across loggers with different designs is easy to make unfair. Concurrent throughput needs a start barrier or the thread start-up cost lands in the result. The sections below take these in turn.
 
@@ -70,8 +70,8 @@ SBCL's `get-internal-real-time` has microsecond resolution (`internal-time-units
 
 Two changes fixed this, and both are in the current code:
 
-1. **Nanosecond clock.** `get-monotonic-ns` in `bench/harness.lisp` calls `clock_gettime` through CFFI with `CLOCK_MONOTONIC` (constant selected per OS: Linux 1, Darwin 6, FreeBSD 4, and `CLOCK_REALTIME` as the fallback on any other OS). All durations, per-batch and concurrent wall clock, come from this function. `trivial-benchmark` no longer supplies timing.
-2. **Small-batch sampling.** Each sample times a batch of N calls, and the per-call estimate is the batch time divided by N. With N of 100 and a call of about 500ns, a sample spans about 50 microseconds. The estimate then has about 10ns of resolution, and the cost of two clock reads is spread over 100 calls.
+1. Nanosecond clock. `get-monotonic-ns` in `bench/harness.lisp` calls `clock_gettime` through CFFI with `CLOCK_MONOTONIC` (constant selected per OS: Linux 1, Darwin 6, FreeBSD 4, and `CLOCK_REALTIME` as the fallback on any other OS). All durations, per-batch and concurrent wall clock, come from this function. `trivial-benchmark` no longer supplies timing.
+2. Small-batch sampling. Each sample times a batch of N calls, and the per-call estimate is the batch time divided by N. With N of 100 and a call of about 500ns, a sample spans about 50 microseconds. The estimate then has about 10ns of resolution, and the cost of two clock reads is spread over 100 calls.
 
 The two changes are complementary. The nanosecond clock removes the quantization problem. Batching amortizes the clock read itself, whose cost is not measured in this repository, and smooths single-call noise.
 
@@ -98,9 +98,9 @@ Percentiles are linearly interpolated between neighbouring ranks of the sorted s
 
 For each scenario, `run-batch-scenario` does the following:
 
-1. **Warm up in full batches.** It runs `ceiling(warmup / batch-size)` complete batches. The warmup uses the same tight loop as the measurement, so the branch predictor and any call-site caches are trained on the code path that is later timed. Warming with individual calls would warm a different loop. At the defaults this is 100 batches (10,000 calls) for a batch of 100, and a single batch (100,000 calls) for a batch of 100,000, because the warmup count is rounded up to whole batches.
-2. **Full GC.** `(trivial-garbage:gc :full t)` runs once, after warmup and before measurement, so warmup garbage does not fall into the first samples.
-3. **Measure.** `iterations` samples, each one batch inside `with-sampling`. The clock reads are inside the `with-sampling` form, so its bookkeeping is outside the timed region.
+1. Warm up in full batches. It runs `ceiling(warmup / batch-size)` complete batches. The warmup uses the same tight loop as the measurement, so the branch predictor and any call-site caches are trained on the code path that is later timed. Warming with individual calls would warm a different loop. At the defaults this is 100 batches (10,000 calls) for a batch of 100, and a single batch (100,000 calls) for a batch of 100,000, because the warmup count is rounded up to whole batches.
+2. Full GC. `(trivial-garbage:gc :full t)` runs once, after warmup and before measurement, so warmup garbage does not fall into the first samples.
+3. Measure. `iterations` samples, each one batch inside `with-sampling`. The clock reads are inside the `with-sampling` form, so its bookkeeping is outside the timed region.
 
 There is no GC between samples. Allocation pressure is part of what a logger costs, and forcing collections between samples would hide the real GC share of the tail. Collections therefore occur during measurement, inflate the tail percentiles, and the report header says so ("p99 includes GC pauses and OS scheduling jitter").
 
@@ -162,12 +162,12 @@ Notes on specific rows:
 
 ### Fairness rules
 
-1. **Same sink, same payloads.** All loggers write to `*discard-stream*` with the shared constants.
-2. **Idiomatic configuration.** Each competitor is configured the way its documentation describes ordinary stream output, not tuned for speed at the expense of features. The configuration is recorded in the adapter source with comments.
-3. **Same logical work through each logger's own API.** log4cl and vom are format-directive loggers and have no field model. For the five- and ten-field scenarios their adapters call the native macro with a format string such as `"method=~a path=~a status=~d ..."` and the values as arguments. They are not wrapped in a shim that accepts keyword fields. The same information is emitted, but the work differs in kind: cl-bark escapes and structures typed values, and the competitors substitute into a format control string. `simple-message` (no fields) is the purest comparison.
-4. **Context scenario.** cl-bark logs through a child with pre-serialized context. log4cl and vom have no equivalent, so their adapters embed the context as a literal prefix in the message string. This measures the closest equivalent, not identical work.
-5. **cl-bark in blocking mode only.** The two cl-bark rows run with `:blocking t`: `cl-bark (blocking, json)` and `cl-bark (blocking, logfmt)`. Async mode returns after an enqueue and excludes the formatted write from the caller's time on the writer thread, while synchronous loggers include the write. Putting an async enqueue number next to synchronous totals in one table invites a comparison that does not hold. Async is measured in the internal suite only. Both formatters are listed because the formatter differs; the label names both mode and formatter.
-6. **Concurrent rows use the five-field adapter.**
+1. Same sink, same payloads. All loggers write to `*discard-stream*` with the shared constants.
+2. Idiomatic configuration. Each competitor is configured the way its documentation describes ordinary stream output, not tuned for speed at the expense of features. The configuration is recorded in the adapter source with comments.
+3. Same logical work through each logger's own API. log4cl and vom are format-directive loggers and have no field model. For the five- and ten-field scenarios their adapters call the native macro with a format string such as `"method=~a path=~a status=~d ..."` and the values as arguments. They are not wrapped in a shim that accepts keyword fields. The same information is emitted, but the work differs in kind: cl-bark escapes and structures typed values, and the competitors substitute into a format control string. `simple-message` (no fields) is the purest comparison.
+4. Context scenario. cl-bark logs through a child with pre-serialized context. log4cl and vom have no equivalent, so their adapters embed the context as a literal prefix in the message string. This measures the closest equivalent, not identical work.
+5. cl-bark in blocking mode only. The two cl-bark rows run with `:blocking t`: `cl-bark (blocking, json)` and `cl-bark (blocking, logfmt)`. Async mode returns after an enqueue and excludes the formatted write from the caller's time on the writer thread, while synchronous loggers include the write. Putting an async enqueue number next to synchronous totals in one table invites a comparison that does not hold. Async is measured in the internal suite only. Both formatters are listed because the formatter differs; the label names both mode and formatter.
+6. Concurrent rows use the five-field adapter.
 
 ### Adapter protocol
 
@@ -275,19 +275,19 @@ Total call count is iterations times batch size. For batch-100,000 scenarios at 
 
 ## Validity Caveats
 
-- **Loop overhead is included.** The counter increment, comparison and thunk call through `funcall` are part of each batch. For disabled-level this can be a large share of the result, which is why the output reads `< 10ns` and not a figure. The `funcall` of a closure is also part of every scenario, the same for all loggers.
-- **p99 includes GC and scheduling.** There is no GC between samples, and the harness does not pin threads or isolate cores. Another process on the machine moves the tail.
-- **Smoothing hides single-call spikes.** See the p99 discussion above.
-- **Fixed scenario order.** Scenarios run in registration order, and later scenarios may benefit from warmer caches. The order is not randomized. Run a single scenario with `SCENARIO` to check whether position matters.
-- **Warmup is single-threaded in the concurrent scenarios.** Worker threads begin cold with respect to per-thread state, caches and any thread-local allocation regions.
-- **Start race.** The clock is read after `gate-open`; see Concurrency Scenarios.
-- **Bytes include harness consing.** The allocation counter covers the whole `with-sampling` region, including the loop and the clock read. The harness does not subtract its own share.
-- **Allocation is per call, averaged.** Bytes come from a total divided by calls, so there is no distribution.
-- **Format-directive loggers do different work.** Interpret the field scenarios as cost of emitting the same information, not the same operation. [../benchmarks.md](../benchmarks.md#reading-the-comparative-results) explains the practical reading.
-- **Async rows are not comparable to synchronous rows.** This is why the comparative table uses blocking mode for cl-bark.
-- **Drop counts are not reported.** `buffer-full-drop` and the async concurrent scenarios can drop messages; the harness neither counts nor prints them. A reader of those rows must remember that some of the calls were drops.
-- **Competitor setup is not neutral under a shared image.** log4cl and vom keep global state (root logger, stream variable). Teardown restores it, but the harness and the competitors share one image and one heap.
-- **Illustrative numbers.** Results depend on machine and SBCL version; numbers from different machines are not comparable.
+- Loop overhead is included. The counter increment, comparison and thunk call through `funcall` are part of each batch. For disabled-level this can be a large share of the result, which is why the output reads `< 10ns` and not a figure. The `funcall` of a closure is also part of every scenario, the same for all loggers.
+- p99 includes GC and scheduling. There is no GC between samples, and the harness does not pin threads or isolate cores. Another process on the machine moves the tail.
+- Smoothing hides single-call spikes. See the p99 discussion above.
+- Fixed scenario order. Scenarios run in registration order, and later scenarios may benefit from warmer caches. The order is not randomized. Run a single scenario with `SCENARIO` to check whether position matters.
+- Warmup is single-threaded in the concurrent scenarios. Worker threads begin cold with respect to per-thread state, caches and any thread-local allocation regions.
+- Start race. The clock is read after `gate-open`; see Concurrency Scenarios.
+- Bytes include harness consing. The allocation counter covers the whole `with-sampling` region, including the loop and the clock read. The harness does not subtract its own share.
+- Allocation is per call, averaged. Bytes come from a total divided by calls, so there is no distribution.
+- Format-directive loggers do different work. Interpret the field scenarios as cost of emitting the same information, not the same operation. [../benchmarks.md](../benchmarks.md#reading-the-comparative-results) explains the practical reading.
+- Async rows are not comparable to synchronous rows. This is why the comparative table uses blocking mode for cl-bark.
+- Drop counts are not reported. `buffer-full-drop` and the async concurrent scenarios can drop messages; the harness neither counts nor prints them. A reader of those rows must remember that some of the calls were drops.
+- Competitor setup is not neutral under a shared image. log4cl and vom keep global state (root logger, stream variable). Teardown restores it, but the harness and the competitors share one image and one heap.
+- Illustrative numbers. Results depend on machine and SBCL version; numbers from different machines are not comparable.
 
 ## Interactions
 

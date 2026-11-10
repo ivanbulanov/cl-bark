@@ -6,9 +6,9 @@ The map of cl-bark: the problem it solves, the one rule that shapes the design, 
 
 A logger sits inside the code it observes, so its cost is paid by application threads. Three costs matter:
 
-- **Disabled calls.** Most `trace` and `debug` calls are off in production. They should cost close to nothing.
-- **Enabled calls.** Formatting and I/O must not make the application wait on a slow disk, pipe or socket.
-- **Structure.** Operators want key-value fields, not format strings, so output can be parsed by machines.
+- Disabled calls. Most `trace` and `debug` calls are off in production. They should cost close to nothing.
+- Enabled calls. Formatting and I/O must not make the application wait on a slow disk, pipe or socket.
+- Structure. Operators want key-value fields, not format strings, so output can be parsed by machines.
 
 The design (Pino-inspired, extended with ideas from zerolog and slog) has four goals: high performance, structured output, flexibility (runtime level changes, swappable formatters, child loggers, dynamic context) and portability., and portability is limited to SBCL on x86-64; see "Invariants and Trade-offs".
 
@@ -72,11 +72,11 @@ writer-loop (src/writer.lisp)                       writer thread "bark-writer"
 
 Points worth knowing when reading the code:
 
-- **The macro does one thing.** `define-log-macro` generates `trace`, `debug`, `info`, `warn`, `error` and `fatal`. It inspects the first argument at expansion time when it is a literal keyword (fields only), otherwise at run time: a `logger-p` value is the logger, a keyword starts a fields-only call, anything else is the message. It then calls the level slot with the logger, the message (`nil` for fields-only calls) and the fields. When `*logger*` is `nil` the call is a no-op and never signals.
-- **Arguments are evaluated before the slot is called.** A disabled level skips formatting, not argument evaluation. `level-enabled-p` exists for guarding expensive argument construction; it checks the level threshold only, not sampling, filters or compile-time settings.
-- **`make-log-fn` builds one closure per level.** The closure declares the `&rest` fields `dynamic-extent`. This is why formatting must complete before the closure returns: the fields list does not outlive the call.
-- **Sampling precedes formatting.** A sampled-out call returns before any string is built. See [sampling.md](sampling.md).
-- **Function outputs are synchronous.** They share `dispatch-to-output` and `deliver-line` with the async path but have no ring buffer or thread. `deliver-line` also has a bare-stream branch, which `make-logger` never reaches because it wraps streams in an async output. `with-captured-logs` relies on a function output.
+- The macro does one thing. `define-log-macro` generates `trace`, `debug`, `info`, `warn`, `error` and `fatal`. It inspects the first argument at expansion time when it is a literal keyword (fields only), otherwise at run time: a `logger-p` value is the logger, a keyword starts a fields-only call, anything else is the message. It then calls the level slot with the logger, the message (`nil` for fields-only calls) and the fields. When `*logger*` is `nil` the call is a no-op and never signals.
+- Arguments are evaluated before the slot is called. A disabled level skips formatting, not argument evaluation. `level-enabled-p` exists for guarding expensive argument construction; it checks the level threshold only, not sampling, filters or compile-time settings.
+- `make-log-fn` builds one closure per level. The closure declares the `&rest` fields `dynamic-extent`. This is why formatting must complete before the closure returns: the fields list does not outlive the call.
+- Sampling precedes formatting. A sampled-out call returns before any string is built. See [sampling.md](sampling.md).
+- Function outputs are synchronous. They share `dispatch-to-output` and `deliver-line` with the async path but have no ring buffer or thread. `deliver-line` also has a bare-stream branch, which `make-logger` never reaches because it wraps streams in an async output. `with-captured-logs` relies on a function output.
 
 ## Threads and the ring buffer
 
@@ -168,14 +168,14 @@ The comparative benchmark against log4cl and vom, and how to read it, is in [../
 
 ## Invariants and Trade-offs
 
-- **The ring buffer holds strings.** Nothing downstream of `deliver-line` interprets events. Filters, sampling and transforms therefore run before the push.
-- **The payload is not fenced.** Ring-buffer slot reads and writes are plain `svref`. Correctness depends on x86 store ordering; see [Ring buffer](#ring-buffer). A port to a weakly ordered CPU needs barriers.
-- **Single consumer.** `ring-buffer-pop` and the drain loop assume one reader per ring. `stop-async-output` drains the remainder after joining the thread for the same reason.
-- **A logger needs `stop` for a clean shutdown.** Writers wake every 0.1 s without a signal, but only `stop` (or the automatic exit drain, see `*exit-flush-timeout*`) joins the thread and drains. Child loggers cannot be stopped; `stop` on a child signals `bark-child-operation-error`.
-- **Child loggers snapshot at creation.** A child copies the parent's formatter, output and `prepared` string and receives the parent's sampler objects at creation; later parent changes are not reflected.
-- **Bounded memory per formatter.** Depth, length and stack-frame limits (`*max-json-depth*`, `*max-json-length*`, `*max-json-stack-frames*`, and pretty equivalents) bound line size and thus caller latency. The key-string cache stops growing at 1024 entries.
-- **Portability is narrower than the dependency list suggests.** `src/writer.lisp` calls `sb-thread:condition-broadcast`, and `src/json.lisp` and `src/logfmt.lisp` call `sb-ext:float-nan-p` without reader conditionals. In the current tree the library loads on SBCL only. The timestamp fallback and the exit-hook branches for other implementations are present but unreachable in practice.
-- **Throughput figures are sink-bound.** Benchmarks use a discard stream; real throughput is limited by the destination and by the single writer per destination.
+- The ring buffer holds strings. Nothing downstream of `deliver-line` interprets events. Filters, sampling and transforms therefore run before the push.
+- The payload is not fenced. Ring-buffer slot reads and writes are plain `svref`. Correctness depends on x86 store ordering; see [Ring buffer](#ring-buffer). A port to a weakly ordered CPU needs barriers.
+- Single consumer. `ring-buffer-pop` and the drain loop assume one reader per ring. `stop-async-output` drains the remainder after joining the thread for the same reason.
+- A logger needs `stop` for a clean shutdown. Writers wake every 0.1 s without a signal, but only `stop` (or the automatic exit drain, see `*exit-flush-timeout*`) joins the thread and drains. Child loggers cannot be stopped; `stop` on a child signals `bark-child-operation-error`.
+- Child loggers snapshot at creation. A child copies the parent's formatter, output and `prepared` string and receives the parent's sampler objects at creation; later parent changes are not reflected.
+- Bounded memory per formatter. Depth, length and stack-frame limits (`*max-json-depth*`, `*max-json-length*`, `*max-json-stack-frames*`, and pretty equivalents) bound line size and thus caller latency. The key-string cache stops growing at 1024 entries.
+- Portability is narrower than the dependency list suggests. `src/writer.lisp` calls `sb-thread:condition-broadcast`, and `src/json.lisp` and `src/logfmt.lisp` call `sb-ext:float-nan-p` without reader conditionals. In the current tree the library loads on SBCL only. The timestamp fallback and the exit-hook branches for other implementations are present but unreachable in practice.
+- Throughput figures are sink-bound. Benchmarks use a discard stream; real throughput is limited by the destination and by the single writer per destination.
 
 ## Interactions
 

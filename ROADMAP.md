@@ -208,45 +208,45 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 
 ### 4.1 Docs that contradict the code. *0.2.0*
 
-- [ ] README: the conditions table says `level-from-keyword` and `set-level` signal `type-error`; they signal
+- [x] README: the conditions table says `level-from-keyword` and `set-level` signal `type-error`; they signal
   `bark-configuration-error`. The `make-logger` signature in Lifecycle is out of date. The async-only keywords list
   omits `:on-error`. Static context is also set by `make-logger :context`. The Backpressure section is out of order.
-  "The API is not expected to change" is wrong for 0.x.
-- [ ] State "SBCL only". The README claims every implementation that `atomics` supports, but `src/writer.lisp` uses
-  `sb-ext` unguarded, and the ring buffer relies on x86-64 ordering.
-- [ ] `docs/value-serialization.md` lists internal functions as exported and says the pretty formatter prints
-  symbols in lower case (it binds `:upcase`).
-- [ ] `docs/design/decisions.md` "Known quirks" says "as of 0.2.0-dev".
+  "The API is not expected to change" is wrong for 0.x. (a0ac761)
+- [x] State "SBCL only". The README claims every implementation that `atomics` supports, but `src/writer.lisp` uses
+  `sb-ext` unguarded, and the ring buffer relies on x86-64 ordering. (a0ac761)
+- [x] `docs/value-serialization.md` lists internal functions as exported and says the pretty formatter prints
+  symbols in lower case (it binds `:upcase`). (a0ac761)
+- [x] `docs/design/decisions.md` "Known quirks" says "as of 0.2.0-dev". (a0ac761)
 - [ ] CONTRIBUTING and `cl-bark.asd` name `verbose` for the comparative bench, which has no verbose adapter.
-- [ ] `docs/blocking-mode.md`: with `:block-timeout nil` a producer waits forever when the writer dies.
+- [x] `docs/blocking-mode.md`: with `:block-timeout nil` a producer waits forever when the writer dies. (a0ac761)
 - [ ] Docstrings: `stop`'s `continue` restart returns NIL; `make-logger` rounds `:capacity` up to a power of two;
   `make-buffer-logger` says samplers apply at flush time (they do not); the exported struct accessors and predicates
   have none.
 
 ### 4.2 Generated and stale files. *0.2.0*
 
-- [ ] Stop committing `docs/api/`: build it in `pages.yml` and ignore it. The committed copy lacks every export added
-  since October.
-- [ ] `BENCHMARKS.md` predates the writer rewrite. Delete it; the method stays in the benchmarks doc. Re-run the
-  comparative bench and date the numbers the README quotes, or remove them.
+- [x] Stop committing `docs/api/`: build it in `pages.yml` and ignore it. The committed copy lacks every export added
+  since October. (583d626)
+- [x] `BENCHMARKS.md` predates the writer rewrite. Delete it; the method stays in the benchmarks doc. Re-run the
+  comparative bench and date the numbers the README quotes, or remove them. Deleted in 583d626; the README numbers now carry their date (4956ce7).
 - [ ] A test that every exported symbol has a docstring, in `make test`.
 - [ ] `.gitignore`: `.serena/`. Untrack the local tool configuration directory.
 
 ### 4.3 Duplication and padding
 
-- [ ] One canonical page per topic: blocking mode and sampling each have a user guide and a design doc that repeat
-  each other; benchmarks, architecture and value serialization are each in three places.
-- [ ] Design docs: delete the template sections that are history ("Alternatives Considered", "Non-Goals"), the
-  "contrast with cl-llog", and the narrative about the first version. `decisions.md` keeps its ADR format.
-- [ ] Cut padding in README and `docs/sampling.md`: bold label plus dash on every line, "Why sampling", the
-  "Recourses" FAQ, repeated claims.
+- [x] One canonical page per topic: blocking mode and sampling each have a user guide and a design doc that repeat
+  each other; benchmarks, architecture and value serialization are each in three places. (4956ce7, 92a806a)
+- [x] Design docs: delete the template sections that are history ("Alternatives Considered", "Non-Goals"), the
+  "contrast with cl-llog", and the narrative about the first version. `decisions.md` keeps its ADR format. (92a806a)
+- [x] Cut padding in README and `docs/sampling.md`: bold label plus dash on every line, "Why sampling", the
+  "Recourses" FAQ, repeated claims. (4956ce7)
 
 ### 4.4 Split the README
 
-- [ ] README of about 250 lines: what it is, status, install, quick start, levels, a one-screen API tour, symbol
+- [x] README of about 250 lines: what it is, status, install, quick start, levels, a one-screen API tour, symbol
   shadowing, dependencies, a documentation table. The rest moves to `docs/` (lifecycle and conditions, context and
   redaction, formatters, multi-output, buffering, benchmarks, reference of globals and exports, architecture into the
-  design overview). Retarget the anchors the design docs link to.
+  design overview). Retarget the anchors the design docs link to. (4956ce7, 92a806a)
 
 ### 4.5 New reference text (sql-zealot, October review)
 

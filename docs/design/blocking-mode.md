@@ -46,7 +46,7 @@ The choice between the two functions is made in `deliver-line` before any ring b
 
 `make-async-output` coerces a non-nil `block-timeout` to `double-float`, so integers, single floats and double floats are all accepted and the deadline arithmetic stays in one type.
 
-**Eager creation.** The lock and the condition variable are created in `make-async-output` when `blocking` is true and are `nil` otherwise. A non-blocking output allocates no extra OS resources, and the writer's broadcast is a no-op when the condition variable is `nil`.
+Eager creation. The lock and the condition variable are created in `make-async-output` when `blocking` is true and are `nil` otherwise. A non-blocking output allocates no extra OS resources, and the writer's broadcast is a no-op when the condition variable is `nil`.
 
 `block-dropped` has no exported reader; `async-output-block-dropped` is internal. The signals available to an application are the `on-block-timeout` callback and, for tests and diagnostics, that slot. There is no analogue of the `on-drop` warning for blocking drops.
 
@@ -56,13 +56,13 @@ The choice between the two functions is made in `deliver-line` before any ring b
 
 `blocking-deliver` runs in the calling thread:
 
-1. **Fast path, no lock.** `ring-buffer-offer`. On success it signals `notify` (so the writer wakes without waiting for its 100 ms poll) and returns.
-2. **Slow path.** The deadline is computed once, as `monotonic-seconds` plus `block-timeout`, or `nil` when there is no timeout. The caller takes `space-lock` and loops:
+1. Fast path, no lock. `ring-buffer-offer`. On success it signals `notify` (so the writer wakes without waiting for its 100 ms poll) and returns.
+2. Slow path. The deadline is computed once, as `monotonic-seconds` plus `block-timeout`, or `nil` when there is no timeout. The caller takes `space-lock` and loops:
    - try `ring-buffer-offer`; on success signal `notify` and return;
    - if `running` is false, leave the loop;
    - compute the remaining time from the fixed deadline; if it is not positive, leave the loop;
    - otherwise `bt:condition-wait` on `space-available` with `:timeout` set to the remaining time (or no timeout).
-3. **Give-up path**, after the lock is released: run `on-block-timeout` if present, then `atomics:atomic-incf` on `block-dropped`.
+3. Give-up path, after the lock is released: run `on-block-timeout` if present, then `atomics:atomic-incf` on `block-dropped`.
 
 Every wake-up, whether a broadcast, a timeout or a spurious wake-up, goes back to the top of the loop and re-attempts `offer`. Wake-ups are hints; the predicate is the ring buffer itself.
 
@@ -161,9 +161,9 @@ The first broadcast comes before the join so that blocked producers are released
 
 ### Known limits
 
-- **Fast path ignores `running`.** A producer arriving after the final drain, with room in the buffer, succeeds at the fast-path `offer`; its line is never written and not counted. The same holds for non-blocking outputs. Callers are expected not to log to a logger they have stopped.
-- **Writer death.** When the writer exits because of a stream error (no `on-error` hook, a hook that fails, or a hook that returns nil), `handle-stream-error` sets `running` to nil. The iteration still reaches `broadcast-space-available`, so producers already waiting wake, see `running` false and give up at once instead of waiting out the timeout. Producers that arrive later with a full buffer also give up on their first locked attempt. Producers that arrive while there is room still queue lines nobody drains, and a later `bark:stop` is a no-op because `running` is already false. Only a writer that disappears without clearing `running` (for example a killed thread) leaves producers to rely on the timeout, and with `block-timeout` nil they wait forever.
-- **`flush` guarantee.** `flush-async-output` waits up to five seconds for an acknowledgment the writer signals during an iteration. It uses its own semaphore and does not depend on `space-available`, so producers that keep refilling the buffer cannot postpone it. It promises that the writer completed a cycle after the request, not that the buffer is empty on return.
+- Fast path ignores `running`. A producer arriving after the final drain, with room in the buffer, succeeds at the fast-path `offer`; its line is never written and not counted. The same holds for non-blocking outputs. Callers are expected not to log to a logger they have stopped.
+- Writer death. When the writer exits because of a stream error (no `on-error` hook, a hook that fails, or a hook that returns nil), `handle-stream-error` sets `running` to nil. The iteration still reaches `broadcast-space-available`, so producers already waiting wake, see `running` false and give up at once instead of waiting out the timeout. Producers that arrive later with a full buffer also give up on their first locked attempt. Producers that arrive while there is room still queue lines nobody drains, and a later `bark:stop` is a no-op because `running` is already false. Only a writer that disappears without clearing `running` (for example a killed thread) leaves producers to rely on the timeout, and with `block-timeout` nil they wait forever.
+- `flush` guarantee. `flush-async-output` waits up to five seconds for an acknowledgment the writer signals during an iteration. It uses its own semaphore and does not depend on `space-available`, so producers that keep refilling the buffer cannot postpone it. It promises that the writer completed a cycle after the request, not that the buffer is empty on return.
 
 ## Edge Cases
 

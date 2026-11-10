@@ -11,11 +11,11 @@ document explains why the two are shaped the way they are. The user-facing refer
 
 A single output per logger does not cover three common needs:
 
-- **Mirroring.** The same events go to several sinks in different formats, for example pretty
+- Mirroring. The same events go to several sinks in different formats, for example pretty
   text on the console and JSON in a file.
-- **Routing.** Different events go to different sinks depending on level or on per-call content,
+- Routing. Different events go to different sinks depending on level or on per-call content,
   for example errors to a dedicated file or audit events to an audit stream.
-- **Explicit selection.** The call site, not configuration, decides which logger receives an event.
+- Explicit selection. The call site, not configuration, decides which logger receives an event.
 
 The sinks differ in speed and in how much loss they tolerate. A network sink may stall for
 seconds while the console never does, and an audit stream may need backpressure where the console
@@ -123,14 +123,14 @@ Other destinations are unaffected.
 
 ## Rationale
 
-**Why a thread per destination rather than one writer.** Each destination gets its own ring
+Why a thread per destination rather than one writer. Each destination gets its own ring
 buffer and writer, so a slow sink (a high-latency network stream) cannot delay a fast one (stderr,
 a local file). A shared writer would serialise all I/O: one slow `write-string` or `force-output`
 would stall every destination. A per-destination thread also reuses the same self-contained loop
 as a single async output, with no pool, multiplexing or coordination. Idle writers wait on a
 semaphore, so for the usual two to four destinations the cost is a few kernel threads.
 
-**Why group by `eq` formatter.** Formatting is the expensive step and is done on the caller
+Why group by `eq` formatter. Formatting is the expensive step and is done on the caller
 thread. Destinations sharing one formatter object need the same line, so it is formatted once and
 the string is pushed to each passing destination. Identity, not equal settings, is the grouping
 key because a formatter holds closures that cannot be compared; two separate
@@ -139,7 +139,7 @@ opt-in by binding one formatter to a variable and passing it to several destinat
 destinations that omit `:formatter` all share the default instance. Grouping also fixes the shape
 of `prepared`, one entry per group.
 
-**Why filters see level and per-call fields but not static context.** Static context is
+Why filters see level and per-call fields but not static context. Static context is
 serialised when the logger is created, once per group, so a filter reading the raw plist would
 need it kept in parallel. Every scenario examined was better solved by separate loggers.
 
@@ -166,7 +166,7 @@ likewise invisible to filters. Content that varies per call goes in the per-call
                             (getf fields :audit))))
 ```
 
-**Why an explicit logger argument as well as a tee.** A tee decides where an event goes after it
+Why an explicit logger argument as well as a tee. A tee decides where an event goes after it
 has been logged, from level and per-call fields only. Routing on identity or static context is
 decided by the call site, and the first argument of the log macros gives it that choice without a
 logger registry or an output override on `make-child`. The macro treats a literal keyword first
@@ -174,13 +174,13 @@ argument as a fields-only call, and classifies any other first argument at runti
 a keyword starting fields, or the message for `*logger*`. The type-tag check is negligible next
 to formatting.
 
-**Why per-destination error isolation.** Logging is best-effort and must not crash or stall the
+Why per-destination error isolation. Logging is best-effort and must not crash or stall the
 application. Because each destination owns its stream, buffer and writer, a failing disk or a
 broken pipe stops one writer and leaves the rest running. Recovery policy (reopen, swap to another
 stream, give up) is the caller's, expressed through `on-error`, so cl-bark does not wrap the
 condition or guess a fallback.
 
-**Why child loggers share the tee.** `make-child` copies the parent's `output`, so a child of a
+Why child loggers share the tee. `make-child` copies the parent's `output`, so a child of a
 tee logger writes to the same destinations and the same writer threads. A child adds static
 context and does not reroute, which keeps the mental model to one rule: routing is chosen by the
 logger passed in, context by the child. Each group's formatter receives the child's own prepared
@@ -213,27 +213,27 @@ string, so the added context appears in every destination.
 
 ## Interactions
 
-- **Child loggers.** A child shares the parent's tee and writers. Its `prepared` vector is built
+- Child loggers. A child shares the parent's tee and writers. Its `prepared` vector is built
   per group by extending the parent's element with the group's `prepare-fn`. `make-child` copies
   the sampler references at creation time, and the level is its own. A child cannot be stopped;
   stop the root.
-- **`with-log-buffer`.** Buffered entries are replayed through `emit-entry` and
+- `with-log-buffer`. Buffered entries are replayed through `emit-entry` and
   `dispatch-to-output` using the root logger's output, so tee filters run at flush time on the
   replayed level and fields, and entries rejected by a filter are discarded as usual. The buffer
   decides whether an entry is emitted; the tee decides where. The field transform runs at replay,
   not at capture. The buffer-logger drops the samplers, so buffered entries are not sampled. See
   [request-scoped-buffering.md](request-scoped-buffering.md).
-- **Blocking mode.** Blocking is per destination. A tee can mix a lossy console with a blocking
+- Blocking mode. Blocking is per destination. A tee can mix a lossy console with a blocking
   audit file, and a full ring blocks the caller only when the event passes that destination's
   filter. `:block-timeout` defaults to 5.0 seconds in `make-tee`. See
   [blocking-mode.md](blocking-mode.md) and the [user guide](../blocking-mode.md).
-- **Sampling.** Sampling runs before field transforms and before dispatch, so a sampled-out event
+- Sampling. Sampling runs before field transforms and before dispatch, so a sampled-out event
   reaches no filter and no destination. Tee filters cannot recover it. See
   [sampling.md](sampling.md).
-- **`flush` and `stop`.** Both act on every destination of the tee. `flush` waits for each ring
+- `flush` and `stop`. Both act on every destination of the tee. `flush` waits for each ring
   in turn, so its worst case grows with the destination count. A stopped writer makes `flush`
   signal `bark-async-stopped`; the `continue` restart skips it.
-- **Formatter protocol.** Each group's formatter supplies `prepare-fn` at logger and child
+- Formatter protocol. Each group's formatter supplies `prepare-fn` at logger and child
   creation and `format-fn` at emit time. Filters never see the prepared string. See
   [formatter-protocol.md](formatter-protocol.md).
 

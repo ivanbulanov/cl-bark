@@ -8,8 +8,8 @@ Conditions are the main payload of `:error` and `:fatal` log calls. The generic 
 
 Two separate needs follow, with different costs:
 
-- **Type and message.** Cheap, always available from the condition object, and enough for most log lines.
-- **Backtrace.** Expensive, and only meaningful at the point where the condition is signaled. A backtrace describes the live control stack. It cannot be reconstructed from the condition object afterwards.
+- Type and message. Cheap, always available from the condition object, and enough for most log lines.
+- Backtrace. Expensive, and only meaningful at the point where the condition is signaled. A backtrace describes the live control stack. It cannot be reconstructed from the condition object afterwards.
 
 The design keeps the cheap part free of caller effort and makes the expensive part explicit.
 
@@ -35,9 +35,9 @@ The formatting code is split across `src/format-util.lisp` (shared helpers such 
 
 ## Two-Tier Model
 
-**Tier 1: a bare condition.** Any field value for which `(typep value 'condition)` holds is serialized with its type name and its report text. There is no wrapper and no registration. The type name is `(string-downcase (princ-to-string (type-of c)))` (`type-name-string` in `src/format-util.lisp`). The message is the condition printed with `princ`, so the condition's `:report` function (or `print-object`) decides the text.
+Tier 1: a bare condition. Any field value for which `(typep value 'condition)` holds is serialized with its type name and its report text. There is no wrapper and no registration. The type name is `(string-downcase (princ-to-string (type-of c)))` (`type-name-string` in `src/format-util.lisp`). The message is the condition printed with `princ`, so the condition's `:report` function (or `print-object`) decides the text.
 
-**Tier 2: `capture`.** `(bark:capture condition)` returns a `captured-error` that stores the condition and a snapshot of the stack. The result is passed as a field value like any other. Formatters detect it and add the frames.
+Tier 2: `capture`. `(bark:capture condition)` returns a `captured-error` that stores the condition and a snapshot of the stack. The result is passed as a field value like any other. Formatters detect it and add the frames.
 
 ### Why the backtrace is captured in the handler
 
@@ -71,9 +71,9 @@ Because the macros evaluate their arguments before the level function is called,
 
 ### What it costs
 
-- **Time.** `capture` calls `dissect:stack`, which walks the entire control stack. There is no depth limit at capture time. The cost is paid once per `capture`, on the calling thread.
-- **Memory.** The full frame list is retained for as long as the struct is referenced. JSON and pretty output print at most 10 or 20 frames by default, but all frames are stored, because the limits are applied when formatting, not when capturing. This allows one captured error to be rendered by several formatters with different limits (for example, a tee with a JSON file destination and a pretty console destination).
-- **Not captured.** Local variables, restarts, thread identity, and timestamps. `dissect` can collect locals; cl-bark does not request them.
+- Time. `capture` calls `dissect:stack`, which walks the entire control stack. There is no depth limit at capture time. The cost is paid once per `capture`, on the calling thread.
+- Memory. The full frame list is retained for as long as the struct is referenced. JSON and pretty output print at most 10 or 20 frames by default, but all frames are stored, because the limits are applied when formatting, not when capturing. This allows one captured error to be rendered by several formatters with different limits (for example, a tee with a JSON file destination and a pretty console destination).
+- Not captured. Local variables, restarts, thread identity, and timestamps. `dissect` can collect locals; cl-bark does not request them.
 
 ### Frame stripping
 
@@ -186,15 +186,15 @@ This matches the contract in [value-serialization.md](../value-serialization.md)
 
 ## Invariants and Trade-offs
 
-- **Logging never signals, with one gap.** The condition clauses do not recurse and write bounded output, but `princ-to-string` of a condition runs the user's `:report` function with no error protection around formatting. A report function that signals propagates out of the log call.
-- **Bounded output.** The condition object is never traversed, so the object portion is a fixed two keys. Only the stack is variable, and it is bounded by the frame limits, except when a limit is `NIL`.
-- **Depth is not consulted.** The condition clauses ignore the `depth` argument of `emit-json-value`. They fire whatever the remaining depth.
-- **`*max-json-length*` does not apply to frames.** Frames have their own limit. The message text itself is not length-limited.
-- **`captured-error` is never a condition.** Code that dispatches on `condition` does not see it, and the formatters must handle both explicitly.
-- **Eager capture, lazy rendering.** The expensive step happens at the signal site; rendering happens later and can happen several times.
-- **Printer variables.** The pretty formatter binds `*print-level*`, `*print-length*`, and `*print-circle*` around the line, so they also shape the report text there. JSON and logfmt `princ` under the ambient printer settings.
-- **Key-string cache.** JSON `call` text goes through `key-string`, which memoizes symbols in a bounded cache (1024 entries, shared with field keys). Frame symbols can occupy slots that field keys would otherwise use.
-- **Hard dependency.** The library depends on `dissect` for everyone, not only for users of `capture`.
+- Logging never signals, with one gap. The condition clauses do not recurse and write bounded output, but `princ-to-string` of a condition runs the user's `:report` function with no error protection around formatting. A report function that signals propagates out of the log call.
+- Bounded output. The condition object is never traversed, so the object portion is a fixed two keys. Only the stack is variable, and it is bounded by the frame limits, except when a limit is `NIL`.
+- Depth is not consulted. The condition clauses ignore the `depth` argument of `emit-json-value`. They fire whatever the remaining depth.
+- `*max-json-length*` does not apply to frames. Frames have their own limit. The message text itself is not length-limited.
+- `captured-error` is never a condition. Code that dispatches on `condition` does not see it, and the formatters must handle both explicitly.
+- Eager capture, lazy rendering. The expensive step happens at the signal site; rendering happens later and can happen several times.
+- Printer variables. The pretty formatter binds `*print-level*`, `*print-length*`, and `*print-circle*` around the line, so they also shape the report text there. JSON and logfmt `princ` under the ambient printer settings.
+- Key-string cache. JSON `call` text goes through `key-string`, which memoizes symbols in a bounded cache (1024 entries, shared with field keys). Frame symbols can occupy slots that field keys would otherwise use.
+- Hard dependency. The library depends on `dissect` for everyone, not only for users of `capture`.
 
 ## Interactions
 
