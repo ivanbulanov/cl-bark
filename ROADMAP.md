@@ -158,7 +158,7 @@ which destination failed.
 `set-level` has no reader. The internal `bark::logger-level` is the struct accessor: it returns a number, is
 `setf`-able, and the macro expansions in compiled user code call it, so it cannot become the public reader.
 
-- [ ] Export `(bark:current-level logger)`, returning the keyword.
+- [x] Export `(bark:current-level logger)`, returning the keyword. (df5d72c)
 
 ### 2.5 Rename `set-level-sampling` to `set-level-sampler` (October review). *0.2.0*
 
