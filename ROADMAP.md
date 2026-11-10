@@ -63,9 +63,9 @@ application.
 - [x] Tag `v0.1.0` at `67e1b91` (local, annotated, dated at the commit). The two CI commits after it change only
   `ci.yml`.
 - [x] *Owner*: push the tag and `main` (after `git offhours plan`). Pushed with `main` at e59a6bc.
-- [ ] *0.2.0*: a Migration subsection in the 0.2.0 changelog entry: `*compile-time-max-level*` is now
+- [x] *0.2.0*: a Migration subsection in the 0.2.0 changelog entry: `*compile-time-max-level*` is now
   `*compile-time-min-level*`, `register-exit-hook` is removed, `flush` and `stop` return a value, and every other
-  rename in the release.
+  rename in the release. (611bc26)
 - [ ] *0.2.0*: the release commit: changelog heading and date, `:version "0.2.0"` in `cl-bark.asd`.
 
 ### 1.2 Bump the `.asd` version on every release (sql-zealot)
