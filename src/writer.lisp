@@ -607,7 +607,3 @@ The output is drained automatically when the image exits."
 (pushnew 'save-live-outputs sb-ext:*save-hooks*)
 
 (pushnew 'restart-saved-outputs sb-ext:*init-hooks*)
-
-(progn
-  (pushnew 'save-live-outputs sb-ext:*save-hooks*)
-  (pushnew 'restart-saved-outputs sb-ext:*init-hooks*))
