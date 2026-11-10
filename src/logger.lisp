@@ -371,6 +371,13 @@ Signals BARK-CONFIGURATION-ERROR for an unknown level."
     (setf (logger-level logger) level-val)
     (wire-level-fns logger level-val #'make-log-fn)))
 
+(defun current-level (logger)
+  "Return the minimum log level of LOGGER as a keyword, :trace through :fatal, or NIL
+when LOGGER is nil. A child logger has a level of its own, copied from its parent
+at creation, so a later SET-LEVEL on the parent does not change it."
+  (when logger
+    (svref #(nil :trace :debug :info :warn :error :fatal) (logger-level logger))))
+
 (defun level-enabled-p (logger level)
   "Return T if LEVEL (keyword or level constant) is enabled on LOGGER. NIL when
 LOGGER is nil. Checks the level threshold only — does not account for sampling

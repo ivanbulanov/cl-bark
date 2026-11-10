@@ -40,7 +40,7 @@
    ;; logger
    #:*logger* #:*log-context* #:*compile-time-min-level*
    #:logger #:logger-p
-   #:make-logger #:make-child #:set-level #:level-enabled-p
+   #:make-logger #:make-child #:set-level #:current-level #:level-enabled-p
    #:make-windowed-counter #:make-level-sampler #:set-level-sampler
    #:make-consistent-sampler #:set-consistent
    #:flush #:stop #:dropped-count #:*exit-flush-timeout*

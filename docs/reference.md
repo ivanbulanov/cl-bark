@@ -25,7 +25,7 @@ lists the special variables and gives one line for each exported symbol, with th
 |---------|------|
 | `trace` `debug` `info` `warn` `error` `fatal`, `logger`, `logger-p`, `*logger*` | [README](../README.md) |
 | `+trace+` `+debug+` `+info+` `+warn+` `+error+` `+fatal+` (level constants), `level-name` (level number to name string) | [README](../README.md) |
-| `make-logger`, `make-child`, `set-level`, `level-enabled-p`, `flush`, `stop`, `dropped-count`, `default-on-drop` | [lifecycle.md](lifecycle.md) |
+| `make-logger`, `make-child`, `set-level`, `current-level`, `level-enabled-p`, `flush`, `stop`, `dropped-count`, `default-on-drop` | [lifecycle.md](lifecycle.md) |
 | `bark-error`, `bark-configuration-error`, `bark-lifecycle-error`, `bark-async-stopped`, `bark-child-operation-error` | [lifecycle.md](lifecycle.md) |
 | `with-context`, `*log-context*` | [context.md](context.md) |
 | `make-tee`, `tee` | [multi-output.md](multi-output.md) |

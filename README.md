@@ -107,6 +107,7 @@ To guard expensive argument computation, use `level-enabled-p`. It checks the le
 
 (bark:make-child parent :context '(:component "auth"))   ; static context, shared output
 (bark:set-level logger :debug)                           ; change the level at runtime
+(bark:current-level logger)                              ; the level as a keyword, :debug
 (bark:flush logger)                                      ; block until pending lines are written
 (bark:stop logger)                                       ; drain and join the writer threads
 ```

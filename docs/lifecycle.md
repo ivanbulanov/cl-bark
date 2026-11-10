@@ -19,6 +19,9 @@
 ;; Change level at runtime (swaps function slots)
 (bark:set-level logger level)
 
+;; Read the level back as a keyword (:trace through :fatal; NIL for a nil logger)
+(bark:current-level logger)
+
 ;; Set per-level sampling (windowed-counter, or nil to remove)
 (bark:set-level-sampler logger level windowed-counter)
 

@@ -482,6 +482,27 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
     (5am:is-false (eq #'noop (logger-error-fn lgr)))
     (5am:is-false (eq #'noop (logger-fatal-fn lgr)))))
 
+(5am:test test-current-level-returns-the-keyword
+  "current-level returns the logger's level as a keyword and follows set-level."
+  (let ((lgr (make-logger :level :info)))
+    (5am:is (eq :info (bark:current-level lgr)))
+    (bark:set-level lgr :debug)
+    (5am:is (eq :debug (bark:current-level lgr)))
+    (bark:set-level lgr bark:+fatal+)
+    (5am:is (eq :fatal (bark:current-level lgr)))
+    (bark:set-level lgr :trace)
+    (5am:is (eq :trace (bark:current-level lgr)))))
+
+(5am:test test-current-level-of-nil-and-of-a-child
+  "current-level of NIL is NIL; a child keeps the level it copied at creation."
+  (5am:is (null (bark:current-level nil)))
+  (let* ((parent (make-logger :level :warn))
+         (child (bark:make-child parent :context '(:component "db"))))
+    (5am:is (eq :warn (bark:current-level child)))
+    (bark:set-level parent :debug)
+    (5am:is (eq :debug (bark:current-level parent)))
+    (5am:is (eq :warn (bark:current-level child)))))
+
 (5am:test test-set-level-all-disabled
   "Set level to the maximum, verify all function slots are noop; an out-of-range
 level signals bark-configuration-error."
