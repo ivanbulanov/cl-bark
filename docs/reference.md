@@ -15,6 +15,7 @@ lists the special variables and gives one line for each exported symbol, with th
 | `bark:*max-json-length*` | `20` | Maximum elements per collection in JSON output. |
 | `bark:*max-pretty-depth*` | `4` | Bound to `*print-level*` in the pretty formatter (NIL is unlimited). |
 | `bark:*max-pretty-length*` | `20` | Bound to `*print-length*` in the pretty formatter (NIL is unlimited). |
+| `bark:*capture-max-frames*` | `50` | Default for `capture`'s `:max-frames`: the most stack frames a captured error keeps (NIL is unlimited). |
 | `bark:*max-json-stack-frames*` | `10` | Maximum stack frames in JSON condition output (NIL is unlimited). |
 | `bark:*max-pretty-stack-frames*` | `20` | Maximum stack frames in pretty condition output (NIL is unlimited). |
 | `bark:*default-json-formatter*`, `bark:*default-logfmt-formatter*`, `bark:*default-pretty-formatter*` | | The formatter instances `make-logger` and `make-tee` use by default. |
@@ -30,7 +31,7 @@ lists the special variables and gives one line for each exported symbol, with th
 | `with-context`, `*log-context*` | [context.md](context.md) |
 | `make-tee`, `tee` | [multi-output.md](multi-output.md) |
 | `formatter`, `formatter-p`, `formatter-prepare-fn`, `formatter-format-fn`, `make-formatter`, `json-formatter`, `logfmt-formatter`, `pretty-formatter`, `make-json-formatter`, `make-logfmt-formatter`, `make-pretty-formatter`, `current-log-timestamp-ms` | [formatters.md](formatters.md) |
-| `capture`, `captured-error-p`, `captured-error-condition`, `captured-error-stack` | [formatters.md](formatters.md) |
+| `capture`, `*capture-max-frames*`, `captured-error-p`, `captured-error-condition`, `captured-error-stack` | [formatters.md](formatters.md) |
 | `make-windowed-counter`, `make-level-sampler`, `set-level-sampler`, `make-consistent-sampler`, `set-consistent` | [sampling.md](sampling.md) |
 | `with-log-buffer`, `buffer-entry-level`, `buffer-entry-message`, `buffer-entry-fields`, `buffer-entry-context`, `buffer-entry-timestamp` | [request-scoped-buffering.md](request-scoped-buffering.md) |
 | `with-captured-logs` | [README](../README.md) |

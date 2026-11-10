@@ -2239,17 +2239,14 @@ level signals bark-configuration-error."
     (5am:is (listp (captured-error-stack ce)))))
 
 (5am:test test-capture-strips-internal-frames
-  "Verify capture does not include bark/dissect internal frames."
+  "capture keeps no BARK or DISSECT frame on top; the stack starts at the caller."
   (let* ((c (make-condition 'simple-error :format-control "test"))
-         (ce (bark:capture c)))
-    ;; No frame should have BARK or DISSECT in its call
-    (dolist (frame (captured-error-stack ce))
-      (let ((call (dissect:call frame)))
-        (when (symbolp call)
-          (let ((pkg (symbol-package call)))
-            (when pkg
-              (5am:is-false (member (package-name pkg) '("BARK" "DISSECT") :test #'string=)
-                            "Frame ~a should not be from BARK or DISSECT" call))))))))
+         (ce (bark:capture c))
+         (first-call (getf (first (captured-error-stack ce)) :call)))
+    (5am:is (search "TEST-CAPTURE-STRIPS-INTERNAL-FRAMES" first-call)
+            "The top frame should be the test's, not ~a" first-call)
+    (5am:is-false (or (eql 0 (search "BARK:" first-call))
+                      (search "ORG.TYMOONNEXT.DISSECT" first-call)))))
 
 (5am:test test-json-condition-simple-error
   "emit-json-value on a simple-error produces {\"type\":...,\"msg\":...}."
@@ -3942,6 +3939,60 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
            (5am:is-false (wait-until-unhealthy lgr)))
       (bark:stop lgr))
     (5am:is-true (search "to both" (get-output-stream-string good)))))
+
+(5am:test test-capture-stack-is-plain-data
+  "Each captured frame is a plist of a call string, a file namestring or NIL, and a line or NIL."
+  (let ((ce (block capture-in-handler
+              (handler-bind ((cl:error (lambda (c) (return-from capture-in-handler (bark:capture c)))))
+                (cl:error "plain data")))))
+    (5am:is (plusp (length (captured-error-stack ce))))
+    (dolist (frame (captured-error-stack ce))
+      (5am:is (equal '(:call :file :line) (loop for key in frame by #'cddr collect key)))
+      (5am:is (stringp (getf frame :call)))
+      (5am:is (typep (getf frame :file) '(or null string)))
+      (5am:is (typep (getf frame :line) '(or null integer))))))
+
+(5am:test test-capture-max-frames
+  "capture keeps at most :max-frames frames, *capture-max-frames* by default; NIL keeps all."
+  (let* ((c (make-condition 'simple-error :format-control "deep"))
+         (all (length (captured-error-stack (bark:capture c :max-frames nil)))))
+    (5am:is (= 50 bark:*capture-max-frames*))
+    (5am:is (= (min 3 all) (length (captured-error-stack (bark:capture c :max-frames 3)))))
+    (5am:is (null (captured-error-stack (bark:capture c :max-frames 0))))
+    (let ((bark:*capture-max-frames* 2))
+      (5am:is (= (min 2 all) (length (captured-error-stack (bark:capture c))))))))
+
+(5am:test test-internal-frames-are-found-by-package
+  "A frame is internal when the symbol naming its function is in BARK or DISSECT, whatever its name."
+  (5am:is (eq 'bark-tests::embark (bark::frame-name-symbol '(lambda () :in bark-tests::embark))))
+  (5am:is (eq 'bark-tests::embark (bark::frame-name-symbol '(flet inner :in bark-tests::embark))))
+  (5am:is (eq 'bark:capture (bark::frame-name-symbol '(sb-c::&more-processor bark:capture))))
+  (5am:is (eq 'bark-tests::embark (bark::frame-name-symbol '(setf bark-tests::embark))))
+  (5am:is (null (bark::frame-name-symbol "top level form")))
+  (flet ((internal-p (name)
+           (bark::internal-frame-p
+            (make-instance 'dissect:call :call name))))
+    (5am:is-false (internal-p 'bark-tests::embark))
+    (5am:is-false (internal-p '(lambda () :in bark-tests::embark)))
+    (5am:is-false (internal-p "BARK top level form"))
+    (5am:is-true (internal-p 'bark::write-json-string))
+    (5am:is-true (internal-p '(flet bark::add :in bark:dropped-count)))
+    (5am:is-true (internal-p 'dissect:stack))))
+
+(5am:test test-captured-error-formats-after-its-frames-end
+  "A captured error stored past its handler formats as JSON with call, file and line."
+  (let* ((ce (block capture-in-handler
+               (handler-bind ((cl:error (lambda (c) (return-from capture-in-handler (bark:capture c)))))
+                 (cl:error "stored"))))
+         (out (make-string-output-stream))
+         (lgr (make-logger :level :info :formatter (make-json-formatter) :output (sync-output out))))
+    (bark:error lgr "later" :err ce)
+    (let* ((json (yason:parse (get-output-stream-string out)))
+           (err (gethash "err" json))
+           (stack (gethash "stack" err)))
+      (5am:is (string= "stored" (gethash "msg" err)))
+      (5am:is (plusp (length stack)))
+      (5am:is (every (lambda (frame) (stringp (gethash "call" frame))) stack)))))
 
 (5am:test test-every-export-has-a-docstring
   "Every symbol BARK exports names a definition, and each of its definitions has a docstring."

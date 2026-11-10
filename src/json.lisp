@@ -96,17 +96,17 @@
                  (write-json-string stream (princ-to-string value)))))))
 
 (defun emit-json-stack-frame (stream frame)
-  "Write one stack frame as a JSON object {\"call\":...,\"file\":...,\"line\":...}."
+  "Write one stack frame, a plist (:CALL :FILE :LINE) from CAPTURE, as a JSON object
+   {\"call\":...,\"file\":...,\"line\":...}."
   (write-string "{\"call\":\"" stream)
-  (let ((call (dissect:call frame)))
-    (write-json-escaped-string (key-string call) stream))
+  (write-json-escaped-string (getf frame :call) stream)
   (write-char #\" stream)
-  (let ((file (dissect:file frame)))
+  (let ((file (getf frame :file)))
     (when file
       (write-string ",\"file\":\"" stream)
-      (write-json-escaped-string (namestring file) stream)
+      (write-json-escaped-string file stream)
       (write-char #\" stream)))
-  (let ((line (dissect:line frame)))
+  (let ((line (getf frame :line)))
     (when line
       (write-string ",\"line\":" stream)
       (princ line stream)))

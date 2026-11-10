@@ -124,15 +124,21 @@ For stack traces, use `bark:capture` inside `handler-bind` (stack still live):
                                        :err (bark:capture c))
                            (invoke-restart 'abort))))
   (process-request))
-;; JSON err field: {"type":"simple-error","msg":"...","stack":[{"call":"process-request","file":"api.lisp","line":42},...]}
+;; JSON err field: {"type":"simple-error","msg":"...","stack":[{"call":"MYAPP::PROCESS-REQUEST","file":"/srv/myapp/api.lisp","line":42},...]}
 ;; pretty: ERROR request failed err=simple-error: connection refused
-;;           at PROCESS-REQUEST (api.lisp:42)
-;;           at HANDLE-CONNECTION (server.lisp:88)
+;;           at MYAPP::PROCESS-REQUEST (/srv/myapp/api.lisp:42)
+;;           at MYAPP::HANDLE-CONNECTION (/srv/myapp/server.lisp:88)
 ```
 
 `bark:capture` works in `handler-case` too, but the stack trace reflects the handler's location (the stack has already unwound), not the error origin.
 
-Stack frame limits:
+`capture` turns the stack into plain data while the frames are live: `captured-error-stack` is a list of plists `(:call string :file namestring-or-NIL :line integer-or-NIL)`, innermost first. The call is printed with its package prefix (COMMON-LISP's omitted), and a frame that fails to print becomes `"#<unprintable frame>"`. No frame object, argument or local variable is kept, so a captured error can be stored, replayed from `with-log-buffer` or formatted later, and it does not hold on to the values of the frames' arguments. `capture` keeps at most `:max-frames` frames, by default `bark:*capture-max-frames*` (50; NIL keeps all):
+
+```lisp
+(bark:capture c :max-frames 200)
+```
+
+Stack frame limits at format time, applied on top of the `capture` limit:
 
 ```lisp
 (setf bark:*max-json-stack-frames* 20)    ; default 10, NIL = unlimited

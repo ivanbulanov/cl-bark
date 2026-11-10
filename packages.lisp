@@ -22,7 +22,7 @@
    ;; levels
    #:+trace+ #:+debug+ #:+info+ #:+warn+ #:+error+ #:+fatal+
    ;; conditions
-   #:capture
+   #:capture #:*capture-max-frames*
    #:captured-error-p #:captured-error-condition #:captured-error-stack
    ;; timestamps
    #:current-log-timestamp-ms

@@ -32,11 +32,8 @@
 ;;; --- Pretty Formatter Helpers ---
 
 (defun format-frame-call (frame)
-  "Format a stack frame's call as an uppercase string."
-  (let ((call (dissect:call frame)))
-    (if (symbolp call)
-        (symbol-name call)
-        (string-upcase (princ-to-string call)))))
+  "Return the call string of FRAME, a plist from CAPTURE."
+  (getf frame :call))
 
 (defun emit-pretty-stack (stream stacks)
   "Write accumulated stack traces. STACKS is a list of (key . captured-error) pairs."
@@ -57,13 +54,13 @@
               (format stream "~%~a~c[2m... (~d more frames)~c[0m"
                       indent #\Esc (- total i) #\Esc)
               (return))
-            (let ((file (dissect:file frame))
-                  (line (dissect:line frame)))
+            (let ((file (getf frame :file))
+                  (line (getf frame :line)))
               (format stream "~%~a~c[1mat ~a~c[0m" indent #\Esc (format-frame-call frame) #\Esc)
               (when (or file line)
                 (format stream " ~c[2m(~@[~a~]~@[:~d~])~c[0m"
                         #\Esc
-                        (when file (namestring file))
+                        file
                         line
                         #\Esc)))
             (incf i)))))))

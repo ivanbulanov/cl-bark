@@ -67,28 +67,26 @@ Because the macros evaluate their arguments before the level function is called,
 | Exports | `capture`, `captured-error-p`, `captured-error-condition`, `captured-error-stack`. The type name `captured-error` itself is not exported (`packages.lisp`); use `captured-error-p` from outside the package. |
 | Slots | Read-only. The wrapped condition is never modified. |
 | Not a condition | The struct is not a subtype of `condition`, so it cannot be signaled or handled by accident, and it never matches the `condition` clause of a formatter. |
-| Stack contents | A list of `dissect` frame objects, most recent first, with leading cl-bark and `dissect` frames removed. |
+| Stack contents | A list of at most `:max-frames` plists `(:call string :file namestring-or-NIL :line integer-or-NIL)`, most recent first, with the frames of `capture` and `dissect` removed. No `dissect` object is kept. |
 
 ### What it costs
 
-- Time. `capture` calls `dissect:stack`, which walks the entire control stack. There is no depth limit at capture time. The cost is paid once per `capture`, on the calling thread.
-- Memory. The full frame list is retained for as long as the struct is referenced. JSON and pretty output print at most 10 or 20 frames by default, but all frames are stored, because the limits are applied when formatting, not when capturing. This allows one captured error to be rendered by several formatters with different limits (for example, a tee with a JSON file destination and a pretty console destination).
-- Not captured. Local variables, restarts, thread identity, and timestamps. `dissect` can collect locals; cl-bark does not request them.
+- Time. `capture` calls `dissect:stack`, which walks the entire control stack and reads every frame's arguments and locals; then it prints the call, file and line of the first `:max-frames` frames. The cost is paid once per `capture`, on the calling thread.
+- Memory. At most `:max-frames` frames (default `*capture-max-frames*`, 50) are kept, as strings and integers. JSON and pretty output print at most 10 or 20 of them by default; those limits apply when formatting, so one captured error can be rendered by several formatters with different limits (for example, a tee with a JSON file destination and a pretty console destination).
+- Plain data. The frames were once kept as `dissect` objects and formatted later, which went wrong for a captured error formatted after its frames had ended (replayed from `with-log-buffer`, or stored): a frame with a stale `&more` area faulted. The objects also kept every frame's arguments, which can be secrets, alive. Converting at capture time, while the frames are live, removes both. A frame that fails to print becomes `"#<unprintable frame>"`.
+- Not captured. Local variables, restarts, thread identity, and timestamps.
 
 ### Frame stripping
 
-`dissect:stack` starts with frames belonging to `capture` and to `dissect`. `internal-frame-p` identifies them, and `strip-internal-frames` drops the leading run so the first frame shown is the caller's code. The substring search runs on the upcased printed call for non-symbol frames, so the match is case-insensitive.
+Called outside a handler, `dissect:stack` starts with its own frame, an anonymous `(LAMBDA () :IN "<file>")`, then `capture`. Called inside a handler, it starts at the frame that signalled. `strip-internal-frames` drops every frame up to and including the first `capture` frame, if there is one, and then the leading run of internal frames, so the first frame shown is the caller's code.
 
-| Frame `call` | Internal when |
-|--------------|---------------|
-| A symbol | The symbol has a package and the package name is `BARK` or `DISSECT` |
-| Anything else (lambda, `flet`, `labels` entries are reported as lists) | The upcased printed form contains the substring `BARK` or `DISSECT` |
+`internal-frame-p` compares packages, not printed names. `frame-name-symbol` finds the symbol that names a frame's function: the symbol itself, what follows `:in` in `(flet name :in outer)` or `(lambda args :in outer)`, or the second element of another list such as `(sb-pcl::fast-method name ...)`. The frame is internal when that symbol's package is cl-bark's or dissect's (compared as package objects, so a renamed copy of cl-bark works too). A user function named `EMBARK` is not internal; the earlier substring test on the printed call dropped it.
 
-Only the leading run is stripped. A cl-bark frame deeper in the stack stays, and so does every frame below the first non-internal one. The substring test for non-symbol calls is a heuristic: a leading anonymous frame whose printed form happens to contain `BARK` is also stripped, and an anonymous frame deeper in the stack is never examined.
+Only the leading run is stripped. A cl-bark frame deeper in the stack stays.
 
 ## The `dissect` Dependency
 
-Common Lisp has no standard way to obtain a backtrace. Each implementation exposes its own, and the frame shape differs. cl-bark uses `dissect` for exactly four things: `dissect:stack`, `dissect:call`, `dissect:file`, and `dissect:line`. No `sb-*` symbol appears in `src/conditions.lisp`, so the capture and the frame rendering are as portable as `dissect` is. (Other parts of the formatters use `sb-ext:float-nan-p`, which is unrelated to this feature.)
+Common Lisp has no standard way to obtain a backtrace. Each implementation exposes its own, and the frame shape differs. cl-bark uses `dissect` for exactly four things, all in `src/conditions.lisp`: `dissect:stack`, `dissect:call`, `dissect:file`, and `dissect:line`. The formatters read only the plists `capture` made. (Other parts of the formatters use `sb-ext:float-nan-p`, which is unrelated to this feature.)
 
 The recorded rationale for `dissect` is portability: one library, one frame accessor protocol, across SBCL, CCL, ECL, Allegro, ABCL, Clasp, and CLISP.
 
@@ -126,13 +124,13 @@ All three formatters dispatch on the field value with a closed `typecase` or `co
 
 ```
 {"type":"simple-error","msg":"boom"}
-{"type":"simple-error","msg":"boom","stack":[{"call":"open-connection","file":"net.lisp","line":87},{"call":"..."}]}
+{"type":"simple-error","msg":"boom","stack":[{"call":"MYAPP::OPEN-CONNECTION","file":"/srv/myapp/net.lisp","line":87},{"call":"..."}]}
 ```
 
 - `msg` is always present; an empty report text gives `""`, not an absent key.
 - `emit-json-condition-fields` writes the bare `"type":..,"msg":..` pair without braces, so the captured-error clause can append `emit-json-stack` before closing. It cannot use `emit-json-key`, which always prepends a comma.
-- `call` goes through `key-string`: symbols are downcased, strings pass through, and any other object (a list for lambda, `flet`, or `labels` frames) is written with `princ-to-string` and is not downcased. A lambda frame therefore appears as `(LAMBDA () :IN LOAD-AS-SOURCE)` in upper case, while named functions appear in lower case.
-- `file` (via `namestring`) and `line` are omitted when `dissect` reports none.
+- `call` is the string `capture` printed: the function name with its package prefix, such as `MYAPP::OPEN-CONNECTION` or `(LAMBDA () :IN MYAPP::RUN)`.
+- `file` and `line` are omitted when `dissect` reported none.
 - An empty stack gives `"stack":[]` with no sentinel. When more frames exist than the limit, the sentinel `{"call":"..."}` follows the last written frame. It parallels the `"..."` sentinel of length-limited collections and keeps `stack` an array of objects.
 - Because the condition's own `msg` is nested inside the field object, it does not collide with the top-level log `msg` key (`level`, `ts`, the fields, then the log message, in that order).
 
@@ -146,8 +144,8 @@ All three formatters dispatch on the field value with a closed `typecase` or `co
 
 ```
 ERROR request failed err=simple-error: boom
-  at OPEN-CONNECTION (net.lisp:87)
-  at PROCESS-REQUEST (api.lisp:42)
+  at MYAPP::OPEN-CONNECTION (/srv/myapp/net.lisp:87)
+  at MYAPP::PROCESS-REQUEST (/srv/myapp/api.lisp:42)
   ... (3 more frames)
 ```
 
@@ -155,7 +153,7 @@ ERROR request failed err=simple-error: boom
 
 - Stacks are appended after all fields rather than inline, so the first line keeps its field order.
 - One captured error produces an unlabeled block indented two spaces. Several in one call produce a dim `key:` label line per block, with frames indented four spaces.
-- `format-frame-call` upcases the call, symbol or not. File and line are optional independently: `(file:line)`, `(file)`, or `(:line)` forms depend on what `dissect` reports.
+- The call is written as `capture` printed it. File and line are optional independently: `(file:line)`, `(file)`, or `(:line)` forms depend on what `dissect` reported.
 - The truncation line reports `total - i` frames, where `total` is the length of the whole stored stack.
 - The type name is not colored; only the level, keys, call names, and locations carry ANSI styling.
 

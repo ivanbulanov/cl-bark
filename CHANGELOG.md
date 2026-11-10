@@ -12,6 +12,12 @@ minor versions, and such changes are listed under **Changed**.
 - Rename `*compile-time-max-level*` to `*compile-time-min-level*` (breaking); it now works: bound at macroexpansion time
   to a level, the logging macros expand to NIL below it and never evaluate arguments.
 - Rename `set-level-sampling` to `set-level-sampler` (breaking), to match the `:level-sampler` argument.
+- Make `capture` return plain data (breaking): `captured-error-stack` is a list of plists `(:call string :file
+  namestring-or-NIL :line integer-or-NIL)` instead of `dissect` frames, made while the frames are live, so a captured
+  error formatted later (stored, or replayed from `with-log-buffer`) no longer touches dead frames, and no frame
+  arguments are kept. A frame that fails to print becomes `"#<unprintable frame>"`. The call string now carries its
+  package prefix in JSON and pretty output (`MYAPP::RUN`, was `run` in JSON and `RUN` in pretty).
+- Add `:max-frames` to `capture`, default the new exported `*capture-max-frames*` (50; NIL keeps all).
 - Evaluate message and field forms of `trace`, `debug`, `info`, `warn`, `error` and `fatal` only when the level is
   enabled on the target logger.
 - Treat an explicit NIL first argument of the logging macros as a no-op (an absent logger) instead of as a message.
@@ -56,6 +62,8 @@ minor versions, and such changes are listed under **Changed**.
 
 ### Fixed
 
+- Find cl-bark's own frames in `capture` by package, not by the substring `BARK` in the printed call, which dropped a
+  user frame such as `(LAMBDA () :IN EMBARK)` from the top of the stack.
 - Make the async writer thread survive per-iteration errors (failing `on-drop` callback, formatter bug, stream error); a
   dead writer marks the output failed and releases waiters instead of hanging `flush`/`stop`.
 - Serialize writes per underlying stream, so two loggers or tee destinations sharing a stream (including synonym streams
