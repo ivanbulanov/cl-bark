@@ -256,17 +256,20 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 
 ### 4.5 New reference text (sql-zealot, October review)
 
-- [ ] Which calls can block or take a lock (sql-zealot F38): async with drop takes no lock; `:blocking t` waits up to
+- [x] Which calls can block or take a lock (sql-zealot F38): async with drop takes no lock; `:blocking t` waits up to
   `:block-timeout`; after `stop`, or with `:async nil`, lines are written under a lock per stream; a function output
   runs user code on the calling thread. Say whether logging from a GC finalizer or with interrupts disabled is
-  allowed.
-- [ ] One table of how children, levels and samplers combine: what a child copies (the level, at creation), what it
-  shares (the sampler vector), what later `set-level` and `set-level-sampler` on the parent do.
-- [ ] Rotation: name logrotate `copytruncate` and journald.
+  allowed. (d98af99)
+- [x] One table of how children, levels and samplers combine: what a child copies (the level, at creation), what it
+  shares (the sampler vector), what later `set-level` and `set-level-sampler` on the parent do. (d98af99)
+- [x] Rotation: name logrotate `copytruncate` and journald. (d98af99)
 
 ## Phase 5. Small fixes
 
 - [x] *0.2.0*: `src/writer.lisp` pushes the save and init hooks twice, once bare and once inside a `progn`. Delete one. (5a426a1)
+- [ ] *0.2.0*: an interrupt that logs to an `:async nil` output while its thread is writing to the same stream gets
+  a recursive lock error, which counts as a stream error and, without `:on-error`, marks the output failed. Count
+  the line as dropped instead and leave the output healthy (found while writing 4.5).
 
 ## Phase 6. Changes in the application (last)
 
