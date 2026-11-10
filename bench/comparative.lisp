@@ -32,9 +32,7 @@
   (when (find-package :log4cl)
     (pushnew :bark-bench/log4cl *features*))
   (when (find-package :vom)
-    (pushnew :bark-bench/vom *features*))
-  (when (find-package :verbose)
-    (pushnew :bark-bench/verbose *features*)))
+    (pushnew :bark-bench/vom *features*)))
 
 ;;; ============================================================
 ;;; cl-bark adapter (blocking mode)
@@ -290,7 +288,7 @@
    All scenarios use batch measurement.  BATCH-P selects large batches
    (sub-microsecond ops) vs sampled batches (normal ops)."
   (format t "~&comparative: ~a (discard sink)~%" scenario-name)
-  (format t "Note: all loggers synchronous except verbose (has async pipeline)~%~%")
+  (format t "Note: cl-bark rows use an async writer in blocking mode; log4cl and vom write synchronously~%~%")
   (print-comparative-header)
   (dolist (adapter (reverse *available-loggers*))
     (destructuring-bind (name setup-fn log-msg log-5 log-10 log-ctx teardown-fn) adapter

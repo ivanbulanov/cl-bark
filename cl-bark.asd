@@ -73,7 +73,7 @@
 (asdf:defsystem #:cl-bark/bench-comparative
   :description "Comparative benchmarks: cl-bark vs other CL loggers"
   :depends-on (#:cl-bark/bench)
-  :weakly-depends-on (#:log4cl #:vom #:verbose)
+  :weakly-depends-on (#:log4cl #:vom)
   :serial t
   :components
   ((:module "bench"

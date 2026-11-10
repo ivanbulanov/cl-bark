@@ -105,7 +105,7 @@ For blocking mode with N concurrent producer threads, set `:capacity >= 2N` to m
 
 ## Edge Cases
 
-- Writer thread dies: If the writer exits after a stream error, blocked producers wake and give up at once. If the thread is killed without clearing its running flag, producers wait for `:block-timeout`, and forever with `:block-timeout nil`.
+- Writer thread dies: However the writer ends (a stream error the `:on-error` hook does not replace, or a terminated thread), its cleanup marks the output failed and wakes every blocked producer. Each one gives up at once: `:on-block-timeout` runs and the line counts as block-dropped, even with `:block-timeout nil`. Lines delivered after that are counted as dropped.
 - `bark:stop` with blocked producers: All producers are woken via broadcast. Messages from producers blocked during stop go through the timeout/callback path. Call as `(bark:stop bark:*logger*)` or pass the logger returned by `bark:make-logger`.
 - Tee with mixed blocking/non-blocking: If a non-blocking destination succeeds and a blocking destination times out, the message is delivered to the first but dropped for the second. The `on-block-timeout` callback fires for the failing destination.
 - `with-log-buffer` + blocking: Buffer flush replays through the root logger. If the root output is blocking, flush can block. This is correct behavior.

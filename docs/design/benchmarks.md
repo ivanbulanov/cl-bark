@@ -47,13 +47,13 @@ Both live in `cl-bark.asd`:
 | System | Depends on | Contains |
 |--------|-----------|----------|
 | `cl-bark/bench` | `cl-bark`, `trivial-benchmark`, `trivial-garbage`, `bordeaux-threads`, `cffi` | `bench/packages.lisp`, `bench/harness.lisp`, `bench/internal.lisp` |
-| `cl-bark/bench-comparative` | `cl-bark/bench`; weakly: `log4cl`, `vom`, `verbose` | `bench/comparative.lisp` |
+| `cl-bark/bench-comparative` | `cl-bark/bench`; weakly: `log4cl`, `vom` | `bench/comparative.lisp` |
 
-The split keeps the internal suite loadable with only the libraries the harness itself needs. A maintainer who wants to profile cl-bark does not need three other loggers installed. The comparative system adds a file to the same package (`bark-bench`) rather than defining its own, so it can call the harness functions and reuse the shared payloads without qualification.
+The split keeps the internal suite loadable with only the libraries the harness itself needs. A maintainer who wants to profile cl-bark does not need other loggers installed. The comparative system adds a file to the same package (`bark-bench`) rather than defining its own, so it can call the harness functions and reuse the shared payloads without qualification.
 
 ### Why competitors are not hard dependencies
 
-A hard `:depends-on` on log4cl, vom and verbose would make the whole benchmark system unloadable whenever any one of them fails to install or compile on a given platform. The harness has to keep working with whatever subset is present. Competitor code is therefore guarded by reader conditionals on feature keywords that `comparative.lisp` computes from package presence:
+A hard `:depends-on` on log4cl or vom would make the whole benchmark system unloadable whenever any one of them fails to install or compile on a given platform. The harness has to keep working with whatever subset is present. Competitor code is therefore guarded by reader conditionals on feature keywords that `comparative.lisp` computes from package presence:
 
 ```lisp
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -166,7 +166,7 @@ Notes on specific rows:
 2. Idiomatic configuration. Each competitor is configured the way its documentation describes ordinary stream output, not tuned for speed at the expense of features. The configuration is recorded in the adapter source with comments.
 3. Same logical work through each logger's own API. log4cl and vom are format-directive loggers and have no field model. For the five- and ten-field scenarios their adapters call the native macro with a format string such as `"method=~a path=~a status=~d ..."` and the values as arguments. They are not wrapped in a shim that accepts keyword fields. The same information is emitted, but the work differs in kind: cl-bark escapes and structures typed values, and the competitors substitute into a format control string. `simple-message` (no fields) is the purest comparison.
 4. Context scenario. cl-bark logs through a child with pre-serialized context. log4cl and vom have no equivalent, so their adapters embed the context as a literal prefix in the message string. This measures the closest equivalent, not identical work.
-5. cl-bark in blocking mode only. The two cl-bark rows run with `:blocking t`: `cl-bark (blocking, json)` and `cl-bark (blocking, logfmt)`. Async mode returns after an enqueue and excludes the formatted write from the caller's time on the writer thread, while synchronous loggers include the write. Putting an async enqueue number next to synchronous totals in one table invites a comparison that does not hold. Async is measured in the internal suite only. Both formatters are listed because the formatter differs; the label names both mode and formatter.
+5. cl-bark in blocking mode only. The two cl-bark rows run with `:blocking t`: `cl-bark (blocking, json)` and `cl-bark (blocking, logfmt)`. Blocking mode is still an async output: the caller formats the line and enqueues it, and the writer thread does the write. What blocking adds is that a full buffer makes the caller wait instead of dropping, so no row counts drops as fast calls. The stream write stays out of the caller's time, while log4cl and vom include it; with the discard sink that write is a small share of a call. Drop-mode async is measured in the internal suite only. Both formatters are listed because the formatter differs; the label names both mode and formatter.
 6. Concurrent rows use the five-field adapter.
 
 ### Adapter protocol
@@ -206,10 +206,6 @@ Adding a logger means writing the six functions, guarding them with a feature ke
 ### Raw baseline
 
 `raw-baseline` is not a logger and has no adapter. It builds a fixed JSON-like line from constant fragments with `with-output-to-string` and `write-string`, then writes it to the discard stream with `terpri` and `force-output`. It is a floor for "build a string and write it", including the string allocation. It does no value serialization, since the fragments are literal text, so a logger that serializes typed values cannot reach it. It exists only for the five-field case.
-
-### verbose
-
-`verbose` is listed as a weak dependency and is flagged by a feature keyword when its package is present, but `bench/comparative.lisp` currently has no verbose adapter: only a comment where one would go. No verbose row is produced. A verbose row would need an annotation because it runs an asynchronous pipeline and the number would reflect enqueue latency. The header line printed by `run-comparative-scenario` ("all loggers synchronous except verbose") refers to a row that does not exist.
 
 ## Concurrency Scenarios
 
@@ -284,7 +280,7 @@ Total call count is iterations times batch size. For batch-100,000 scenarios at 
 - Bytes include harness consing. The allocation counter covers the whole `with-sampling` region, including the loop and the clock read. The harness does not subtract its own share.
 - Allocation is per call, averaged. Bytes come from a total divided by calls, so there is no distribution.
 - Format-directive loggers do different work. Interpret the field scenarios as cost of emitting the same information, not the same operation. [../benchmarks.md](../benchmarks.md#reading-the-comparative-results) explains the practical reading.
-- Async rows are not comparable to synchronous rows. This is why the comparative table uses blocking mode for cl-bark.
+- cl-bark rows leave the stream write to the writer thread, even in blocking mode, while log4cl and vom write on the caller's thread. Blocking mode only keeps a full buffer from turning calls into drops.
 - Drop counts are not reported. `buffer-full-drop` and the async concurrent scenarios can drop messages; the harness neither counts nor prints them. A reader of those rows must remember that some of the calls were drops.
 - Competitor setup is not neutral under a shared image. log4cl and vom keep global state (root logger, stream variable). Teardown restores it, but the harness and the competitors share one image and one heap.
 - Illustrative numbers. Results depend on machine and SBCL version; numbers from different machines are not comparable.
