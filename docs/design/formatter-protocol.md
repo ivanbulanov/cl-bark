@@ -1,21 +1,12 @@
 # cl-bark Formatter Protocol Design
 
-How a cl-bark formatter is structured, why static context is serialized when a logger is created rather than on every call, and what a custom formatter has to respect. The user-facing reference is [README § Formatters](../../README.md#formatters) and [README § Formatter Factories](../../README.md#formatter-factories); value rendering is covered by [value-serialization.md](../value-serialization.md). This document explains the shape behind those references.
+How a cl-bark formatter is structured, why static context is serialized when a logger is created rather than on every call, and what a custom formatter has to respect. The user-facing reference is [Formatters](../formatters.md) and [Formatter Factories](../formatters.md#formatter-factories); value rendering is covered by [value-serialization.md](../value-serialization.md). This document explains the shape behind those references.
 
 ## Motivation
 
 A logger carries static context: the `:context` plist given to `make-logger`, plus whatever each `make-child` adds. That context appears on every line the logger emits, so serializing it on every call is wasted work. Serializing it once at creation only works if the logger knows which output format it is serializing for.
 
-The first version of cl-bark solved this for JSON only:
-
-- Every logger kept two representations of its static context: a pre-serialized JSON fragment (named `chindings`, after Pino) and the original plist (`raw-bindings`).
-- Every formatter received both and ignored the one it did not need, through a six-argument signature `(level chindings raw-bindings context message fields)`.
-- A logfmt or pretty logger still paid for JSON serialization of context it never printed, and the JSON string was meaningless to it.
-- The logger itself (`make-logger`, `make-child`) called the JSON serializer directly, so it was not format-neutral.
-- Formatters were bare functions, so there was nowhere to attach a per-format preparation step.
-- The name `chindings` has no meaning outside Pino.
-
-The formatter protocol replaces the pair with one opaque `prepared` value produced by the formatter itself.
+Each formatter therefore produces its own opaque `prepared` value from the static context plist, in the format it writes, when the logger or child is created.
 
 ## Design Summary
 
@@ -157,7 +148,7 @@ Points that matter to a formatter author:
 - `make-log-fn` passes `(logger-prepared lgr)` unchanged. For a single output it is a string; for a tee it is the simple-vector, and `emit-to-tee` picks the element for the current group, so a `format-fn` always sees a string.
 - `dispatch-to-output` ignores its `formatter` argument for a tee. For a non-tee output it uses `(or formatter *default-json-formatter*)`. The fallback exists because the logger's slot type allows `nil`. `make-logger` defaults `:formatter` to `*default-json-formatter*`, so the case arises only when a caller passes `:formatter nil` explicitly: `prepared` is then `""` (no prepare-fn runs), the logger writes JSON without static context, and the async output has no formatter, so drop warnings use a hand-built JSON string (see [Drop warnings](#drop-warnings)). This is a silent mismatch, not an error; callers should pass a formatter or omit the keyword.
 - `deliver-line` accepts three output kinds. An `async-output` receives the string in its ring buffer (or through `blocking-deliver` in blocking mode), and the writer thread writes it plus a newline. A stream receives `write-string`, `terpri` and `force-output`. A function output (synchronous, used by `with-captured-logs`) is called with the bare line.
-- The formatter returns a string rather than writing to a stream. A line is produced once and may be pushed to several destinations' ring buffers, and the writer threads never format normal events. See [README § Caller-Thread Formatting](../../README.md#caller-thread-formatting) for the reasons formatting stays in the caller thread.
+- The formatter returns a string rather than writing to a stream. A line is produced once and may be pushed to several destinations' ring buffers, and the writer threads never format normal events. See [Caller-Thread Formatting](overview.md#caller-thread-formatting) for the reasons formatting stays in the caller thread.
 - `fields` is declared `dynamic-extent` in `make-log-fn`. A `format-fn` must not retain `fields` (or `context`) past its return.
 - Filters in a tee see the level and the per-call fields, after field-transform. They never see static context; see the filter rationale in [multi-output.md](multi-output.md).
 
@@ -197,7 +188,7 @@ All three are produced by factories that return a struct, and each has a default
 | Prepared fragment | JSON key/value pairs with leading commas | space-prefixed `key=value` pairs | space-prefixed dim-key `key=value` pairs |
 | Value emitter | `emit-json-value` | `emit-logfmt-value` | `princ` under bounded printer variables |
 
-Parameter semantics are documented in [README § Formatter Factories](../../README.md#formatter-factories). Design points that are not in the README:
+Parameter semantics are documented in [Formatter Factories](../formatters.md#formatter-factories). Design points that are not in the user guide:
 
 - The JSON message is written last and is omitted when `message` is `nil` (fields-only calls). The same holds for logfmt and pretty.
 - The JSON `format-fn` is compiled with `(optimize (speed 3) (safety 1))`; level prefixes are precomputed into a vector indexed by level, and the timestamp and message keys are precomputed strings.
@@ -327,40 +318,6 @@ A minimal complete example: plain `timestamp level message key=value` lines, wit
 
 To benefit from tee grouping, reuse one formatter struct across destinations. Select a custom formatter by passing the struct as `:formatter` to `make-logger`, or per destination in `make-tee` or `tee`. There is no registration step and no `:format` keyword.
 
-## Alternatives Considered
-
-### Keep `chindings` and `raw-bindings`, formatters ignore one
-
-Status quo. Rejected: every logger serialized to JSON regardless of formatter, every formatter ignored one of two arguments, and the name was Pino jargon.
-
-### Serialize static context at log time in non-JSON formatters
-
-Keep only the raw plist and let each formatter serialize it per call. Reason: this gives up the zero per-call cost of static context, which is the purpose of preparation. The chosen design keeps the same O(delta) child creation as the JSON-only design it replaces.
-
-### Logger builds a format-agnostic prepared value
-
-The logger would produce the intermediate form itself. Reason: the logger must not know about JSON, logfmt or pretty, and `prepared` is opaque to it. Only the formatter knows what splices cheaply into its own output.
-
-### Generic functions or classes for formatters
-
-A CLOS protocol with methods per formatter class. What the struct provides instead: no class definitions or method dispatch on the per-call path, and a formatter's configuration lives in the closures created by its factory.
-
-### Re-serialize the child's full context
-
-Serialize `parent-context` plus the delta again at each child. Rejected: each child level serializes only its own new fields and concatenates with the parent's prepared string. The cost is the composability requirement on prepared strings.
-
-### One prepared string per tee logger
-
-A single value would be wrong when destinations use different formatters, since each format needs its own prepared text. The chosen design holds a simple-vector indexed by formatter group. Preparation iterates groups, not destinations, so a shared formatter is prepared once.
-
-### Compatibility with bare-function formatters
-
-Accepting the old closure signature alongside structs. Rejected: migration is not a concern and backward compatibility is out of scope. The old six-argument signature is gone, not adapted.
-
-### Formatter writes to a stream
-
-Passing an output stream into `format-fn`. Reason: one formatted line is shared by every passing destination in a group and then queued as a string, and the writer thread never formats; a stream argument would not fit the fan-out.
-
 ## Invariants and Trade-offs
 
 | Invariant | Why |
@@ -397,24 +354,7 @@ Trade-offs:
 | Testing | `(with-captured-logs (var formatter) ...)` creates a function-output logger at `:trace` with static context `(:name "test")` and the formatter you pass, defaulting to `*default-json-formatter*`; collected lines carry no newline |
 | Level wiring | Disabled levels are `noop` slots and never reach a formatter; the compile-time level cut removes the call entirely |
 
-## Non-Goals
-
-- A formatter registry, naming scheme or keyword selection (`:format :json`). A formatter is chosen by passing a struct.
-- Extension through generic functions, or a pluggable value serialization protocol. Value rendering belongs to each built-in format; see [value-serialization.md](../value-serialization.md).
-- Per-child formatter overrides.
-- Converting a prepared value between formats.
-- Backward compatibility with bare-function formatters.
-- Formatting on the writer thread, or a formatter thread pool.
-- Passing the timestamp or an output stream into `format-fn`.
-
 ## See also
 
-- [README § Formatters](../../README.md#formatters) and
-  [Formatter Factories](../../README.md#formatter-factories)
-- [Architecture Overview](overview.md)
-- [Multi-output](multi-output.md), [Request-scoped buffering](request-scoped-buffering.md),
-  [Sampling](sampling.md), [Blocking mode](blocking-mode.md),
-  [Condition serialization](condition-serialization.md)
-- [Value serialization](../value-serialization.md)
-- `src/json.lisp`, `src/logfmt.lisp`, `src/pretty.lisp`, `src/format-util.lisp`, `src/output.lisp`,
-  `src/writer.lisp`
+- [Formatters](../formatters.md), [value serialization](../value-serialization.md), [overview](overview.md)
+- `src/json.lisp`, `src/logfmt.lisp`, `src/pretty.lisp`, `src/format-util.lisp`, `src/output.lisp`, `src/writer.lisp`

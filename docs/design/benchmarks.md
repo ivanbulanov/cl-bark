@@ -1,10 +1,10 @@
 # cl-bark Benchmark Harness Design
 
-Why the `bench/` harness is shaped the way it is: what it measures, how a sample is taken, and which numbers it can and cannot support. The how-to material lives elsewhere: [README § Benchmarks](../../README.md#benchmarks) covers running, methodology and reading the comparative results. This document is for someone extending the harness or deciding whether a number is trustworthy.
+Why the `bench/` harness is shaped the way it is: what it measures, how a sample is taken, and which numbers it can and cannot support. The how-to material lives elsewhere: [Benchmarks](../benchmarks.md) covers running, methodology and reading the comparative results. This document is for someone extending the harness or deciding whether a number is trustworthy.
 
 ## Motivation
 
-The README originally carried nanosecond claims with nothing behind them. The harness exists so that every performance statement can be reproduced on the reader's own machine, and so that the allocation claims (a disabled log call allocates nothing) are checked rather than asserted.
+The harness lets every performance statement be reproduced on the reader's machine and checks the allocation claims (a disabled log call allocates nothing).
 
 Three questions drive the design:
 
@@ -273,60 +273,6 @@ Every target loads the comparative system, which loads the internal one, so the 
 
 Total call count is iterations times batch size. For batch-100,000 scenarios at the defaults that is 10^9 calls per scenario, and 5 times 10^9 under `bench-full`. That is why the quick target exists.
 
-## Alternatives Considered
-
-### Per-call timing with the standard clock
-
-Time each call with `get-internal-real-time`, as the first implementation did through `with-sampling`. Rejected because the resolution is a microsecond and most calls take less, so samples read as zero. Even a finer clock leaves a per-read cost that is a significant fraction of a short call.
-
-### A single fixed batch size for every scenario
-
-One value for all scenarios. Rejected because the per-call scale spans three orders of magnitude. A batch large enough for a few-nanosecond call would hide GC effects in the several-microsecond scenarios, and one small enough for those would make the disabled-level check read as noise.
-
-### Platform-neutral timing only (no CFFI)
-
-Batching makes a nanosecond timer less necessary, and CFFI is an implementation-specific dependency. The harness uses one anyway: `cl-bark/bench` depends on `cffi` and uses `clock_gettime`. The commit that introduced it states the aim as nanosecond precision for the batch measurement. The cost is portability: the clock ids are chosen for Linux, Darwin and FreeBSD, and any other OS falls back to `CLOCK_REALTIME`, which is wall time and can jump. Windows has no `clock_gettime` and is not supported by the harness.
-
-### Replacing `trivial-benchmark`
-
-Still used, for the `bytes-consed` metric. The harness takes timing from its own clock, but dropping the library would mean calling an SBCL allocation counter directly, and the library gives a portable metric hook.
-
-### Hard ASDF dependency on competitors
-
-Rejected, see above: one failing library would make the whole benchmark system unloadable.
-
-### A CLOS adapter protocol
-
-Rejected for scale: a list of closures is more transparent than generic functions for a handful of adapters.
-
-### Showing cl-bark in async mode in the comparative table
-
-Rejected because async enqueue latency excludes the I/O-side work that synchronous loggers perform on the caller thread, which makes the comparison misleading.
-
-### A real file or disk sink
-
-Rejected because the result would be dominated by filesystem and operating system behaviour, not by the logging framework.
-
-### Forced GC between samples
-
-Rejected because it would hide the allocation cost that is part of the framework overhead and would make the GC share of the tail invisible. The harness collects once per scenario instead.
-
-### Condition variables for the start barrier
-
-Rejected because `bordeaux-threads` version 1 has no broadcast and semaphores work in both versions.
-
-### Tuning competitors for speed, or shimming them to accept structured fields
-
-Rejected. A benchmark of a logger configured against its documentation, or called through a custom adapter layer, measures the shim.
-
-### p99.9
-
-Rejected: with 10,000 samples it is the tenth worst point and mostly GC and scheduler noise. The header already warns that p99 contains both.
-
-### Per-call latency percentiles for concurrent scenarios
-
-Deferred, see "Why per-call percentiles are not reported under concurrency".
-
 ## Validity Caveats
 
 - **Loop overhead is included.** The counter increment, comparison and thunk call through `funcall` are part of each batch. For disabled-level this can be a large share of the result, which is why the output reads `< 10ns` and not a figure. The `funcall` of a closure is also part of every scenario, the same for all loggers.
@@ -337,7 +283,7 @@ Deferred, see "Why per-call percentiles are not reported under concurrency".
 - **Start race.** The clock is read after `gate-open`; see Concurrency Scenarios.
 - **Bytes include harness consing.** The allocation counter covers the whole `with-sampling` region, including the loop and the clock read. The harness does not subtract its own share.
 - **Allocation is per call, averaged.** Bytes come from a total divided by calls, so there is no distribution.
-- **Format-directive loggers do different work.** Interpret the field scenarios as cost of emitting the same information, not the same operation. The README explains the practical reading.
+- **Format-directive loggers do different work.** Interpret the field scenarios as cost of emitting the same information, not the same operation. [../benchmarks.md](../benchmarks.md#reading-the-comparative-results) explains the practical reading.
 - **Async rows are not comparable to synchronous rows.** This is why the comparative table uses blocking mode for cl-bark.
 - **Drop counts are not reported.** `buffer-full-drop` and the async concurrent scenarios can drop messages; the harness neither counts nor prints them. A reader of those rows must remember that some of the calls were drops.
 - **Competitor setup is not neutral under a shared image.** log4cl and vom keep global state (root logger, stream variable). Teardown restores it, but the harness and the competitors share one image and one heap.
@@ -361,15 +307,3 @@ What the scenarios exercise in the library:
 | Multi-producer scaling | `concurrent-1-thread`, `concurrent-8-threads` |
 
 The benchmark code uses public API only: `make-logger`, `make-child`, `make-tee`, `with-context`, `set-level`, `stop`, the log macros and the formatter constructors. A change to those signatures means touching `bench/internal.lisp` and the cl-bark adapters in `bench/comparative.lisp`.
-
-## Non-Goals
-
-- **Sustained throughput and saturation testing.** Requires rate control, steady-state detection and saturation-point identification. Valuable follow-up, not implemented.
-- **End-to-end disk latency.** Dominated by the filesystem and operating system, not by the framework.
-- **Request-scoped buffering (`with-log-buffer`).** A workflow feature, not a hot-path one; its benchmark value is low. Not covered.
-- **Compile-time elimination.** The result is trivially zero and the macro expansion shows it.
-- **Per-call percentiles under concurrency.** See above.
-- **Scenario randomization.** Acknowledged as a source of ordering bias; `SCENARIO` is the workaround.
-- **Drop-count reporting.** Not implemented for `buffer-full-drop`.
-- **Result persistence and diffing.** No machine-readable output (JSON or CSV) and no comparison between runs. `sample.txt` is text.
-- **A statistical test across runs.** The harness reports one run's distribution; run-to-run variance is the reader's to estimate.

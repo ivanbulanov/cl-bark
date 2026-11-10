@@ -1,17 +1,6 @@
 # cl-bark Blocking Mode Design
 
-How cl-bark lets a destination wait for buffer space instead of dropping messages: the extra state on `async-output`, the producer and writer handshake, the timeout and shutdown rules, and the alternatives that were rejected. The user-facing reference is [Blocking Mode](../blocking-mode.md) (keywords, callback signature, sizing); the README sections [Backpressure](../../README.md#backpressure) and [Ring Buffer](../../README.md#ring-buffer) describe the surrounding mechanism. This document explains the shape behind them.
-
-## Motivation
-
-The default async path is lossy by design. Callers format a line, push it onto a bounded lock-free ring buffer (`src/ring-buffer.lisp`) and return; one writer thread per destination (`src/writer.lisp`) drains the buffer. When the buffer is full, `ring-buffer-push` counts a drop and the writer later reports the count through `on-drop`. That is the right behaviour for consoles, metrics and debug streams: a slow sink must not stall the application.
-
-Two problems follow for other sinks:
-
-- **Drop-only loses audit messages.** Audit, compliance and billing streams cannot tolerate a missing line. Their producers can tolerate latency but not loss.
-- **An unbounded queue hides saturation.** Removing the loss by removing the bound turns a slow sink into unbounded memory growth. The overload stays invisible until the process runs out of memory, which is a less local failure than a bounded wait.
-
-A single global policy fails one group or the other, so both policies exist and the choice is made where the sink is configured.
+How cl-bark lets a destination wait for buffer space instead of dropping messages: the extra state on `async-output`, the producer and writer handshake, and the timeout and shutdown rules. The user-facing reference is [Blocking Mode](../blocking-mode.md) (keywords, callback signature, sizing); the ring buffer is described in [overview.md](overview.md#ring-buffer). This document explains the shape behind them.
 
 ## Design Summary
 
@@ -38,7 +27,7 @@ Blocking is a property of one `async-output`, that is, of one destination. There
 
 `ring-buffer-push` and `ring-buffer-offer` are thin wrappers over one inlined routine, `%ring-buffer-try-push`, whose only difference is a `track-drops` argument. The CAS loop reads `head` and `tail`, returns NIL when the occupied size is at least capacity, and otherwise claims the slot by CAS on `head` and stores the value. `ring-buffer-offer` passes `track-drops` as false, so it never touches `ring-buffer-dropped`. `ring-buffer-push` is unchanged in behaviour.
 
-The blocking path retries, and a failed attempt must not look like a loss. With `ring-buffer-push`, every retry would increment `ring-buffer-dropped`, the writer's `emit-drop-warning` would report messages that were never dropped, and monitoring data would be inflated. See Alternatives Considered for the variant that undoes the count. With `offer`, `ring-buffer-dropped` stays zero on a blocking destination; the loss counter that moves is `block-dropped`.
+The blocking path retries, and a failed attempt must not look like a loss. With `ring-buffer-push`, every retry would increment `ring-buffer-dropped`, the writer's `emit-drop-warning` would report messages that were never dropped, and monitoring data would be inflated. With `offer`, `ring-buffer-dropped` stays zero on a blocking destination; the loss counter that moves is `block-dropped`.
 
 The choice between the two functions is made in `deliver-line` before any ring buffer call. The non-blocking path pays one `blocking-p` test and nothing else.
 
@@ -57,7 +46,7 @@ The choice between the two functions is made in `deliver-line` before any ring b
 
 `make-async-output` coerces a non-nil `block-timeout` to `double-float`, so integers, single floats and double floats are all accepted and the deadline arithmetic stays in one type.
 
-**Eager creation.** The lock and the condition variable are created in `make-async-output` when `blocking` is true and are `nil` otherwise. A non-blocking output allocates no extra OS resources, and the writer's broadcast is a no-op when the condition variable is `nil`. Lazy creation was rejected; see Alternatives Considered.
+**Eager creation.** The lock and the condition variable are created in `make-async-output` when `blocking` is true and are `nil` otherwise. A non-blocking output allocates no extra OS resources, and the writer's broadcast is a no-op when the condition variable is `nil`.
 
 `block-dropped` has no exported reader; `async-output-block-dropped` is internal. The signals available to an application are the `on-block-timeout` callback and, for tests and diagnostics, that slot. There is no analogue of the `on-drop` warning for blocking drops.
 
@@ -189,60 +178,6 @@ The first broadcast comes before the join so that blocked producers are released
 
 Fairness is not guaranteed. The fast-path `offer` takes no lock, so a newly arriving producer can take a freed slot ahead of a waiter, and waiters acquire `space-lock` in no defined order. A waiter can be starved until its deadline.
 
-## Alternatives Considered
-
-### Counting semaphore instead of a condition variable
-
-Rejected for three reasons:
-
-1. *Lost wakeups.* A semaphore signal is consumed by whichever waiter returns, whether or not it then wins the CAS for a slot. A woken producer that loses the race wastes the signal while other waiters see none, although space exists.
-2. *No broadcast.* On stop, one signal frees one waiter. With N blocked producers and `block-timeout` nil, N minus one would hang.
-3. *Count drift.* Non-blocking producers consume slots without consuming signals, so the semaphore count diverges from real free space.
-
-A mutex and condition variable with the ring buffer as the predicate avoids all three: the wait re-checks the predicate on every wake-up, broadcast wakes every waiter, and spurious wake-ups only cause a retry.
-
-### Reusing `ring-buffer-push` and compensating the drop counter
-
-Rejected. `ring-buffer-push` increments `ring-buffer-dropped` on a full buffer, which would produce spurious drop warnings and inflated monitoring data, since the blocking path retries rather than drops. Undoing the increment with `atomic-decf` races with the writer's read-and-reset of the counter in `emit-drop-warning`: the writer can reset between the increment and the decrement, and the decrement then wraps the unsigned counter. A separate operation that never increments (`ring-buffer-offer`), selected before the call, removes the problem instead of patching it.
-
-### `condition-notify` instead of `condition-broadcast`
-
-Rejected for the convoy reason given in Writer Path. It would also release only one waiter per stop-time wake-up.
-
-### Broadcast only when entries were drained
-
-Rejected; see Writer Path. The saving is one lock round trip per cycle, and the cost is a producer that can sleep through the only broadcast it needed.
-
-### Lazy, CAS-based creation of the lock and condition variable
-
-Rejected in favour of eager creation, to avoid the complexity and portability pitfalls of lazy CAS-based creation (memory ordering on ARM64, spin loops). Eager creation moves the cost to `make-async-output` and leaves both slots `nil` when blocking is off.
-
-### Timeout designs
-
-| Design | Outcome |
-|--------|---------|
-| Relative timeout on each wait | Rejected. A producer that repeatedly wakes and loses the race restarts the clock, so one log call can exceed the configured limit |
-| Single deadline, computed once | Adopted. Total time in one call is bounded by `block-timeout` plus jitter |
-| Default `nil` (wait forever) | Rejected. Pathological hangs (dead writer, unresponsive stream) would stall the application by default |
-| Default 5.0 seconds, `nil` as the explicit opt-in | Adopted. `nil` is for users who prefer hanging to losing a message |
-
-### Configuration level
-
-| Level | Outcome |
-|-------|---------|
-| Per logger | Rejected. One logger can fan out to a console that must never stall and an audit file that must not lose lines |
-| Per tee, applied to all destinations | Rejected and made an error: `make-logger` signals `bark-configuration-error` (with a `use-value` restart) when `:blocking`, `:block-timeout` or `:on-block-timeout` accompanies a tee output, because each destination should block or drop independently |
-| Per destination | Adopted. Each destination owns its ring buffer, writer, counters and callback |
-
-The `make-logger` check uses a supplied-p variable for `:block-timeout`. A check written against the value cannot detect an explicit `:block-timeout`, because the default is 5.0.
-
-### Where the blocking logic lives
-
-| Location | Outcome |
-|----------|---------|
-| Inside `ring-buffer-push` | Rejected. `ring-buffer-push` stays untouched so the happy CAS path has no added overhead |
-| `deliver-line` and `emit-to-tee`, branching on `blocking-p` and using `ring-buffer-offer` as the primitive | Adopted. The blocking path is explicit and `ring-buffer-push` is unchanged |
-
 ## Invariants and Trade-offs
 
 Invariants:
@@ -260,7 +195,7 @@ Trade-offs:
 - Deadlock risk exists when the writer's own work logs to the same blocking destination (a stream whose write path logs, or an `on-error` handler that logs): the writer becomes a producer waiting for itself and recovers only through the timeout, never with `nil`. The same holds for a lock a producer holds that the sink path also needs.
 - Priority inversion: a producer waits on a writer thread and on whatever the sink depends on.
 - Wake-up cost is proportional to the number of waiters per cycle. With N concurrent producers a capacity of at least 2N keeps retries rare (see the [user guide](../blocking-mode.md)).
-- The ring buffer's payload slots rely on x86 store ordering (README, "Ring Buffer"). The blocking path adds mutex and condition-variable operations and no new reliance on that assumption.
+- The ring buffer's payload slots rely on x86 store ordering ([overview.md](overview.md#ring-buffer)). The blocking path adds mutex and condition-variable operations and no new reliance on that assumption.
 
 ## Interactions
 
@@ -268,7 +203,7 @@ Trade-offs:
 |---------|-------------|
 | Tee | Blocking is per destination. `emit-to-tee` delivers sequentially, so a blocked destination delays every later destination in the same call, and a mixed tee can deliver a line to one destination and drop it for another. A tee with any blocking destination is effectively blocking for the caller. `block-dropped`, the callback and the timeout are per `async-output`, so a loss is attributable to one destination. Formatter grouping is unaffected: the line is formatted once per group and delivered to each passing destination in turn. See [multi-output.md](multi-output.md) |
 | Request-scoped buffering | `with-log-buffer` replays entries on flush through `emit-entry` and `dispatch-to-output` on the root logger's output. A flush of many entries into a blocking destination can exceed capacity at once, so the replay waits for drain cycles, each entry possibly up to `block-timeout`, and the code leaving the buffer scope waits with it. Entries given up during the replay are dropped like any other blocking drop. See [request-scoped-buffering.md](request-scoped-buffering.md) |
-| Sampling | Sampling runs in the log function before dispatch. Lines it discards never reach `deliver-line`, so they are neither queued nor counted as blocking drops. Sampling intentionally drops messages and defeats the guarantee blocking mode provides; the README (Feature Interactions) advises against combining them on one logger. Inside `with-log-buffer` sampling is bypassed. See [sampling.md](sampling.md) |
+| Sampling | Sampling runs in the log function before dispatch. Lines it discards never reach `deliver-line`, so they are neither queued nor counted as blocking drops. Sampling defeats the guarantee blocking mode provides, so do not combine them on one logger ([../interactions.md](../interactions.md)). Inside `with-log-buffer` sampling is bypassed. See [sampling.md](sampling.md) |
 | `flush` | Independent of the condition variable. `bark:flush` calls `flush-async-output` per running async output and signals `bark-async-stopped` for stopped ones. A producer blocked on a full buffer does not stop a flush from completing |
 | `stop` | Wakes blocked producers twice, before and after the join; see Stop and Shutdown |
 | `on-drop` | Never fires for a blocking destination, since `ring-buffer-dropped` stays zero |
@@ -289,13 +224,3 @@ Trade-offs:
 - Concurrency: `test-concurrent-producers-no-drops`, `test-concurrent-producers-wake-within-one-drain`, `test-broadcast-under-lock-no-lost-wakeup`.
 
 The timeout tests use a 10 ms timeout, below the writer's 100 ms poll, so they depend on the writer not draining within that interval. Not covered: `:block-timeout 0`, the writer-exit-on-error path, a producer arriving after `stop`, and sampling or `with-log-buffer` combined with blocking.
-
-## Non-Goals
-
-- **Blocking for synchronous loggers.** Function outputs have no buffer to wait on.
-- **A per-logger or per-call mode.** Policy is per destination.
-- **Detecting or restarting a dead writer.** The timeout and the `running` flag are the only safety nets.
-- **An `on-drop` equivalent for blocking drops.** The callback and the `block-dropped` slot are the interface; there is no inline warning and no exported counter reader.
-- **Fairness or FIFO ordering among waiters.** Producers retry opportunistically.
-- **Guaranteeing delivery after `stop`.** Logging to a stopped logger is outside the contract.
-- **Combining with sampling.** The two features pull in opposite directions and no interaction is designed.

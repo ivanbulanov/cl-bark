@@ -1,6 +1,6 @@
 # cl-bark Architecture Overview
 
-The map of cl-bark: the problem it solves, the one rule that shapes the design, how a single log call travels from macro to bytes on a stream, what each source file is responsible for, and which design document to read next. The user-facing reference is [README](../../README.md); the thread and ring-buffer model is described in [README § Architecture](../../README.md#architecture) and is summarized here, not repeated.
+The map of cl-bark: the problem it solves, the one rule that shapes the design, how a single log call travels from macro to bytes on a stream, what each source file is responsible for, and the thread, ring-buffer and formatting model. For usage, see the [README](../../README.md) and the [index](../README.md).
 
 ## Motivation
 
@@ -10,7 +10,7 @@ A logger sits inside the code it observes, so its cost is paid by application th
 - **Enabled calls.** Formatting and I/O must not make the application wait on a slow disk, pipe or socket.
 - **Structure.** Operators want key-value fields, not format strings, so output can be parsed by machines.
 
-The design (Pino-inspired, extended with ideas from zerolog and slog) has four goals: high performance, structured output, flexibility (runtime level changes, swappable formatters, child loggers, dynamic context) and portability. The code delivers the first three. Portability is partial; see "Invariants and Trade-offs".
+The design (Pino-inspired, extended with ideas from zerolog and slog) has four goals: high performance, structured output, flexibility (runtime level changes, swappable formatters, child loggers, dynamic context) and portability., and portability is limited to SBCL on x86-64; see "Invariants and Trade-offs".
 
 ## Design Summary
 
@@ -78,7 +78,52 @@ Points worth knowing when reading the code:
 - **Sampling precedes formatting.** A sampled-out call returns before any string is built. See [sampling.md](sampling.md).
 - **Function outputs are synchronous.** They share `dispatch-to-output` and `deliver-line` with the async path but have no ring buffer or thread. `deliver-line` also has a bare-stream branch, which `make-logger` never reaches because it wraps streams in an async output. `with-captured-logs` relies on a function output.
 
-The README explains why formatting stays in the caller thread ([Caller-Thread Formatting](../../README.md#caller-thread-formatting)) and why the ring buffer is correct only under x86 store ordering ([Ring Buffer](../../README.md#ring-buffer)). The thread-per-destination rationale is in [Thread-Per-Destination Model](../../README.md#thread-per-destination-model).
+## Threads and the ring buffer
+
+### Thread per destination
+
+Each destination has its own writer thread and ring buffer, so N destinations run N writer threads. A slow destination such as a network sink cannot hold up a fast one such as stderr. There is no thread pool or shared-writer coordination, and an idle writer is blocked on a semaphore, which costs one kernel thread and little memory.
+
+### Ring buffer
+
+The ring buffer is a lock-free MPSC queue (many producers, one consumer):
+
+```
+Producer threads              Writer thread
+     |                              |
+     +- format message              |
+     +- CAS claim slot in ring ->   |
+     +- write string to slot        +- pop slots in batch
+     +- signal semaphore            +- write-string to stream
+                                    +- force-output
+                                    +- check drop counter
+                                    +- wait on semaphore
+```
+
+The payload slots are written and read with plain `svref` and `setf`, with no memory barriers around the string. Correctness relies on x86 total store order: the payload is visible before the semaphore signal that wakes the writer. cl-bark is tested on x86-64 only. SBCL also runs on ARM64, which is weakly ordered and untested here; running there would need acquire/release barriers on the payload slot accesses.
+
+### Caller-thread formatting
+
+Every log call formats the line to a string in the caller's thread and pushes the string into the ring buffer. The writer thread only calls `write-string` and `force-output`. The reasons:
+
+1. N application threads logging format N lines in parallel without coordination. Formatting in the writer would serialize all of it on one thread per destination, and a formatter thread pool would add a second queue and a second handoff per message.
+2. Per-call fields are declared `dynamic-extent`, so the `&rest` plist lives on the stack. Formatting in another thread would require copying the fields to the heap.
+3. Dynamic context is a special variable that the caller can rebind at any time. The formatter must read it in the caller's thread. Formatting later would need a snapshot of the alist in each ring slot.
+4. With a tee, destinations are grouped by formatter identity (`eq`) and the line is formatted once per group. If writers formatted, destinations sharing a formatter would repeat the work.
+
+The cost is per-call latency in the caller. It is bounded by `*max-json-depth*`, `*max-json-length*` and `*max-json-stack-frames*`. Pre-serialized `prepared` context on child loggers removes the per-call cost of static context, and sampling skips formatting for sampled-out messages.
+
+### Cost of a log call
+
+| Operation | Cost |
+|-----------|------|
+| Log call, level disabled | One indirect call to `noop` |
+| Log call, level enabled, async | Formatting, CAS, semaphore signal |
+| Log call, buffer full | Formatting, a failed push and one `atomic-incf`; the formatted line is discarded |
+| Writer drain, per message | `write-string` and `force-output` |
+| Field transform, per field | One `funcall` when set |
+
+To measure on your hardware, see [../benchmarks.md](../benchmarks.md).
 
 ## Module Map
 
@@ -106,102 +151,25 @@ The formatter protocol is documented in [formatter-protocol.md](formatter-protoc
 
 | System | Used for |
 |--------|----------|
-| `atomics` | CAS and atomic increment in the ring buffer, drop counters, windowed counters, `set-level-sampling` |
+| `atomics` | CAS and atomic increment in the ring buffer, drop counters, windowed counters, `set-level-sampler` |
 | `bordeaux-threads` | Writer threads, semaphores (notify and flush acknowledgement), locks and condition variables for blocking mode, `*default-special-bindings*` for the per-thread format stream |
 | `dissect` | Stack capture for `capture`; frame names in the pretty formatter |
 | `local-time` | Millisecond timestamp on non-SBCL implementations |
 
-The benchmark and test systems (`cl-bark/bench-comparative`, `cl-bark/tests` and others) declare their own dependencies, including `fiveam`, `yason`, and weakly `log4cl`, `vom` and `verbose`. They are not runtime dependencies.
+The benchmark and test systems (`cl-bark/bench-comparative`, `cl-bark/tests` and others) declare their own dependencies, including `fiveam`, `yason`, and weakly `log4cl` and `vom`. They are not runtime dependencies.
 
 ### Package and shadowing
 
-All code lives in one package, `bark`. The log macros are named after the levels, so `trace`, `debug`, `warn` and `error` are shadowed, as is `formatter` (the struct). Inside the package, internal code reaches the standard `error` and `warn` through `cl:error` and `cl:warn`. Consumers are expected to call everything with the `bark:` prefix; see [README § Note on Symbol Shadowing](../../README.md#note-on-symbol-shadowing).
+All code lives in one package, `bark`. The log macros are named after the levels, so `trace`, `debug`, `warn` and `error` are shadowed, as is `formatter` (the struct). Inside the package, internal code reaches the standard `error` and `warn` through `cl:error` and `cl:warn`. Consumers are expected to call everything with the `bark:` prefix; see [Note on Symbol Shadowing](../../README.md#symbol-shadowing).
 
-## Where to Read Next
+## Comparison with other loggers
 
-| Document | Read it for |
-|----------|-------------|
-| [decisions.md](decisions.md) | Cross-cutting decision log and the reasons behind choices not covered by a topic document |
-| [multi-output.md](multi-output.md) | Tee fan-out, per-destination filters and formatters, explicit logger argument |
-| [formatter-protocol.md](formatter-protocol.md) | The `prepare-fn` and `format-fn` contract, writing a formatter |
-| [condition-serialization.md](condition-serialization.md) | `capture`, stack snapshots, how formatters render conditions |
-| [request-scoped-buffering.md](request-scoped-buffering.md) | `with-log-buffer`, replay, timestamp override |
-| [blocking-mode.md](blocking-mode.md) | Back-pressure instead of drop-on-full, timeouts, stop-while-blocked |
-| [sampling.md](sampling.md) | Windowed counters, consistent hash sampling, ordering relative to other features |
-| [benchmarks.md](benchmarks.md) | Methodology, what the numbers do and do not show |
-
-User guides: [docs/sampling.md](../sampling.md), [docs/blocking-mode.md](../blocking-mode.md), [docs/value-serialization.md](../value-serialization.md).
-
-## Comparison with Other Common Lisp Loggers
-
-Two sources are used, and they answer different questions. Neither makes claims about the current internals of the other libraries beyond what is stated.
-
-### Measured against log4cl, vom, verbose
-
-`bench/comparative.lisp` drives the other libraries through small adapters. What those adapters show about each library's API as used by the benchmark:
-
-| Library | API shape in the benchmark | Structured fields | Async |
-|---------|----------------------------|-------------------|-------|
-| cl-bark | `bark:info logger "msg" :key value ...` | Yes: keyword-value pairs, serialized to JSON or logfmt | Yes by default; the benchmark runs it with `:blocking t` for a like-for-like comparison |
-| log4cl | `log:info` with a format string and format arguments, a `fixed-stream-appender` and `simple-layout` | No: the adapter encodes fields as `key=~a` text | Treated as synchronous |
-| vom | `vom:info` with a format string and arguments, `vom:*log-stream*` redirected | No: same text encoding, no context mechanism | Treated as synchronous |
-| verbose | No adapter code; a comment in the file says it "has its own async pipeline" | Not exercised | Per that comment, yes |
-
-The harness prints "all loggers synchronous except verbose". Because verbose has no adapter, there are no verbose results. The log4cl and vom adapters inline context into the message text because neither has a structured-context mechanism that the benchmark uses.
-
-What the published numbers say (README § Benchmarks, [bench/results/sample.txt](../../bench/results/sample.txt); sink is a discard stream, so these measure framework overhead, not I/O):
-
-- Disabled-level calls: all three are in single-digit to low-double-digit nanoseconds.
-- Single-thread enabled calls with fields: log4cl is faster than cl-bark (it formats less and writes straight to the stream); the README attributes this to text versus structured output. cl-bark allocates a result string per call; log4cl reports none for simple messages.
-- Eight threads: cl-bark in blocking mode exceeds log4cl and is close to vom in the sample run. The README attributes this to the lock-free ring buffer; this document does not independently verify that explanation.
-
-See [benchmarks.md](benchmarks.md) for caveats; the figures come from single runs on one machine.
-
-### Design-time contrast with cl-llog
-
-The design was contrasted with cl-llog. That comparison is a record of architectural intent. cl-llog was not in Quicklisp then and has presumably changed; nothing below describes its current internals.
-
-| Aspect | cl-bark | cl-llog as assessed at design time |
-|--------|--------------|-------------------------------------|
-| Hot-path dispatch | Function-slot swap; disabled level calls `noop` | Runtime `should-log-p` check |
-| Object model | `defstruct`, plain function formatters | `defclass`, generic functions for encoding and output |
-| Queue payload | Finished string | Entry object plus field objects |
-| Where serialization runs | Caller thread | Writer thread |
-| Queue | Lock-free MPSC ring buffer | Circular buffer under a mutex |
-| Static context | Pre-serialized at child creation | Serialized per call |
-
-The difference in outlook is that cl-bark asks what can be left out of the hot path; for the queue, see [Unbounded queue](#unbounded-queue).
-
-## Alternatives Considered
-
-### CLOS dispatch for formatters and outputs
-
-A class hierarchy of encoders and outputs gives users `defmethod` extension points. Rejected because CLOS dispatch would run on every call and the goal was no CLOS in the hot path. Formatters are structs holding two functions; extension means writing a function. The cost is that extension is by composition, not by subclassing.
-
-### Runtime level check on every call
-
-Comparing the call's level against the logger's threshold in the enabled path is simpler. It is rejected to avoid a branch and a slot read per call; the slot swap makes the disabled case a single call to `noop`. The cost is the argument-evaluation caveat above and that `set-level` must rewrite all six slots (`wire-level-fns`).
-
-### Formatting in the writer thread
-
-Pushing structured entries and formatting on the consumer would shorten the caller's path. The README gives four reasons against it: callers are the natural parallelism, `dynamic-extent` fields cannot cross threads without copying, `*log-context*` must be read in the calling thread, and tee needs the line before fan-out to share it. A separate formatter thread pool is rejected for adding a second queue handoff. Full text in [README § Caller-Thread Formatting](../../README.md#caller-thread-formatting).
-
-### One writer thread for all destinations
-
-A shared writer simplifies thread management. The README rejects it because a slow destination would stall fast ones; each destination owns a thread and ring buffer. The cost is one OS thread per destination.
-
-### Unbounded queue
-
-The ring is bounded (default capacity 8192, minimum 16, power of two) and drops by default, so a stuck sink cannot grow memory without limit and producers never wait on the writer. Blocking mode is the opt-in alternative for callers that prefer back-pressure over loss ([blocking-mode.md](blocking-mode.md)).
-
-### Hierarchical logger registry, hooks, rate-limit tokens
-
-The README lists a named logger registry as a non-goal (global mutable state; use `defvar`). Hooks and token-bucket limiting are not implemented; windowed counters cover rate limiting.
+The comparative benchmark against log4cl and vom, and how to read it, is in [../benchmarks.md](../benchmarks.md#reading-the-comparative-results).
 
 ## Invariants and Trade-offs
 
 - **The ring buffer holds strings.** Nothing downstream of `deliver-line` interprets events. Filters, sampling and transforms therefore run before the push.
-- **The payload is not fenced.** Ring-buffer slot reads and writes are plain `svref`. Correctness depends on x86 store ordering; see README. A port to a weakly ordered CPU needs barriers.
+- **The payload is not fenced.** Ring-buffer slot reads and writes are plain `svref`. Correctness depends on x86 store ordering; see [Ring buffer](#ring-buffer). A port to a weakly ordered CPU needs barriers.
 - **Single consumer.** `ring-buffer-pop` and the drain loop assume one reader per ring. `stop-async-output` drains the remainder after joining the thread for the same reason.
 - **A logger needs `stop` for a clean shutdown.** Writers wake every 0.1 s without a signal, but only `stop` (or the automatic exit drain, see `*exit-flush-timeout*`) joins the thread and drains. Child loggers cannot be stopped; `stop` on a child signals `bark-child-operation-error`.
 - **Child loggers snapshot at creation.** A child copies the parent's formatter, output and `prepared` string and receives the parent's sampler objects at creation; later parent changes are not reflected.
@@ -215,21 +183,9 @@ The README lists a named logger registry as a non-goal (global mutable state; us
 |---------|-------------|
 | Sampling and levels | A disabled level never reaches sampling. Sampling runs inside the enabled closure, before field transform and formatting. |
 | Sampling and tee filters | Sampling is per logger and runs first; tee filters run per destination afterwards. A sampled-out event reaches no destination. |
-| Drop-on-full and formatting | `deliver-line` receives an already formatted string, so a full buffer drops after the formatting cost has been paid. The drop counter and the drop warning are written by the writer thread. The README performance table says formatting is skipped on drop; the code does not do that. |
+| Drop-on-full and formatting | `deliver-line` receives an already formatted string, so a full buffer drops after the formatting cost has been paid. The drop counter and the drop warning are written by the writer thread. |
 | Tee and `prepared` | For a tee, `prepared` is a vector with one entry per formatter group, produced by each group's own `prepare-fn`. `make-child` extends each entry. |
 | Buffering and sampling | `with-log-buffer` swaps in a buffer-logger with sampler and field transform cleared; replay goes through the original logger's `dispatch-to-output` with the original timestamp bound, so sampling does not apply to buffered entries. See [request-scoped-buffering.md](request-scoped-buffering.md). |
 | Buffering and explicit loggers | Only calls through `*logger*` are buffered; calls with an explicit logger argument bypass the buffer. |
 | Field transform and context | The transform applies to per-call fields and dynamic context at call time, and to static context once at logger or child creation. |
 | Blocking mode and shutdown | `stop-async-output` clears `running`, broadcasts on the space condition variable and joins the writer so blocked producers return. See [blocking-mode.md](blocking-mode.md). |
-
-## Non-Goals
-
-Consistent with the README and the code:
-
-- Log rotation, aggregation and shipping. Use external tools.
-- Binary wire formats. A formatter can emit any string, so one can be added without core changes.
-- Editor or SLIME integration.
-- A named logger registry or hierarchy.
-- Filters on static or dynamic context, and output override on `make-child`; see [README § Non-Goals](../../README.md#non-goals).
-- Exposing the tee's internal structs as a public API.
-- Hooks, token-bucket rate limiting and an in-memory log browser, which are not implemented.

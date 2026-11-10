@@ -1,6 +1,6 @@
 # cl-bark Condition Serialization Design
 
-How cl-bark turns a condition into log output: the automatic type-and-message rendering, the explicit `capture` that adds a backtrace, and the rules that keep both bounded. Usage and output shape are documented in [README: Condition Logging](../../README.md#condition-logging) and [value-serialization.md: Condition Serialization](../value-serialization.md#condition-serialization); this document explains why the code is shaped the way it is.
+How cl-bark turns a condition into log output: the automatic type-and-message rendering, the explicit `capture` that adds a backtrace, and the rules that keep both bounded. Usage and output shape are documented in [Condition logging](../formatters.md#condition-logging); this document explains why the code is shaped the way it is.
 
 ## Motivation
 
@@ -73,7 +73,7 @@ Because the macros evaluate their arguments before the level function is called,
 
 - **Time.** `capture` calls `dissect:stack`, which walks the entire control stack. There is no depth limit at capture time. The cost is paid once per `capture`, on the calling thread.
 - **Memory.** The full frame list is retained for as long as the struct is referenced. JSON and pretty output print at most 10 or 20 frames by default, but all frames are stored, because the limits are applied when formatting, not when capturing. This allows one captured error to be rendered by several formatters with different limits (for example, a tee with a JSON file destination and a pretty console destination).
-- **Not captured.** Local variables, restarts, thread identity, and timestamps. `dissect` can collect locals; cl-bark does not request them (see Alternatives Considered).
+- **Not captured.** Local variables, restarts, thread identity, and timestamps. `dissect` can collect locals; cl-bark does not request them.
 
 ### Frame stripping
 
@@ -108,7 +108,7 @@ The cost is a hard dependency in `:depends-on`, loaded even for programs that ne
 | `*max-json-stack-frames*` | `10` | Frames written in the JSON `stack` array; `NIL` is unlimited |
 | `*max-pretty-stack-frames*` | `20` | Frames written in pretty output; `NIL` is unlimited |
 
-Both are special variables, so a caller can rebind them with `let` around a single log call. Usage is in [value-serialization.md: Stack Frame Limits](../value-serialization.md#stack-frame-limits). They follow the naming of `*max-json-depth*` and `*max-pretty-depth*`, and they are exported.
+Both are special variables, so a caller can rebind them with `let` around a single log call. Usage is in [Condition logging](../formatters.md#condition-logging). They follow the naming of `*max-json-depth*` and `*max-pretty-depth*`, and they are exported.
 
 There are two variables because the outputs have different consumers: JSON lines are machine-consumed and size-sensitive, pretty output is read at a terminal. The differing defaults are a choice, and the design notes do not state the reason.
 
@@ -138,7 +138,7 @@ All three formatters dispatch on the field value with a closed `typecase` or `co
 
 ### logfmt
 
-`emit-logfmt-condition` writes one value, `type: message`, for both a plain condition and a captured error. The text goes through `logfmt-write-bare-or-quoted`, which quotes and escapes it. Because the text always contains `": "`, the value is always quoted in practice (`err="simple-error: boom"`). The stack is dropped: logfmt is intentionally flat, and traces belong in JSON or pretty output.
+`emit-logfmt-condition` writes one value, `type: message`, for both a plain condition and a captured error. The text goes through `logfmt-write-bare-or-quoted`, which quotes and escapes it. Because the text always contains `": "`, the value is always quoted in practice (`err="simple-error: boom"`). The stack is dropped: logfmt is flat, and traces belong in JSON or pretty output.
 
 ### Pretty
 
@@ -168,7 +168,7 @@ A condition is rendered flat. cl-bark reads only `type-of` and the printed repor
 - A condition inside a list, vector, or hash table is serialized as an object in JSON, provided the enclosing collection itself was emitted. Collections at depth 0 become `<type>` placeholders first, and the condition inside is not reached. In logfmt a list is a `<cons>` placeholder, and in pretty it is `princ`ed under the print limits, which does not use the condition clauses.
 - `msg` comes from `princ-to-string`, so two conditions of the same type name from different packages are indistinguishable in the `type` field (`princ` prints the symbol without a package prefix, and this holds regardless of `*package*`).
 
-Cause chains are a non-goal (see Alternatives Considered).
+Cause chains are not rendered: only the condition itself is.
 
 ## User Customization
 
@@ -179,40 +179,10 @@ There is no generic function and no extension protocol for condition serializati
 | Change the message text | Define `:report` (or `print-object`) on the condition class; it feeds `msg`, and the `: message` part of logfmt and pretty |
 | Change the type string | Name the condition class accordingly; it comes from `type-of` |
 | Emit extra structured data | Convert before logging: pass a plist or hash table instead of the condition, or add fields next to it |
-| Redact or replace conditions centrally | A `:field-transform` on `make-logger` or `make-child` (see [README: Field Redaction](../../README.md#field-redaction)) |
+| Redact or replace conditions centrally | A `:field-transform` on `make-logger` or `make-child` (see [Field Redaction](../context.md#field-redaction)) |
 | Full control of rendering | Build a custom `formatter` with `make-formatter` and handle values in `format-fn` (see [formatter-protocol.md](formatter-protocol.md)) |
 
 This matches the contract in [value-serialization.md](../value-serialization.md): unsupported types are the caller's job to convert. A protocol would have to be bounded by the same rules (no recursion, no unbounded output) and would make the output shape depend on user code.
-
-## Alternatives Considered
-
-### Automatic stack capture in the logging macros
-
-Rejected. At `bark:error` time the stack is the application's logging code, not the signal site, so the trace would look authoritative while pointing at the wrong place. It would also add a stack walk to every error log call. Capture is explicit at the signal site.
-
-### Cause chains and recursive condition rendering
-
-Rejected. Common Lisp has no standard cause slot, so a chain would require a cl-bark protocol that user condition classes opt into. Not recursing is also what keeps the condition clauses bounded and free of depth bookkeeping.
-
-### Local variable capture
-
-Rejected. `dissect` can collect locals, but the data is expensive and unbounded.
-
-### Stack traces in logfmt
-
-Rejected. logfmt is flat key-value text, and a trace does not fit that shape. Hence no logfmt frame limit.
-
-### A `captured-error` that is a condition subclass, or a condition with extra slots
-
-Rejected in favor of a wrapper struct. The wrapper leaves the original condition untouched and still available to field transforms and custom formatters, and it cannot be signaled or matched by `handler-bind` clauses by accident.
-
-### A preformatted text trace in JSON
-
-Rejected in favor of an array of `call`/`file`/`line` objects, which suits machine consumption. Pretty output gets the human-readable `at FN (file:line)` form from the same frames.
-
-### Per-destination capture limits
-
-Not done. The full stack is stored and the limits are format-time variables, so one captured error serves several formatters. The cost is the memory held by the full stack.
 
 ## Invariants and Trade-offs
 
@@ -256,13 +226,4 @@ Sampling runs inside the level function, after the macro has evaluated its argum
 
 ### Async and tee outputs
 
-Formatting happens on the caller thread, so the stack walk and the rendering are both in caller latency (see [README: Caller-Thread Formatting](../../README.md#caller-thread-formatting)). The writer thread sees only strings. With a tee, each destination's formatter renders the same `captured-error` independently, using its own formatter and the shared limit variables.
-
-## Non-Goals
-
-- Automatic capture in the logging macros.
-- Cause chains, slot walking, or any recursion into condition objects.
-- Local variable capture, restart capture, or thread and timestamp metadata in a captured error.
-- Stack traces in logfmt.
-- A user-extensible serialization protocol for conditions.
-- Protecting log calls against a `:report` function that signals.
+Formatting happens on the caller thread, so the stack walk and the rendering are both in caller latency (see [Caller-Thread Formatting](overview.md#caller-thread-formatting)). The writer thread sees only strings. With a tee, each destination's formatter renders the same `captured-error` independently, using its own formatter and the shared limit variables.

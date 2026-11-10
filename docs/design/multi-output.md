@@ -5,7 +5,7 @@ formatter, filter, buffer and writer thread. The mechanism is a tee output, buil
 or the `tee` macro and passed as `:output` to `make-logger`. A separate mechanism, passing a
 logger as the first argument of a log macro, selects between whole loggers at the call site. This
 document explains why the two are shaped the way they are. The user-facing reference is
-[README § Multi-Output](../../README.md#multi-output).
+[Multi-Output](../multi-output.md).
 
 ## Problem
 
@@ -45,7 +45,7 @@ is an ordinary `:context` field.
 Destinations are then grouped by `eq` identity of their `formatter` struct into
 `formatter-group`s, and the `tee-output` holds the vector of `groups`. The three structs are not
 exported; a tee is an opaque value for `:output`. Per-destination keys, defaults and the `tee`
-macro syntax are in the README. In short, `:formatter` defaults to the shared
+macro syntax are in the [multi-output guide](../multi-output.md). In short, `:formatter` defaults to the shared
 `*default-json-formatter*`, and `:capacity`, `:on-drop`, `:blocking`, `:block-timeout` and
 `:on-block-timeout` configure that destination's own `async-output`. Passing `nil` for `:on-drop`
 selects the default handler, so a drop warning is suppressed by returning `nil` from the handler.
@@ -209,7 +209,7 @@ string, so the added context appears in every destination.
 - Formatting cost stays on the caller, once per group with a passing destination. The ring buffer
   holds strings, never structured data.
 - Out of scope: output override on `make-child`, a named logger registry, filtering on static or
-  dynamic context, and a public output object. See the README's Non-Goals table.
+  dynamic context, and a public output object.
 
 ## Interactions
 
@@ -239,9 +239,5 @@ string, so the added context appears in every destination.
 
 ## See also
 
-- [README § Multi-Output](../../README.md#multi-output),
-  [Configuration Diagrams](../../README.md#configuration-diagrams) and
-  [Usage Examples](../../README.md#usage-examples)
-- [Formatter protocol](formatter-protocol.md)
-- [Blocking mode](blocking-mode.md)
+- [Multi-output guide](../multi-output.md)
 - `src/output.lisp`, `src/writer.lisp`, `src/logger.lisp`, `src/buffer.lisp`

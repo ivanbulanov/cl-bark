@@ -1,6 +1,6 @@
 # cl-bark Request-Scoped Buffering Design
 
-How `with-log-buffer` holds log calls until a scope ends and then decides which of them reach the output. The user-facing reference is [README § Request-Scoped Buffering](../../README.md#request-scoped-buffering); the cross-feature rules are in [README § Feature Interactions](../../README.md#feature-interactions). This document explains the shape of the implementation in `src/buffer.lisp` and the reasons behind it.
+How `with-log-buffer` holds log calls until a scope ends and then decides which of them reach the output. The user-facing reference is [Request-Scoped Buffering](../request-scoped-buffering.md); the cross-feature rules are in [Feature Interactions](../interactions.md). This document explains the shape of the implementation in `src/buffer.lisp` and the reasons behind it.
 
 ## Motivation
 
@@ -82,7 +82,7 @@ Capture-then-flush flow:
 
 This reuses the mechanism `set-level` uses. The logging macros funnel through `logger-<level>-fn` of whichever logger they resolve, so nothing in the macros knows about buffering. A call through `*logger*` reaches a capture closure, and a call below the capture level reaches `#'noop` at the same cost as a disabled level.
 
-Three slots are deliberately left at their defaults:
+Three slots are left at their defaults:
 
 - `field-transform` is `nil`. The transform is applied once, at flush time (see [Flush-time work](#flush-time-work)).
 - `level-sampler` and `consistent` are `nil`. Capture is unconditional, because a sampled-out entry would be gone before the flush decision exists. The docstring of `make-buffer-logger` says "sampler cleared"; the code achieves it by not copying the slots.
@@ -131,7 +131,7 @@ The accessors are exported. The struct type name and `make-buffer-entry` are not
 
 The handler records and returns. It never handles, so the condition continues to propagate to whatever handler the application established, and outer `handler-case` forms and the debugger see it unchanged.
 
-A `return-from` or `throw` counts as normal exit because it is deliberate control flow. Failure is recognized as the combination of unwinding and a recorded condition; a bare unwind with no condition falls into the level-filter branch. A retry loop, where `return` leaves the scope on success, is the motivating case.
+A `return-from` or `throw` counts as normal exit because it is control flow chosen by the code. Failure is recognized as the combination of unwinding and a recorded condition; a bare unwind with no condition falls into the level-filter branch. A retry loop, where `return` leaves the scope on success, is the motivating case.
 
 The placement of the `handler-bind` matters. It sits outside the body, so any `handler-case` or `handler-bind` the body establishes is more recent and runs first. A `handler-case` inside the body that unwinds before the signal reaches the macro's handler leaves `condition` nil and the exit normal; the test `test-with-log-buffer-on-flush-sees-handled-condition` pins this. A body-local `handler-bind` that declines lets the signal reach the macro's handler, so `condition` can be non-nil even when the scope still returns normally. `on-flush` receives all three values (entries, condition, `normal-exit-p`) so a caller can decide for itself. The default rule is `(and (not normal-exit-p) condition)`.
 
@@ -160,7 +160,7 @@ Without `on-flush`, "no entries selected" and "use the level filter" are the sam
 
 Two related details follow from the same function:
 
-- The result of `on-flush` is traversed with `loop ... across`, so it must be a vector (or nil). The README describes it as a sequence. A callback built on `remove-if` over the entries vector returns a vector and works; a list result signals a type error inside the cleanup form. The callback receives the live buffer vector (with a fill pointer), not a copy.
+- The result of `on-flush` is traversed with `loop ... across`, so it must be a vector (or nil). The user guide describes it as a sequence. A callback built on `remove-if` over the entries vector returns a vector and works; a list result signals a type error inside the cleanup form. The callback receives the live buffer vector (with a fill pointer), not a copy.
 - `on-flush` runs inside the cleanup form. An error signaled by the callback or by emission during an unwind replaces the original non-local exit.
 
 ### Replay through `emit-entry`
@@ -189,7 +189,7 @@ A custom formatter that reads the clock itself would stamp flush time on every r
 
 The field transform runs once on each emitted entry, and only on emitted entries. The buffer-logger does not inherit the transform: it would run at capture and again at replay, applying it twice. Applying it at flush also means discarded entries never pay for the transform.
 
-Samplers are not re-applied at flush. Samplers are cleared at capture because a sampled-out entry would be permanently lost, defeating the purpose of buffering. The code also does not sample at replay; the effect is that a buffered scope bypasses sampling in both directions. See [sampling.md](../sampling.md#request-scoped-buffering-with-log-buffer).
+Samplers are not re-applied at flush. Samplers are cleared at capture because a sampled-out entry would be permanently lost, defeating the purpose of buffering. The code also does not sample at replay; the effect is that a buffered scope bypasses sampling in both directions. See [sampling.md](../sampling.md#other-features).
 
 ## Nesting
 
@@ -197,14 +197,14 @@ Nested `with-log-buffer` is a no-op. The macro checks `*root-logger*`: when it i
 
 `*root-logger*` has two jobs: it is the signal that a buffer scope is active, and it holds the logger the flush replays through, which is the source logger of the outermost scope.
 
-Nested scopes could instead buffer independently, each flushing directly to the root output and not into its parent. The code uses the no-op rule. The README states the reason as "wrong flush targets, lost context, and out-of-order output"; the table below shows the mechanisms.
+Nested scopes could instead buffer independently, each flushing directly to the root output and not into its parent. The code uses the no-op rule. The user guide states the reason as "wrong flush targets, lost context, and out-of-order output"; the table below shows the mechanisms.
 
 | Problem with independent nested buffers | Mechanism |
 |------------------------------------------|-----------|
 | Wrong flush target and lost context | All scopes flush through the root logger. If `*logger*` is rebound to a different child between nested scopes (`component "auth"` outside, `component "db"` inside), inner entries are emitted with the root's static context, so the output carries the outer component. The inner child's context is lost |
 | Out-of-order output | An inner scope flushes at its own exit, directly to the output. Outer entries logged before the inner scope began are still held, so inner entries appear before them |
 
-Merging inner entries into the outer buffer is also rejected, for complexity and unpredictable behavior; see [Alternatives Considered](#alternatives-considered).
+Merging inner entries into the outer buffer is not done either, for complexity and unpredictable behavior.
 
 The no-op rule has a cost. A failing inner operation that is caught by an outer `handler-case` inside the same outer scope is a handled error from the outer scope's perspective, so the exit is normal and the debug entries of the failed inner operation are not emitted. The test `test-nested-buffer-inner-error-handled-by-outer` pins this. A library cannot get an isolated buffer for a sub-operation while a caller's scope is active.
 
@@ -214,7 +214,7 @@ Only calls that resolve to `*logger*` are captured. The logging macros take an o
 
 Passing a logger is a routing decision, and the buffer should not override it. This is the same explicit selection described in [multi-output.md](multi-output.md).
 
-Two corollaries. A child logger created before the scope is entered is not the buffer-logger, so calls through it go straight to the output. A child created from `*logger*` inside the body is derived from the buffer-logger, but `make-child` wires ordinary log functions through `set-level`, so calls through that child are emitted immediately as well. Code that wants a child buffered passes it as the `logger` argument of `with-log-buffer`, as in the README example, so the buffer-logger copies its `context` and `prepared`.
+Two corollaries. A child logger created before the scope is entered is not the buffer-logger, so calls through it go straight to the output. A child created from `*logger*` inside the body is derived from the buffer-logger, but `make-child` wires ordinary log functions through `set-level`, so calls through that child are emitted immediately as well. Code that wants a child buffered passes it as the `logger` argument of `with-log-buffer`, as in the user guide example, so the buffer-logger copies its `context` and `prepared`.
 
 ## Memory and Cost
 
@@ -232,36 +232,6 @@ Capture cost per call is one `copy-list` of the fields, one `buffer-entry`, one 
 The buffer is unbounded because the typical scope is a request that lasts milliseconds to seconds with tens of entries, and a bound adds API surface and implementation complexity for a problem expected to be rare. The consequence is that a long-running scope that logs heavily at `:trace` grows without limit. The scope boundary and the `level` argument are the only controls.
 
 Special bindings are per thread in SBCL. A thread started inside the scope does not inherit the `*logger*` and `*root-logger*` bindings, so its log calls go to the global values. This follows from dynamic binding and is not specific to this feature. Passing the buffer-logger to another thread explicitly would share the unsynchronized vector.
-
-## Alternatives Considered
-
-### Log levels
-
-Levels filter before the scope runs. Choosing `:debug` for everything pays the volume cost for every request; choosing `:info` loses the trail for failures.
-
-### Sampling
-
-Keeping a fraction of debug entries retains the failing request's trail only by chance. Sampling loses exactly the logs needed when something goes wrong.
-
-### Tee filters
-
-A filter sees one entry at emit time, with no knowledge of how the scope ends. The design keeps filters in the flush path for routing, and uses the buffer for the retroactive decision.
-
-### `with-captured-logs`
-
-It collects formatted output synchronously, is intended for tests, and has no conditional logic.
-
-### Independent nested buffers
-
-Each nested scope buffers and flushes to the root separately. Rejected in favor of the no-op rule, because of the static-context problem that follows from "all scopes flush to root"; see [Nesting](#nesting).
-
-### Merging inner entries into the outer buffer
-
-Not done: merging adds complexity and makes behavior unpredictable. With the no-op rule the outcome is simpler still, since inner calls are captured by the outer buffer directly.
-
-### Bounded buffer
-
-Deferred: bounds add API surface and implementation complexity, and the problem is expected to be rare. Bounds can be added later if real usage demands.
 
 ## Invariants and Trade-offs
 
@@ -295,30 +265,14 @@ Trade-offs:
 | `level-enabled-p` | Inside the scope it is evaluated against the buffer-logger, so it reflects the capture level, not the source logger's level |
 | Tee | Destination filters and per-group formatters apply at flush, to each emitted entry. Filters receive the entry's level and its transformed fields |
 | Child loggers | A child passed as the `logger` argument is copied for its static context. Children created before or inside the scope bypass capture |
-| Sampling | Bypassed on capture and not re-applied on replay. See [sampling.md](../sampling.md#request-scoped-buffering-with-log-buffer) |
+| Sampling | Bypassed on capture and not re-applied on replay. See [sampling.md](../sampling.md#other-features) |
 | Field transform | Applied at flush with the root logger's transform |
 | Blocking mode | Flush delivers all selected entries in one burst. With `:blocking t` the caller waits for the writer when the ring is full, which holds the thread at the end of the scope. blocking-mode.md calls this correct behavior; see [blocking-mode.md](../blocking-mode.md) |
 | Non-blocking async output | A burst larger than the ring capacity drops entries under the usual drop policy, and the `:on-drop` handler reports the count. A failing request with many captured entries is the case most exposed to this |
 | Custom formatters | Must call `current-log-timestamp-ms`, or replayed entries show flush time |
 | `with-context` | The context alist at each call is snapshotted in the entry, so bindings that have exited by flush time are still reported |
 
-## Non-Goals
-
-- Bounding the buffer or choosing which entries to drop when it fills.
-- Intercepting log calls that pass an explicit logger.
-- Bypassing tee filters at flush. Filters run on replayed entries as on live ones.
-- Merging nested buffers, or giving nested scopes their own flush policy.
-- Applying samplers to replayed entries.
-- Emitting partial results before the scope ends. Nothing is emitted until exit.
-- Buffering across threads. A scope is one dynamic extent in one thread.
-
 ## See also
 
-- [README § Request-Scoped Buffering](../../README.md#request-scoped-buffering): usage and user-facing semantics
-- [overview.md](overview.md): architecture map and where each design document fits
-- [sampling.md](sampling.md) (design) and [user guide](../sampling.md#request-scoped-buffering-with-log-buffer): how sampling interacts with the buffer
-- [multi-output.md](multi-output.md): tee filters and the explicit logger argument
-- [blocking-mode.md](blocking-mode.md) (design) and [user guide](../blocking-mode.md): backpressure behavior during a flush burst
-- [formatter-protocol.md](formatter-protocol.md): the prepare and format protocol the replay path uses
-- [condition-serialization.md](condition-serialization.md): how conditions captured in fields are rendered at flush
+- [Request-scoped buffering guide](../request-scoped-buffering.md), [overview](overview.md)
 - `src/buffer.lisp`, `src/timestamps.lisp`

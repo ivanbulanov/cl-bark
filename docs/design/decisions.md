@@ -262,7 +262,7 @@ authors, and tests.
 
 **Decision.** The package exports what those users need: the level constants, `level-name`, the logging macros,
 `make-logger`, `make-child`, `set-level`, `level-enabled-p`, `flush`, `stop`, the formatter
-protocol and factories, `make-tee` and `tee`, the sampling constructors with `set-level-sampling` and
+protocol and factories, `make-tee` and `tee`, the sampling constructors with `set-level-sampler` and
 `set-consistent`, `with-context`, `with-captured-logs`, `with-log-buffer` with the buffer-entry readers, `capture`
 and the captured-error readers, the serialization limits, `current-log-timestamp-ms`, and the `bark-*` conditions. It
 does not export the logger type or its accessors, `async-output`, `level-from-keyword`, `+level-slot-count+`, the
@@ -299,14 +299,14 @@ independent of the writer, and the logger comes last because it uses everything 
 because the logger struct has slots of their types.
 
 **Consequences.** A change to one concern touches one file, and each formatter is self-contained apart from the
-shared protocol. The load order matters and a new file must be placed in it deliberately.
+shared protocol. The load order matters and a new file must be placed in it explicitly.
 
 ## Beta status: no backward-compatibility guarantee before 1.0
 
 **Context.** The library is at version 0.1.0 and has been used only by its author. Its API has been reshaped
 repeatedly to reach the form above, with no deprecation aliases.
 
-**Decision.** The README states that the library is beta and that no stability guarantee is made until 1.0. The
+**Decision.** The README says the library is beta and that no stability guarantee is made until 1.0. The
 [changelog](../../CHANGELOG.md) commits to listing breaking changes under **Changed** and to semantic versioning, and
 that until 1.0 the API may change between minor versions. Breaking changes are made directly, with no deprecated
 aliases or compatibility shims. Symbols reachable only through `bark::` are outside the API at any version.
