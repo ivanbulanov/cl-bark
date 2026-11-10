@@ -31,8 +31,9 @@ and `vom`. All are available through Quicklisp.
   `CHANGELOG.md` and update the relevant README section. For design-level
   changes, update the matching document under `docs/design/`.
 - New source files carry the Apache 2.0 header used by the existing files.
-- Regenerate the API reference with `make docs` when docstrings or exports
-  change; the result in `docs/api/` is committed and published automatically.
+- `make docs` builds the API reference into `docs/api/` (needs network access
+  for Quicklisp's `staple`, and `python3`). The directory is not committed; the
+  Pages workflow builds and publishes it on pushes to `main`.
 
 ## License
 

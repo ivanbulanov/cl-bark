@@ -1,6 +1,6 @@
 # cl-bark Benchmark Harness Design
 
-Why the `bench/` harness is shaped the way it is: what it measures, how a sample is taken, and which numbers it can and cannot support. The how-to material lives elsewhere: [README § Benchmarks](../../README.md#benchmarks) covers running, methodology and reading the comparative results, and [BENCHMARKS.md](../../BENCHMARKS.md) holds an earlier set of reference-machine results. This document is for someone extending the harness or deciding whether a number is trustworthy.
+Why the `bench/` harness is shaped the way it is: what it measures, how a sample is taken, and which numbers it can and cannot support. The how-to material lives elsewhere: [README § Benchmarks](../../README.md#benchmarks) covers running, methodology and reading the comparative results. This document is for someone extending the harness or deciding whether a number is trustworthy.
 
 ## Motivation
 

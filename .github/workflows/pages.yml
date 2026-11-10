@@ -1,13 +1,15 @@
 name: Publish API reference
 
-# Publishes the pre-generated Staple output in docs/api/ to GitHub Pages.
-# Regenerate locally with `make docs` and commit the result; no Lisp runs here.
+# Builds the Staple API reference from the docstrings and publishes it to GitHub Pages.
 
 on:
   push:
     branches: [main]
     paths:
-      - "docs/api/**"
+      - "src/**"
+      - "packages.lisp"
+      - "cl-bark.asd"
+      - "docs/fix-staple.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -23,12 +25,24 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      LISP: sbcl-bin
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: 40ants/setup-lisp@v4
+        with:
+          asdf-system: cl-bark
+          qlfile-template: |
+            ql :all :latest
+
+      - name: Build API reference
+        run: make docs
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

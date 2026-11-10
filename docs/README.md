@@ -27,5 +27,3 @@ Rationale and architecture, kept current with the code. Start with the overview.
 | [design/blocking-mode.md](design/blocking-mode.md) | Why bounded blocking instead of drop-only or unbounded queues |
 | [design/sampling.md](design/sampling.md) | Burst-then-sample model and consistent sampling |
 | [design/benchmarks.md](design/benchmarks.md) | What the `bench/` harness measures and why |
-
-Benchmark results for a reference machine are in [BENCHMARKS.md](../BENCHMARKS.md).

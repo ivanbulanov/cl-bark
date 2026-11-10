@@ -155,7 +155,7 @@ What the published numbers say (README § Benchmarks, [bench/results/sample.txt]
 - Single-thread enabled calls with fields: log4cl is faster than cl-bark (it formats less and writes straight to the stream); the README attributes this to text versus structured output. cl-bark allocates a result string per call; log4cl reports none for simple messages.
 - Eight threads: cl-bark in blocking mode exceeds log4cl and is close to vom in the sample run. The README attributes this to the lock-free ring buffer; this document does not independently verify that explanation.
 
-`BENCHMARKS.md` reports only cl-bark's own throughput, concurrency scaling and saturation behavior, not the comparative runs. See [benchmarks.md](benchmarks.md) for caveats; the figures come from single runs on one machine.
+See [benchmarks.md](benchmarks.md) for caveats; the figures come from single runs on one machine.
 
 ### Design-time contrast with cl-llog
 
