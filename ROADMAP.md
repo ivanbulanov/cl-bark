@@ -267,9 +267,9 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 ## Phase 5. Small fixes
 
 - [x] *0.2.0*: `src/writer.lisp` pushes the save and init hooks twice, once bare and once inside a `progn`. Delete one. (5a426a1)
-- [ ] *0.2.0*: an interrupt that logs to an `:async nil` output while its thread is writing to the same stream gets
+- [x] *0.2.0*: an interrupt that logs to an `:async nil` output while its thread is writing to the same stream gets
   a recursive lock error, which counts as a stream error and, without `:on-error`, marks the output failed. Count
-  the line as dropped instead and leave the output healthy (found while writing 4.5).
+  the line as dropped instead and leave the output healthy (found while writing 4.5). (1b94a9d)
 
 ## Phase 6. Changes in the application (last)
 
