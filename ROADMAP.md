@@ -221,6 +221,7 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 - [ ] Docstrings: `stop`'s `continue` restart returns NIL; `make-logger` rounds `:capacity` up to a power of two;
   `make-buffer-logger` says samplers apply at flush time (they do not); the exported struct accessors and predicates
   have none.
+  The first three are fixed (fe6dca5); the struct accessors and predicates are still open.
 
 ### 4.2 Generated and stale files. *0.2.0*
 
