@@ -30,6 +30,8 @@ and `vom`. All are available through Quicklisp.
 - If a change affects the public API, add an entry under **Unreleased** in
   `CHANGELOG.md` and update the relevant README section. For design-level
   changes, update the matching document under `docs/design/`.
+- `python3 docs/check-links.py` checks relative links and anchors in the Markdown files; run it after moving or renaming a
+  heading or file.
 - New source files carry the Apache 2.0 header used by the existing files.
 - `make docs` builds the API reference into `docs/api/` (needs network access
   for Quicklisp's `staple`, and `python3`). The directory is not committed; the

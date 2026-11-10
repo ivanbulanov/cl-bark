@@ -4,12 +4,12 @@ cl-bark serializes field values to JSON and logfmt without signaling errors on a
 
 ## Design Rationale
 
-A logging library must never crash, hang, or produce unbounded output -- even when handed unexpected types. Rather than attempting to serialize every CL type (risking circular structures, huge output, and implementation-dependent representations), cl-bark:
+A logging library must never crash, hang, or produce unbounded output, even when handed unexpected types. Rather than attempting to serialize every CL type (risking circular structures, huge output, and implementation-dependent representations), cl-bark:
 
-- **Supports types that map cleanly** to JSON and logfmt
-- **Produces bounded placeholders** for everything else, derived from `type-of`
-- **Never traverses opaque objects** -- no circularity risk
-- **Provides a clear contract** -- unsupported types are the caller's job to convert
+- Supports types that map cleanly to JSON and logfmt
+- Produces bounded placeholders for everything else, derived from `type-of`
+- Never traverses opaque objects, no circularity risk
+- Provides a clear contract, unsupported types are the caller's job to convert
 
 ## JSON Value Types (`emit-json-value`)
 
@@ -31,7 +31,7 @@ Emitted at any nesting depth.
 | `condition` | object | `(make-condition 'simple-error ...)` | `{"type":"simple-error","msg":"boom"}` |
 | `captured-error` | object | `(bark:capture condition)` | `{"type":"simple-error","msg":"boom","stack":[...]}` |
 
-**Ratio handling:** Coerced to `double-float` and printed via `~F` format directive. This avoids the CL `d0` suffix in the output. Precision loss is inherent to IEEE 754 doubles (e.g. `1/3` becomes `0.3333333333333333`, not exactly one-third).
+Ratio handling: Coerced to `double-float` and printed via `~F` format directive. This avoids the CL `d0` suffix in the output. Precision loss is inherent to IEEE 754 doubles (e.g. `1/3` becomes `0.3333333333333333`, not exactly one-third).
 
 ### Collections
 
@@ -51,9 +51,9 @@ JSON object keys must be strings. cl-bark coerces hash-table keys:
 | Key type | Coercion | Example |
 |----------|----------|---------|
 | `string` | Used as-is | `"name"` |
-| `symbol` | `string-downcase` of symbol-name | `:name` -> `"name"` |
-| `pathname` | `namestring` | `#P"/tmp"` -> `"/tmp"` |
-| anything else | Lowercased type name | `42` -> `"(integer 0 ...)"` |
+| `symbol` | `string-downcase` of symbol-name | `:name` becomes `"name"` |
+| `pathname` | `namestring` | `#P"/tmp"` becomes `"/tmp"` |
+| anything else | Lowercased type name | `42` becomes `"(integer 0 ...)"` |
 
 Non-string/symbol/pathname keys signal "you're using unsupported key types" without crashing.
 
@@ -72,23 +72,23 @@ The placeholder is always a bounded string. To control the representation, conve
 
 ## logfmt Value Types (`emit-logfmt-value`)
 
-logfmt is a flat key=value format. cl-bark emits **scalars only** -- no collections, no recursive descent.
+logfmt is a flat key=value format. cl-bark emits scalars only, no collections, no recursive descent.
 
 | CL Type | logfmt | Notes |
 |---------|--------|-------|
 | `string` | bare or `"quoted"` | Quoted if contains space, `"`, or `=` |
-| `character` | bare char | `#\x` -> `x` |
+| `character` | bare char | `#\x` becomes `x` |
 | `integer` | number | `42` |
 | `float` | number | `3.14` |
-| `ratio` | number | `1/3` -> `0.3333333333333333` |
+| `ratio` | number | `1/3` becomes `0.3333333333333333` |
 | `nil` | `null` | |
-| `symbol` | lowercase | `:foo` -> `foo` |
-| `pathname` | bare or quoted | `#P"/tmp/my log"` -> `"/tmp/my log"` |
-| `condition` | quoted string | `(make-condition 'simple-error ...)` -> `"simple-error: boom"` |
-| `captured-error` | quoted string | `(bark:capture condition)` -> `"simple-error: boom"` |
+| `symbol` | lowercase | `:foo` becomes `foo` |
+| `pathname` | bare or quoted | `#P"/tmp/my log"` becomes `"/tmp/my log"` |
+| `condition` | quoted string | `(make-condition 'simple-error ...)` becomes `"simple-error: boom"` |
+| `captured-error` | quoted string | `(bark:capture condition)` becomes `"simple-error: boom"` |
 | anything else | `<type>` | `<cons>`, `<hash-table>`, `<function>` |
 
-**Boolean `t` handling:** In logfmt, a bare key with no `=value` means true. The logfmt formatter handles this at the field-writing level: when a field value is `t`, it emits just the key and skips `=value` entirely. `emit-logfmt-value` is never called for `t`.
+Boolean `t` handling: In logfmt, a bare key with no `=value` means true. The logfmt formatter handles this at the field-writing level: when a field value is `t`, it emits just the key and skips `=value` entirely. `emit-logfmt-value` is never called for `t`.
 
 ## Pretty Value Types (`pretty-formatter`)
 
@@ -106,9 +106,9 @@ The pretty formatter uses `princ` (CL's human-readable printer) for most values,
 | `captured-error` | type: message + stack | `simple-error: boom` + indented stack frames |
 | anything else | `princ` output | Whatever `print-object` produces |
 
-**Keys** are lowercased (same as JSON/logfmt), dimmed with ANSI escape codes, and separated by `=`.
+Keys are lowercased (same as JSON/logfmt), dimmed with ANSI escape codes, and separated by `=`.
 
-**Limits:** The pretty formatter binds CL's printer variables internally:
+Limits: The pretty formatter binds CL's printer variables internally:
 
 | bark variable | CL variable bound | Default | Effect |
 |---------------|-------------------|---------|--------|
@@ -119,45 +119,9 @@ The pretty formatter uses `princ` (CL's human-readable printer) for most values,
 
 Set either variable to `nil` to remove the corresponding limit.
 
-## Condition Serialization
+## Conditions
 
-CL conditions passed as field values are automatically detected and serialized with their type and message — no wrapper needed. This applies to all three formatters.
-
-### Plain Conditions
-
-Any value that is a `condition` subtype produces structured output:
-
-- **JSON**: `{"type":"simple-error","msg":"boom"}` — an object with `type` (lowercased type name) and `msg` (the condition's printed representation)
-- **logfmt**: `"simple-error: boom"` — a quoted string with type and message
-- **pretty**: `simple-error: boom` — inline type and message
-
-### Captured Errors (with Stack Traces)
-
-`bark:capture` snapshots a condition with the current stack trace. Call it inside `handler-bind` for a meaningful trace (the stack is still live):
-
-```lisp
-(handler-bind ((cl:error (lambda (c)
-                           (bark:error "request failed" :err (bark:capture c))
-                           (invoke-restart 'abort))))
-  (process-request))
-```
-
-The `captured-error` struct produces:
-
-- **JSON**: `{"type":"simple-error","msg":"boom","stack":[{"call":"process-request","file":"api.lisp","line":42},...]}` — adds a `stack` array of frame objects
-- **logfmt**: `"simple-error: boom"` — same as plain condition (stack traces are too structured for logfmt)
-- **pretty**: inline type/message with indented stack frames below
-
-### Stack Frame Limits
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `*max-json-stack-frames*` | `10` | Max frames in JSON `stack` array. Truncated frames show a `{"call":"..."}` sentinel. `nil` = unlimited. |
-| `*max-pretty-stack-frames*` | `20` | Max frames in pretty output. Truncated frames show `... (N more frames)`. `nil` = unlimited. |
-
-### Internal Frame Stripping
-
-`bark:capture` automatically strips leading BARK and DISSECT internal frames from the stack trace, so the first frame shown is the caller's code, not bark's internals.
+A condition passed as a field value is rendered with its type and message, by all three formatters. `bark:capture` adds a stack trace. The output shapes, the stack frame limits and `capture` usage are in [formatters.md](formatters.md#condition-logging).
 
 ## Serialization Limits
 
