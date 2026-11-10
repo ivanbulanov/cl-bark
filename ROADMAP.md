@@ -89,7 +89,7 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
 ### 1.4 Follow-ups in sql-zealot (not cl-bark work)
 
 - sql-zealot, short term: require cl-bark 0.2.0 in the `.asd` and delete the `bark-logger` deftype.
-  Done in sql-zealot f0d8881: `(:version "cl-bark" "0.2.0")`, `bark:logger`, the deploy scripts use `healthy-p`
+  Done in sql-zealot 57c6688: `(:version "cl-bark" "0.2.0")`, `bark:logger`, the deploy scripts use `healthy-p`
   and `dropped-count`, and no `bark::` is left. The key-name pass of `mask-log-field` is confirmed dead (none of the
   36 catalogue field names contains a secret word) and deleted; `log-event` now rejects a field the catalogue does
   not list, so it stays dead.
@@ -98,7 +98,7 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
   `zl.pool.connect-failed` as a state event, the adapter system, and the deletion of `call-with-log-context`. The
   review also found that the key-name pass of `mask-log-field` cannot fire, because no catalogue field name contains
   a secret word; confirm and delete it.
-  Done in sql-zealot 5446bcf: section L of `lisp/ROADMAP.md`, items L1 to L7 open, L8 (the key-name pass) done.
+  Done in sql-zealot 4ba8f80: section L of `lisp/ROADMAP.md`, items L1 to L7 open, L8 (the key-name pass) done.
   - State event for `zl.pool.connect-failed`: log when failures start, again every 60 s with the count while they
     last, again when the error class changes, and on recovery at the same level as the failure (at `:debug` the
     recovery would be invisible at the default threshold). `zl.pool.timeout` has no state edge under load and stays
