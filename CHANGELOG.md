@@ -38,6 +38,7 @@ minor versions, and such changes are listed under **Changed**.
 ### Added
 
 - Add and export `current-level`, which returns a logger's level as a keyword.
+- Add and export `healthy-p`, which returns NIL when an async writer of a logger has failed.
 - Add and export `emit`, a function form of the logging macros that takes the fields as a plist built at run time.
 - Add `sb-ext:*save-hooks*` and `sb-ext:*init-hooks*` functions: `save-lisp-and-die` no longer fails while an async
   logger runs; the save hook drains and joins every running writer thread, and the init hook restarts them in the

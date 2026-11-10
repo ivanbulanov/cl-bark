@@ -127,7 +127,7 @@ The `:output` argument decides how a logger writes:
 | A tee from `bark:tee` or `bark:make-tee` | One writer per destination ([multi-output](docs/multi-output.md)) |
 | `nil` | `*error-output*`, as a stream |
 
-Async outputs are drained at image exit, and writer threads are restarted after `save-lisp-and-die`. A child shares its parent's output and must not be stopped; stop the root logger. The signatures, `bark:dropped-count`, timeouts and conditions are in [lifecycle.md](docs/lifecycle.md).
+Async outputs are drained at image exit, and writer threads are restarted after `save-lisp-and-die`. A child shares its parent's output and must not be stopped; stop the root logger. The signatures, `bark:dropped-count` and `bark:healthy-p`, timeouts and conditions are in [lifecycle.md](docs/lifecycle.md).
 
 ### Context
 

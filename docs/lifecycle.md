@@ -61,6 +61,13 @@ Every async output is drained automatically when the image exits, waiting at mos
 (bark:dropped-count bark:*logger*)
 ```
 
+`bark:healthy-p` returns NIL when an async writer of the logger has failed: a stream error that `:on-error` did not repair, a writer thread that died, or a writer that could not be restarted after the image was restored from a saved core. Otherwise, also for NIL, a synchronous logger and a stopped one, it returns T. A failed writer does not recover; the lines sent to it are counted by `dropped-count`. Together they make a health check:
+
+```lisp
+(and (bark:healthy-p bark:*logger*)
+     (zerop (bark:dropped-count bark:*logger*)))
+```
+
 ## Logging with fields built at run time
 
 The logging macros take their fields as literal arguments. When the field set is built at run time, use `emit`, which takes the fields as one plist:
@@ -85,9 +92,10 @@ SBCL refuses to save a core while other threads run, and a writer thread would n
 - Only outputs that were running at save time are restarted. An output stopped earlier with `bark:stop` stays stopped (synchronous writes), and a failed one stays failed.
 - Between the save hook and the end of the save, and until the init hook has run, lines are written synchronously on the caller's thread.
 - Standard streams: an output whose stream is `sb-sys:*stdout*` or `sb-sys:*stderr*` is rebound to SBCL's freshly created standard stream, because the old stream object is stale in the restored image. Synonym streams (`*standard-output*`, `*error-output*`) keep working as they are.
-- File streams: the descriptor does not survive a save, so an output on a file stream (a `file-stream` with a pathname) is reopened for appending by the init hook, with the same external format. If the file cannot be reopened, the output is marked failed and later lines count as dropped (see `bark:dropped-count`). Any other stream (string streams, sockets, pipes) is kept as it is and is not valid in the restored image unless it survives a save by itself; give such an output an `:on-error` handler, or stop the logger before saving and make a new one after the restore.
+- File streams: the descriptor does not survive a save, so an output on a file stream (a `file-stream` with a pathname) is reopened for appending by the init hook, with the same external format. If the file cannot be reopened, the output is marked failed (`bark:healthy-p` returns NIL) and later lines count as dropped (see `bark:dropped-count`). Any other stream (string streams, sockets, pipes) is kept as it is and is not valid in the restored image unless it survives a save by itself; give such an output an `:on-error` handler, or stop the logger before saving and make a new one after the restore.
 - If `save-lisp-and-die` fails after the save hook ran (for example because an unrelated thread is running), the outputs stay stopped and write synchronously until the init hook runs; the process keeps logging.
 - A logger created before the save and held by a global variable keeps working after the restore; a logger no longer referenced is not restarted.
+- To check after a restore that the writers came back, call `bark:healthy-p` on the logger.
 
 `bark:flush` and `bark:stop` accept `:timeout` (seconds per async output, default 5.0). `bark:flush` returns T when every running async output acknowledged and NIL on timeout; `bark:stop` returns T when every writer exited cleanly and NIL otherwise.
 

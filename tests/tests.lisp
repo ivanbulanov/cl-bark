@@ -3890,6 +3890,59 @@ Regression: yason returns (VECTOR CHARACTER N) which is not SIMPLE-STRING."
       (5am:is-true (search "buffered trail" text))
       (5am:is-false (search "direct debug" text)))))
 
+(defun wait-until-unhealthy (logger &optional (seconds 2.0))
+  "Poll bark:healthy-p on LOGGER until it returns NIL or SECONDS pass. Return the last value."
+  (loop with deadline = (+ (get-internal-real-time)
+                           (* seconds internal-time-units-per-second))
+        for healthy = (bark:healthy-p logger)
+        while (and healthy (< (get-internal-real-time) deadline))
+        do (sleep 0.01)
+        finally (return healthy)))
+
+(5am:test test-healthy-p-is-true-for-working-and-synchronous-loggers
+  "healthy-p is T for NIL, a synchronous logger, a running async logger, its child, and after stop."
+  (5am:is-true (bark:healthy-p nil))
+  (5am:is-true (bark:healthy-p (make-logger :output (sync-output (make-string-output-stream)))))
+  (let* ((out (make-string-output-stream))
+         (lgr (make-logger :output out)))
+    (unwind-protect
+         (progn
+           (bark:info lgr "hello")
+           (bark:flush lgr)
+           (5am:is-true (bark:healthy-p lgr))
+           (5am:is-true (bark:healthy-p (bark:make-child lgr :context '(:component "db")))))
+      (bark:stop lgr))
+    (5am:is-true (bark:healthy-p lgr))))
+
+(5am:test test-healthy-p-is-false-after-a-writer-fails
+  "A writer that stops on a stream error makes healthy-p NIL, for the logger and its child."
+  (let* ((out (make-string-output-stream))
+         (lgr (make-logger :output out :on-error (lambda (e) (declare (ignore e)) nil))))
+    (unwind-protect
+         (progn
+           (close out)
+           (bark:info lgr "lost")
+           (5am:is-false (wait-until-unhealthy lgr))
+           (5am:is-false (bark:healthy-p (bark:make-child lgr :context '(:component "db")))))
+      (bark:stop lgr))
+    (5am:is-false (bark:healthy-p lgr))))
+
+(5am:test test-healthy-p-is-false-when-one-tee-destination-fails
+  "One failed destination of a tee makes healthy-p NIL while the other keeps writing."
+  (let* ((good (make-string-output-stream))
+         (bad (make-string-output-stream))
+         (lgr (make-logger :output (make-tee (list (list :stream good)
+                                                   (list :stream bad
+                                                         :on-error (lambda (e) (declare (ignore e)) nil)))))))
+    (unwind-protect
+         (progn
+           (5am:is-true (bark:healthy-p lgr))
+           (close bad)
+           (bark:info lgr "to both")
+           (5am:is-false (wait-until-unhealthy lgr)))
+      (bark:stop lgr))
+    (5am:is-true (search "to both" (get-output-stream-string good)))))
+
 (5am:test test-every-export-has-a-docstring
   "Every symbol BARK exports names a definition, and each of its definitions has a docstring."
   (let ((missing '()))

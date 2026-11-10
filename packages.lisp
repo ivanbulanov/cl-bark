@@ -44,7 +44,7 @@
    #:emit
    #:make-windowed-counter #:make-level-sampler #:set-level-sampler
    #:make-consistent-sampler #:set-consistent
-   #:flush #:stop #:dropped-count #:*exit-flush-timeout*
+   #:flush #:stop #:dropped-count #:healthy-p #:*exit-flush-timeout*
    #:trace #:debug #:info #:warn #:error #:fatal
    #:with-context #:with-captured-logs
    ;; buffer

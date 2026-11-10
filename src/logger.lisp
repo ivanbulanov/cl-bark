@@ -605,6 +605,24 @@ Example: (bark:dropped-count bark:*logger*)"
         (do-async-outputs (logger-output logger) #'add)))
     total))
 
+(defun healthy-p (logger)
+  "Return T when no async writer of LOGGER has failed, NIL when one has. A writer
+fails on a stream error that :on-error does not repair, when its thread dies,
+or when it cannot be restarted after the image is restored from a saved core.
+The lines sent to a failed writer are counted by DROPPED-COUNT; together they
+make a health check. A stopped logger is healthy: after STOP, lines are written
+on the caller's thread. Passing NIL, a child (which reports the outputs it
+shares with its root) or a logger without async outputs is allowed; NIL and a
+synchronous logger are healthy.
+Example: (and (bark:healthy-p bark:*logger*) (zerop (bark:dropped-count bark:*logger*)))"
+  (let ((healthy t))
+    (when logger
+      (flet ((check (ao)
+               (when (eq (async-output-state ao) :failed)
+                 (setf healthy nil))))
+        (do-async-outputs (logger-output logger) #'check)))
+    healthy))
+
 (defun stop (logger &key (timeout 5.0))
   "Stop writer threads for LOGGER. Blocks until pending messages are drained and
 threads have exited, waiting at most TIMEOUT seconds per output for each step.
