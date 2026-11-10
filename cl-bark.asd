@@ -21,7 +21,7 @@
   :homepage "https://github.com/ivanbulanov/cl-bark"
   :source-control (:git "https://github.com/ivanbulanov/cl-bark.git")
   :bug-tracker "https://github.com/ivanbulanov/cl-bark/issues"
-  :version "0.1.0"
+  :version "0.2.0"
   :depends-on (#:atomics #:bordeaux-threads #:dissect #:local-time)
   :serial t
   :components

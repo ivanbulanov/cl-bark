@@ -7,6 +7,8 @@ minor versions, and such changes are listed under **Changed**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
 ### Migration from 0.1.0
 
 - Rename `*compile-time-max-level*` to `*compile-time-min-level*` where you bind it before compiling. It now strips the
@@ -179,5 +181,6 @@ First public release.
 - Test helper `with-captured-logs`.
 - Internal and comparative benchmark harness (`make bench`).
 
-[Unreleased]: https://github.com/ivanbulanov/cl-bark/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ivanbulanov/cl-bark/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ivanbulanov/cl-bark/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ivanbulanov/cl-bark/releases/tag/v0.1.0

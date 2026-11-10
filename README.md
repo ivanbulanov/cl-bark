@@ -4,7 +4,7 @@ Structured logger for Common Lisp (SBCL). Log calls take a message and keyword f
 
 ## Status
 
-**Beta (0.1.0).** Tested with automated tests and used only by its author. The API may change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
+**Beta (0.2.0).** Tested with automated tests and used only by its author. The API may change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Installation
 
@@ -18,7 +18,16 @@ git clone https://github.com/ivanbulanov/cl-bark.git ~/quicklisp/local-projects/
 (ql:quickload :cl-bark)
 ```
 
-With [qlot](https://github.com/fukamachi/qlot), add `github cl-bark ivanbulanov/cl-bark` to your `qlfile`.
+With [qlot](https://github.com/fukamachi/qlot), add `github cl-bark ivanbulanov/cl-bark` to your `qlfile`; pin a release with `github cl-bark ivanbulanov/cl-bark :tag v0.2.0`.
+
+The `.asd` version changes with every release. Require the version your code is written for, so ASDF refuses an older copy at load time instead of failing later on a missing symbol:
+
+```lisp
+(defsystem "my-app"
+  :depends-on ((:version "cl-bark" "0.2.0")))
+```
+
+Upgrading from 0.1.0: see the migration notes in [CHANGELOG.md](CHANGELOG.md#020---2026-11-10).
 
 SBCL only. Tested on x86-64; the ring buffer has memory barriers for weakly ordered CPUs, but ARM64 is untested. See [dependencies](#dependencies).
 
