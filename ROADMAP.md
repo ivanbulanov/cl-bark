@@ -218,10 +218,9 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
   Removed from the `.asd`, the feature check and the bench header; the design doc's verbose section is gone. A
   stray "verbose adapter" comment block stays in `bench/comparative.lisp`. (8f81a7d)
 - [x] `docs/blocking-mode.md`: with `:block-timeout nil` a producer waits forever when the writer dies. (a0ac761)
-- [ ] Docstrings: `stop`'s `continue` restart returns NIL; `make-logger` rounds `:capacity` up to a power of two;
-  `make-buffer-logger` says samplers apply at flush time (they do not); the exported struct accessors and predicates
-  have none.
-  The first three are fixed (fe6dca5); the struct accessors and predicates are still open.
+- [x] Docstrings: `stop`'s `continue` restart returns NIL; `make-logger` rounds `:capacity` up to a power of two;
+  `make-buffer-logger` says samplers apply at flush time (they do not). Fixed in fe6dca5. The exported struct
+  accessors and predicates already had docstrings, set with `(setf documentation)` since 94c282f.
 
 ### 4.2 Generated and stale files. *0.2.0*
 
@@ -229,7 +228,7 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
   since October. (583d626)
 - [x] `BENCHMARKS.md` predates the writer rewrite. Delete it; the method stays in the benchmarks doc. Re-run the
   comparative bench and date the numbers the README quotes, or remove them. Deleted in 583d626; the README numbers now carry their date (4956ce7).
-- [ ] A test that every exported symbol has a docstring, in `make test`.
+- [x] A test that every exported symbol has a docstring, in `make test`: `test-every-export-has-a-docstring`. (293896b)
 - [x] `.gitignore`: `.serena/`. Untrack the local tool configuration directory. (f541965)
 
 ### 4.3 Duplication and padding
