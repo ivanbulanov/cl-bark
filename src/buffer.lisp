@@ -57,8 +57,9 @@
 (defun make-buffer-logger (original buffer-level buffer)
   "Create a buffer-logger: a stand-in for ORIGINAL with level lowered to
    BUFFER-LEVEL and level slots replaced with capture functions. Field
-   transforms and samplers are applied at flush time, through ORIGINAL, so the
-   stand-in carries none. ORIGINAL is recorded as the source, which is what
+   transforms are applied at flush time, through ORIGINAL, so the stand-in
+   carries none. Samplers are not applied: the stand-in captures every line at
+   or above BUFFER-LEVEL and the flush emits the selected entries directly. ORIGINAL is recorded as the source, which is what
    make-child derives children from."
   (let ((lgr (%make-logger
               :context (logger-context original)

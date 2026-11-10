@@ -256,7 +256,8 @@ FIELD-TRANSFORM (function or NIL):
   Function (lambda (key value) ...) applied to every field before serialization.
   Return the (possibly modified) value, or (values nil nil) to drop the field.
 
-CAPACITY (fixnum, default 8192): Ring buffer size in messages. Stream output only.
+CAPACITY (fixnum, default 8192): Ring buffer size in messages, rounded up to a
+  power of two (at least 16). Stream output only.
 ON-DROP (function or NIL): Called as (funcall on-drop count) when messages are
   dropped due to a full buffer. Returns (values message fields) or NIL to suppress.
 ON-ERROR (function or NIL): Called as (funcall on-error condition) in the writer
@@ -605,7 +606,7 @@ stop on an already-stopped or sync logger is a no-op returning T, and so is
 passing NIL. After a clean stop the logger keeps working: lines are written
 synchronously on the calling thread.
 Signals BARK-CHILD-OPERATION-ERROR if LOGGER is a child.
-A CONTINUE restart is available to silently ignore the operation."
+A CONTINUE restart ignores the operation; stop then returns NIL."
   (let ((clean t))
     (when logger
       (unless (logger-root-p logger)
