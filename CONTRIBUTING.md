@@ -16,14 +16,14 @@ make test-concurrent   # sampling concurrency suite
 ```
 
 `make` targets assume `sbcl` is on `PATH`; override with `make test SBCL="..."`.
-The `bench*` targets need `cffi`, `trivial-benchmark` and `trivial-garbage`
-(available through Quicklisp) and, for the comparative suite, `log4cl`, `vom` and
-`verbose`.
+The test suites need `fiveam` and `yason`. The `bench*` targets need `cffi`,
+`trivial-benchmark` and `trivial-garbage` and, for the comparative suite, `log4cl`
+and `vom`. All are available through Quicklisp.
 
 ## Pull requests
 
-- Keep the hot path allocation-free; a change that adds work to a log call site
-  needs a benchmark justification (`make bench-internal`).
+- Do not add work or allocation to the log call site beyond the formatted line;
+  a change that does needs a benchmark justification (`make bench-internal`).
 - Every exported function, macro, variable and condition has a docstring.
 - Add or update tests in `tests/` for behavior changes; all three suites must
   pass.

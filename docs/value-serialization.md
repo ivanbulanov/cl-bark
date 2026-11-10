@@ -99,8 +99,8 @@ The pretty formatter uses `princ` (CL's human-readable printer) for most values,
 | `string` | bare, unquoted | `princ` omits quotes |
 | `integer` | number | `42` |
 | `float` | number | `3.14` |
-| `symbol` | lowercase | `princ` uses `*print-case*` (default `:downcase`) |
-| `cons` | `(1 2 3)` | Full CL printed representation |
+| `symbol` | uppercase | `*print-case*` is bound to `:upcase` |
+| `cons` | `(1 2 3)` | `princ` output, bounded by `*print-level*` and `*print-length*` (see Limits below) |
 | `hash-table` | `#<HASH-TABLE ...>` | Implementation-dependent |
 | `condition` | type: message | `simple-error: boom` |
 | `captured-error` | type: message + stack | `simple-error: boom` + indented stack frames |
@@ -201,18 +201,7 @@ Both limits can be overridden per-call with `let` bindings.
 
 ## API
 
-### Exported Functions
-
-| Function | Signature | Purpose |
-|----------|-----------|---------|
-| `emit-json-value` | `(stream value &optional depth)` | Write VALUE as JSON |
-| `emit-json-key` | `(stream key)` | Write KEY as JSON object key |
-| `emit-json-fields` | `(stream fields)` | Write plist as JSON key-value pairs |
-| `emit-logfmt-value` | `(stream value)` | Write VALUE as logfmt scalar |
-| `emit-logfmt-key` | `(stream key)` | Write KEY as logfmt key |
-| `write-json-escaped-string` | `(string stream)` | Write STRING with JSON escaping |
-| `serialize-bindings` | `(bindings)` | Pre-serialize plist to JSON fragment string |
-| `capture` | `(condition)` | Snapshot condition with stack trace |
+`capture` and the variables below are exported. The functions named in this page's headings, such as `emit-json-value`, `emit-json-key`, `emit-logfmt-value` and `write-json-escaped-string`, are internal to the `bark` package: reach them with `bark::` at your own risk.
 
 ### Exported Variables
 

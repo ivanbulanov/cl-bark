@@ -75,7 +75,7 @@ For blocking mode with N concurrent producer threads, set `:capacity >= 2N` to m
 
 ## Edge Cases
 
-- **Writer thread dies:** Blocked producers hang until timeout fires.
+- **Writer thread dies:** Blocked producers wait until `:block-timeout` fires. With `:block-timeout nil` they wait forever.
 - **`bark:stop` with blocked producers:** All producers are woken via broadcast. Messages from producers blocked during stop go through the timeout/callback path. Call as `(bark:stop bark:*logger*)` or pass the logger returned by `bark:make-logger`.
 - **Tee with mixed blocking/non-blocking:** If a non-blocking destination succeeds and a blocking destination times out, the message is delivered to the first but dropped for the second. The `on-block-timeout` callback fires for the failing destination.
 - **`with-log-buffer` + blocking:** Buffer flush replays through the root logger. If the root output is blocking, flush can block. This is correct behavior.

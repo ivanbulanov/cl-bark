@@ -317,4 +317,13 @@ describes the current API and is expected to change before 1.0.
 
 ## Known quirks
 
-No known quirks as of 0.2.0-dev.
+- `level-enabled-p` checks the level threshold only. It ignores samplers and tee filters, so it can return true for a
+  line that is later dropped.
+- `stop` on a child logger signals `bark-child-operation-error`. Its `continue` restart makes `stop` return NIL, the
+  same value `stop` returns when a writer did not exit cleanly.
+- Loading cl-bark pushes a binding for the internal `bark::*format-stream*` onto `bt:*default-special-bindings*`.
+  Threads created through bordeaux-threads after the load, including those of other libraries, get a (nil) binding of
+  it. The binding is kept because without it the per-thread cached format stream would be one global slot shared by all
+  threads: every formatting call would compete for it with a compare-and-swap and, under contention, allocate a fresh
+  stream. Threads started in other ways (for example `sb-thread:make-thread` directly) have no binding and share the
+  global slot, which is correct but slower.

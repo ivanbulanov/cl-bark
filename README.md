@@ -4,7 +4,7 @@ High-performance structured logger for Common Lisp. Inspired by [Pino](https://g
 
 ## Status
 
-**Beta (0.1.0).** The library has been reviewed and tested with automated tests but has been used only by the author so far. Real-world applicability is not yet proven. The API is not expected to change, but no stability guarantee is made until 1.0. See [CHANGELOG.md](CHANGELOG.md).
+**Beta (0.1.0).** Tested with automated tests and used only by its author. The API may change before 1.0. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Installation
 
@@ -20,7 +20,7 @@ git clone https://github.com/ivanbulanov/cl-bark.git ~/quicklisp/local-projects/
 
 With [qlot](https://github.com/fukamachi/qlot), add `github cl-bark ivanbulanov/cl-bark` to your `qlfile`.
 
-Tested on SBCL. The code uses only portable libraries ([dependencies](#dependencies)), with an SBCL-specific fast path for timestamps.
+SBCL only. Tested on x86-64; the ring buffer relies on x86-64 store ordering and ARM64 is untested. See [dependencies](#dependencies).
 
 ## Philosophy
 
@@ -134,9 +134,9 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 ```lisp
 ;; Create logger and assign to the global
 (setf bark:*logger*
-      (bark:make-logger &key output (level :info) (formatter (bark:make-json-formatter))
+      (bark:make-logger &key output (level :info) (formatter bark:*default-json-formatter*)
                              context field-transform
-                             (capacity 8192) (on-drop <default drop-warning handler>)
+                             (capacity 8192) (on-drop #'bark:default-on-drop) on-error
                              blocking (block-timeout 5.0) on-block-timeout
                              level-sampler consistent))
 
@@ -151,7 +151,7 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 (bark:set-level logger level)
 
 ;; Set per-level sampling (windowed-counter, or nil to remove)
-(bark:set-level-sampling logger level windowed-counter)
+(bark:set-level-sampler logger level windowed-counter)
 
 ;; Flush pending messages (blocks until written)
 (bark:flush logger)
@@ -171,13 +171,13 @@ Checks the level threshold only. Does not account for sampling or per-destinatio
 | `tee-output` | Used as-is (already contains async-outputs internally) |
 | NIL | Defaults to `*error-output*`, wrapped in async-output |
 
-`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals `bark-configuration-error`.
+`:output` accepts a stream, a function, a tee-output (from `bark:tee` or `bark:make-tee`), or NIL. Async-specific parameters (`:capacity`, `:on-drop`, `:on-error`, `:blocking`, `:block-timeout`, `:on-block-timeout`) are only valid for stream outputs. Passing them with a function or tee-output signals `bark-configuration-error`.
 
 `:context`, when provided, is a plist of static context fields pre-serialized into the root logger. Zero per-call cost.
 
 `:field-transform`, when provided, is a function `(lambda (key value) ...)` applied to every field before serialization. See [Field Redaction](#field-redaction).
 
-`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent — stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals `bark-child-operation-error` (a `continue` restart is available to silently ignore). Always stop the root logger.
+`bark:stop` flushes and joins all writer threads for the given logger. Blocks until the queue is drained and threads have exited. Idempotent — stopping an already-stopped or sync logger is a no-op. Calling on a child logger signals `bark-child-operation-error`; the `continue` restart makes `stop` return NIL. Always stop the root logger.
 
 `bark:flush` blocks until all pending messages in the logger's async output are written to their streams. Accepts any logger — global or user-created. Handles both single-output and tee-output loggers. Signals `bark-async-stopped` if any async output has been stopped (a `continue` restart is available to skip stopped outputs).
 
@@ -255,7 +255,7 @@ Specifying both `:level` and `:filter` in the same destination spec signals `bar
 
 Log output includes fields from three sources, merged in this order:
 
-1. **Static context** — fixed fields on the logger, set once via `bark:make-child`. Pre-serialized at creation time; zero cost per log call.
+1. **Static context** — fixed fields on the logger, set by `:context` on `bark:make-logger` or `bark:make-child`. Pre-serialized at creation time; zero cost per log call.
 2. **Dynamic context** — scoped fields via `bark:with-context`. Active for all log calls within the dynamic extent. Thread-isolated via CL special variables.
 3. **Per-call fields** — the `&rest` arguments passed directly to `bark:info`, `bark:warn`, etc.
 
@@ -584,10 +584,6 @@ See [docs/sampling.md](docs/sampling.md) for windowed counters, consistent sampl
 
 **Async mode (default).** Each destination has a bounded ring buffer. When the buffer is full, messages are dropped and a warning is emitted inline. Drop warnings are formatted through the same formatter as normal log entries, so they respect configured field names, timestamp format, and level representation:
 
-**Blocking mode** (`:blocking t` on `make-logger`, or per destination in `make-tee` / `tee`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes. Each log call can stall its thread for up to `:block-timeout` seconds while the writer is stuck, so do not log in blocking mode from code that holds a lock others need, or from a library that must never wait on its log destination; in those places keep the default drop-on-full mode.
-
-**Async drop handling:**
-
 ```json
 {"level":"warn","ts":1740600000123,"msg":"bark: dropped 153 log messages (output too slow)"}
 ```
@@ -600,6 +596,8 @@ The `on-drop` callback receives the drop count and returns `(values message fiel
 | `(values "msg" (list :count n))` | Message + extra fields |
 | `(values nil (list :dropped n))` | Fields only, no message |
 | `nil` | Suppress entirely |
+
+**Blocking mode** (`:blocking t` on `make-logger`, or per destination in `make-tee` / `tee`). When the buffer is full, the caller blocks until space is available (up to `:block-timeout` seconds, default 5). If the timeout expires, `:on-block-timeout` is called if provided; otherwise the message is dropped silently. Use blocking mode when message loss is unacceptable and you can tolerate caller latency spikes. Each log call can stall its thread for up to `:block-timeout` seconds while the writer is stuck, so do not log in blocking mode from code that holds a lock others need, or from a library that must never wait on its log destination; in those places keep the default drop-on-full mode.
 
 ```lisp
 ;; Default: returns "bark: dropped N log messages (output too slow)"
@@ -710,7 +708,7 @@ Buffer log calls and decide at scope exit which to emit. The default: on success
 
 **`:level` + `:filter` on the same tee destination.** `:level` is shorthand for a level-threshold filter. Specify one or the other.
 
-**Async parameters with function or tee output.** `:capacity`, `:on-drop`, `:blocking`, `:block-timeout`, and `:on-block-timeout` on `make-logger` are only valid with stream output. Function outputs are synchronous (no ring buffer or writer thread). Tee outputs configure these per-destination.
+**Async parameters with function or tee output.** `:capacity`, `:on-drop`, `:on-error`, `:blocking`, `:block-timeout`, and `:on-block-timeout` on `make-logger` are only valid with stream output. Function outputs are synchronous (no ring buffer or writer thread). Tee outputs configure these per-destination.
 
 #### Contradictory intent
 
@@ -999,8 +997,12 @@ Conditions are signaled at configuration time or on lifecycle misuse. Logging ma
 
 | Source | Condition | Restart | When |
 |--------|-----------|---------|------|
-| `level-from-keyword` | `type-error` | — | Unknown level keyword (from `ecase`) |
-| `set-level` | `type-error` | — | Level is neither `fixnum` nor keyword (from `etypecase`) |
+| `make-logger`, `set-level`, `level-enabled-p`, `set-level-sampler`, `make-tee` | `bark-configuration-error` | — | Unknown level keyword or out-of-range level number |
+| `make-json-formatter`, `make-logfmt-formatter`, `make-pretty-formatter` | `bark-configuration-error` | — | Unknown `:timestamp` or `:level-format` value |
+| `make-formatter` | `bark-configuration-error` | — | `:format-fn` missing |
+| `make-consistent-sampler` | `bark-configuration-error` | — | `:key-fn` is not a function |
+| `make-logger` | `bark-configuration-error` | — | `:formatter` given together with a tee output |
+| `make-tee` | `bark-configuration-error` | — | `:stream` is not a stream |
 | `make-tee` | `bark-configuration-error` | — | Both `:filter` and `:level` on the same destination |
 | `tee` | `bark-configuration-error` | — | Same, at macro expansion time |
 | `make-logger` | `bark-configuration-error` | — | `:output` is not a stream, function, `tee-output`, or `nil` |
@@ -1008,7 +1010,7 @@ Conditions are signaled at configuration time or on lifecycle misuse. Logging ma
 | `make-consistent-sampler` | `bark-configuration-error` | — | Rate < 1 |
 | `make-level-sampler` | `bark-configuration-error` | — | Non-windowed-counter value |
 | `make-windowed-counter` | `bark-configuration-error` | — | Window ticks exceed fixnum range |
-| `stop` | `bark-child-operation-error` | `continue` | Called on a child logger |
+| `stop` | `bark-child-operation-error` | `continue` (returns NIL) | Called on a child logger |
 | `flush` | `bark-async-stopped` | `continue` | Called on a stopped logger |
 
 ### Handling Conditions
@@ -1069,7 +1071,7 @@ Producer threads              Writer thread
                                     └─ wait on semaphore
 ```
 
-**TSO dependency.** The ring buffer's payload slots are written and read with plain `svref`/`setf` — no memory barriers around the string data. Correctness relies on x86 Total Store Order (TSO): stores from the producer become visible to the consumer in program order, so the payload is always committed before the semaphore signal that wakes the writer. This is safe on x86/x86-64 (SBCL's primary target and all implementations supported by `atomics`). A port to a weakly-ordered architecture (ARM, RISC-V) would need acquire/release barriers on the payload slot accesses.
+**TSO dependency.** The ring buffer's payload slots are written and read with plain `svref`/`setf` — no memory barriers around the string data. Correctness relies on x86 Total Store Order (TSO): stores from the producer become visible to the consumer in program order, so the payload is always committed before the semaphore signal that wakes the writer. cl-bark is tested on x86-64 only. SBCL also runs on ARM64, which is weakly ordered and untested here; running there would need acquire/release barriers on the payload slot accesses.
 
 ### Caller-Thread Formatting
 
@@ -1111,16 +1113,6 @@ See [Benchmarks](#benchmarks) to measure on your hardware.
 | `bark:*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output (nil = unlimited) |
 | `bark:*max-pretty-stack-frames*` | `20` | Max stack frames in pretty condition output (nil = unlimited) |
 
-## Thread-local state
-
-cl-bark keeps a per-thread cached string stream for formatting in `bark::*format-stream*`, and it makes the binding
-for every thread by pushing it onto `bt:*default-special-bindings*` when the system is loaded. As a result, threads
-created through bordeaux-threads after the load, including those of other libraries, get that (nil) binding. This is
-kept on purpose: without a per-thread binding the cache would be one global slot shared by all threads, every
-formatting call would compete for it with a compare-and-swap, and under contention callers would allocate a fresh
-stream, which breaks the allocation-free hot path. Threads started by other means (for example `sb-thread:make-thread`
-directly) have no binding and share the global slot, which is correct but slower.
-
 ## Dependencies
 
 | Dependency | Purpose |
@@ -1130,7 +1122,7 @@ directly) have no binding and share the global slot, which is correct but slower
 | `dissect` | Portable stack trace capture for condition logging |
 | `local-time` | Portable Unix millisecond timestamps (non-SBCL fallback) |
 
-Compatible with any implementation supported by [atomics](https://github.com/Shinmera/atomics): SBCL, CCL, ECL, Allegro, LispWorks, CMUCL.
+cl-bark runs on SBCL only: it uses `sb-ext` hooks unconditionally.
 
 ## Note on Symbol Shadowing
 
