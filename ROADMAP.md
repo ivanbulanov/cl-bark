@@ -201,10 +201,10 @@ pruning then deleted the service's own log. It now cuts results itself, keeping 
 The application's diagnostics logger is at `:error`, rare, and must survive a crash. A logger after `stop` already
 writes on the caller's thread under the stream lock; there is no way to ask for that from the start.
 
-- [ ] `make-logger :async nil` for a stream output: no writer thread, each line written under the stream lock and
-  flushed. This also covers SIGKILL and a segfault, which no exit hook can.
-- [ ] Document that `(sb-ext:exit :abort t)` skips the exit drain: call `bark:flush` first. The application already
-  does so on every abort path.
+- [x] `make-logger :async nil` for a stream output: no writer thread, each line written under the stream lock and
+  flushed. This also covers SIGKILL and a segfault, which no exit hook can. Tee destinations take `:async` too. (ed9a89d)
+- [x] Document that `(sb-ext:exit :abort t)` skips the exit drain: call `bark:flush` first. The application already
+  does so on every abort path. (ed9a89d)
 
 ## Phase 4. Documentation and spring cleaning
 
