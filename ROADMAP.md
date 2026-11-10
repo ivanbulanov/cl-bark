@@ -66,15 +66,15 @@ application.
 - [x] *0.2.0*: a Migration subsection in the 0.2.0 changelog entry: `*compile-time-max-level*` is now
   `*compile-time-min-level*`, `register-exit-hook` is removed, `flush` and `stop` return a value, and every other
   rename in the release. (611bc26)
-- [ ] *0.2.0*: the release commit: changelog heading and date, `:version "0.2.0"` in `cl-bark.asd`.
+- [x] *0.2.0*: the release commit: changelog heading and date, `:version "0.2.0"` in `cl-bark.asd`. (f6e9ec9)
 
 ### 1.2 Bump the `.asd` version on every release (sql-zealot)
 
 `67e1b91` and `f3294fc` both say `:version "0.1.0"` but differ in exports, so a dependent cannot tell which one it
 loaded. sql-zealot wrote a `bark-logger` deftype over `bark::logger` to load under both.
 
-- [ ] *0.2.0*: bump the version with each release; document `:depends-on ((:version "cl-bark" "0.2.0"))` in the
-  README, so ASDF fails at load time against an old copy.
+- [x] *0.2.0*: bump the version with each release; document `:depends-on ((:version "cl-bark" "0.2.0"))` in the
+  README, so ASDF fails at load time against an old copy. (f6e9ec9)
 
 ### 1.3 Ultralisp, then Quicklisp (sql-zealot F109). Postponed until 0.2.0 is tagged
 
