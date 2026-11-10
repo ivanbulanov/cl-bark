@@ -89,6 +89,10 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
 ### 1.4 Follow-ups in sql-zealot (not cl-bark work)
 
 - sql-zealot, short term: require cl-bark 0.2.0 in the `.asd` and delete the `bark-logger` deftype.
+  Done in sql-zealot f0d8881: `(:version "cl-bark" "0.2.0")`, `bark:logger`, the deploy scripts use `healthy-p`
+  and `dropped-count`, and no `bark::` is left. The key-name pass of `mask-log-field` is confirmed dead (none of the
+  36 catalogue field names contains a secret word) and deleted; `log-event` now rejects a field the catalogue does
+  not list, so it stays dead. Left: the library model write-up in sql-zealot's roadmap.
 - sql-zealot, the library model, written up in sql-zealot's own roadmap: the sink and the predicate threshold, the
   fallback sink, `zl:rate-limited-sink` around the default sink, caps as options (`:log-sql-limit`),
   `zl.pool.connect-failed` as a state event, the adapter system, and the deletion of `call-with-log-context`. The
