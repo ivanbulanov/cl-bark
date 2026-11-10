@@ -126,3 +126,54 @@
   (write-string (type-name-string condition) stream)
   (write-string ": " stream)
   (write-string (condition-message-string condition) stream))
+
+;;; --- Formatter limits ---
+
+(defun check-limit (key value &key allow-unlimited)
+  "Signal BARK-CONFIGURATION-ERROR unless VALUE is NIL, a non-negative fixnum
+   or, when ALLOW-UNLIMITED, :UNLIMITED.  KEY names the constructor argument in
+   the message.  Called by the formatter constructors."
+  (unless (or (null value)
+              (typep value '(integer 0 #.most-positive-fixnum))
+              (and allow-unlimited (eq value :unlimited)))
+    (cl:error 'bark-configuration-error
+              :detail (format nil "~S must be NIL, a non-negative integer~:[~; or :UNLIMITED~], got ~S"
+                              key allow-unlimited value)))
+  (values))
+
+(declaim (inline limit-value))
+(defun limit-value (value current)
+  "The value a formatter limit binds its special to: CURRENT when VALUE is NIL,
+   NIL when VALUE is :UNLIMITED, else VALUE."
+  (case value
+    ((nil) current)
+    (:unlimited nil)
+    (t value)))
+
+(defmacro with-formatter-limits ((&rest bindings) &body body)
+  "Run BODY with each special of BINDINGS, a list of (SPECIAL VALUE), bound by
+   LIMIT-VALUE: a NIL VALUE keeps the special's current value."
+  `(let ,(loop for (special value) in bindings
+               collect `(,special (limit-value ,value ,special)))
+     ,@body))
+
+(defmacro make-limited-formatter ((&rest bindings) &key prepare-fn format-fn)
+  "Make a formatter from PREPARE-FN and FORMAT-FN.  When any VALUE of BINDINGS,
+   a list of (SPECIAL VALUE) whose values are variables, is non-NIL, both
+   functions run inside WITH-FORMATTER-LIMITS, so the limits hold for context
+   serialized when a child is made as well as for each line.  When all are NIL
+   the functions are used as they are and read the specials as before."
+  (let ((prepare (gensym "PREPARE"))
+        (format (gensym "FORMAT")))
+    `(let ((,prepare ,prepare-fn)
+           (,format ,format-fn))
+       (declare (type function ,prepare ,format))
+       (if (or ,@(mapcar #'second bindings))
+           (make-formatter
+            :prepare-fn (lambda (parent-prepared delta-context)
+                          (with-formatter-limits ,bindings
+                            (funcall ,prepare parent-prepared delta-context)))
+            :format-fn (lambda (level prepared context message fields)
+                         (with-formatter-limits ,bindings
+                           (funcall ,format level prepared context message fields))))
+           (make-formatter :prepare-fn ,prepare :format-fn ,format)))))

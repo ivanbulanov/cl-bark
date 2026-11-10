@@ -3353,6 +3353,74 @@ level signals bark-configuration-error."
         (5am:is-true (search "\"level\":\"info\"" line))
         (5am:is-true (search "\"msg\":\"captured\"" line))))))
 
+(5am:test test-make-json-formatter-limits-override-specials
+  "make-json-formatter :max-depth and :max-length bound its lines whatever the specials say."
+  (let* ((fmt (bark:make-json-formatter :timestamp nil :max-depth 1 :max-length 2))
+         (result (let ((*max-json-depth* 10)
+                       (*max-json-length* 100))
+                   (funcall (formatter-format-fn fmt) +info+ "" nil "m"
+                            (list :a '(1 2 3) :b '((1)))))))
+    (5am:is (search "\"a\":[1,2,\"...\"]" result))
+    (5am:is (search "\"b\":[\"<cons>\"]" result))))
+
+(5am:test test-make-json-formatter-nil-limits-read-specials-at-format-time
+  "A JSON formatter made without limits reads the specials when it formats a line."
+  (let* ((fmt (bark:make-json-formatter :timestamp nil))
+         (result (let ((*max-json-length* 1))
+                   (funcall (formatter-format-fn fmt) +info+ "" nil "m"
+                            (list :a '(1 2 3))))))
+    (5am:is (search "\"a\":[1,\"...\"]" result))))
+
+(5am:test test-make-json-formatter-limits-apply-to-child-context
+  "Context a child adds is serialized under the formatter's limits."
+  (let* ((fmt (bark:make-json-formatter :timestamp nil :max-length 2))
+         (prepared (funcall (formatter-prepare-fn fmt) nil (list :ctx '(1 2 3 4))))
+         (result (funcall (formatter-format-fn fmt) +info+ prepared nil "m" nil)))
+    (5am:is (search "\"ctx\":[1,2,\"...\"]" result))))
+
+(5am:test test-make-json-formatter-max-stack-frames
+  "make-json-formatter :max-stack-frames limits the frames; :unlimited lifts the special's limit."
+  (let* ((ce (bark:capture (make-condition 'simple-error :format-control "boom")))
+         (one (bark:make-json-formatter :timestamp nil :max-stack-frames 1))
+         (all (bark:make-json-formatter :timestamp nil :max-stack-frames :unlimited)))
+    (flet ((stack-length (fmt)
+             (let ((*max-json-stack-frames* 0))
+               (length (gethash "stack"
+                                (gethash "err"
+                                         (yason:parse
+                                          (funcall (formatter-format-fn fmt) +info+ "" nil "m"
+                                                   (list :err ce)))))))))
+      ;; One frame and the sentinel.
+      (5am:is (= 2 (stack-length one)))
+      (5am:is (= (length (bark:captured-error-stack ce)) (stack-length all))))))
+
+(5am:test test-make-pretty-formatter-limits
+  "make-pretty-formatter :max-length and :max-depth bound its lines; :unlimited lifts a special's limit."
+  (let ((short (bark:make-pretty-formatter :max-length 2))
+        (deep (bark:make-pretty-formatter :max-depth :unlimited)))
+    (let ((*max-pretty-length* nil)
+          (*max-pretty-depth* 1))
+      (5am:is (search "(1 2 ...)" (funcall (formatter-format-fn short) +info+ "" nil "m"
+                                           (list :a '(1 2 3)))))
+      (5am:is (search "((1))" (funcall (formatter-format-fn deep) +info+ "" nil "m"
+                                       (list :a '((1)))))))))
+
+(5am:test test-make-pretty-formatter-max-stack-frames
+  "make-pretty-formatter :max-stack-frames cuts the stack after that many frames."
+  (let* ((ce (bark:capture (make-condition 'simple-error :format-control "boom")))
+         (fmt (bark:make-pretty-formatter :max-stack-frames 1))
+         (result (let ((*max-pretty-stack-frames* nil))
+                   (funcall (formatter-format-fn fmt) +info+ "" nil "m" (list :err ce)))))
+    (5am:is (search (format nil "~d more frames" (1- (length (bark:captured-error-stack ce))))
+                    result))))
+
+(5am:test test-formatter-bad-limits-signal-configuration-error
+  "A formatter limit that is not NIL, a non-negative integer or an allowed :unlimited is refused."
+  (5am:signals bark:bark-configuration-error (bark:make-json-formatter :max-depth -1))
+  (5am:signals bark:bark-configuration-error (bark:make-json-formatter :max-length :unlimited))
+  (5am:signals bark:bark-configuration-error (bark:make-json-formatter :max-stack-frames "5"))
+  (5am:signals bark:bark-configuration-error (bark:make-pretty-formatter :max-depth 1.5)))
+
 (5am:test test-make-json-formatter-no-level
   "make-json-formatter with :level-key nil omits the level field."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))

@@ -117,7 +117,7 @@ Limits: The pretty formatter binds CL's printer variables internally:
 
 `*print-circle*` is always bound to `t`, so circular structures are safe.
 
-Set either variable to `nil` to remove the corresponding limit.
+Set either variable to `nil` to remove the corresponding limit. `make-pretty-formatter :max-depth` and `:max-length` set them for one formatter (see [formatters.md](formatters.md#limits-per-formatter)).
 
 ## Conditions
 
@@ -162,6 +162,14 @@ Each collection (list, vector, hash-table) emits at most `*max-json-length*` ele
 For hash-tables, the sentinel is `"...":"..."` to maintain valid JSON object syntax.
 
 Both limits can be overridden per-call with `let` bindings.
+
+### Limits per formatter
+
+`make-json-formatter` takes `:max-depth`, `:max-length` and `:max-stack-frames`, and `make-pretty-formatter` takes the
+same three for its own variables. A formatter made with a limit binds the variable to it around each line it formats
+and around the context a child logger adds, so the limit belongs to that formatter alone. A limit left NIL reads the
+variable at format time, as above. Details and examples are in
+[formatters.md](formatters.md#limits-per-formatter).
 
 ## API
 

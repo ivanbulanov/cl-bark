@@ -3,6 +3,10 @@
 The generated [API reference](https://ivanbulanov.github.io/cl-bark/) lists every export with its docstring. This page
 lists the special variables and gives one line for each exported symbol, with the page that explains it.
 
+The `*max-json-...*` and `*max-pretty-...*` limits below hold for every formatter that was made without its own limit;
+`make-json-formatter` and `make-pretty-formatter` take `:max-depth`, `:max-length` and `:max-stack-frames` for one
+formatter (see [formatters.md](formatters.md#limits-per-formatter)).
+
 ## Special variables
 
 | Variable | Default | Meaning |

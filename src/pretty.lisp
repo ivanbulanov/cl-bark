@@ -82,15 +82,26 @@
                   (write-condition-summary s v))
                  (t (princ v s)))))))
 
-(defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t))
+(defun make-pretty-formatter (&key timestamp (timestamp-key "ts") (show-level t)
+                                    max-depth max-length max-stack-frames)
   "Return a pretty formatter struct with optional timestamp display.
    TIMESTAMP is nil (no timestamp), :iso8601, or :unix-ms.
    Level is always colored string. Pass :show-level NIL to omit it.
-   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP."
+   MAX-DEPTH, MAX-LENGTH and MAX-STACK-FRAMES bound this formatter's output in
+   place of *MAX-PRETTY-DEPTH*, *MAX-PRETTY-LENGTH* and *MAX-PRETTY-STACK-FRAMES*.
+   Each is a non-negative integer, :UNLIMITED, or NIL (the default) to read the
+   special when a line is formatted.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or a bad limit."
   (check-timestamp-format timestamp)
+  (check-limit :max-depth max-depth :allow-unlimited t)
+  (check-limit :max-length max-length :allow-unlimited t)
+  (check-limit :max-stack-frames max-stack-frames :allow-unlimited t)
   (let ((ts-prefix (when timestamp (format nil " ~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc)))
         (ts-prefix-first (when timestamp (format nil "~c[2m~a~c[0m=" #\Esc timestamp-key #\Esc))))
-    (make-formatter
+    (make-limited-formatter
+        ((*max-pretty-depth* max-depth)
+         (*max-pretty-length* max-length)
+         (*max-pretty-stack-frames* max-stack-frames))
      :prepare-fn (make-concat-prepare-fn #'serialize-bindings-pretty)
      :format-fn
      (lambda (level prepared context message fields)

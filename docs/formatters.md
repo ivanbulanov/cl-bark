@@ -23,7 +23,7 @@ Built-in formatter factories:
 
 Default formatter: the built-in JSON formatter, equivalent to `(bark:make-json-formatter)`
 
-Field values of every type are accepted, and no log call signals `type-error`. How each type is rendered by each formatter is described in [value-serialization.md](value-serialization.md). Collection depth and length are bounded by `*max-json-depth*`, `*max-json-length*`, `*max-pretty-depth*` and `*max-pretty-length*` (see [reference.md](reference.md)). To control the type name shown in a placeholder, specialize `print-object` on your classes.
+Field values of every type are accepted, and no log call signals `type-error`. How each type is rendered by each formatter is described in [value-serialization.md](value-serialization.md). Collection depth and length are bounded by `*max-json-depth*`, `*max-json-length*`, `*max-pretty-depth*` and `*max-pretty-length*` (see [reference.md](reference.md)), or by the limits given to one formatter (see [Limits per formatter](#limits-per-formatter)). To control the type name shown in a placeholder, specialize `print-object` on your classes.
 
 ## Formatter factories
 
@@ -42,7 +42,8 @@ Both `:prepare-fn` and `:format-fn` are required. The `prepare-fn` receives a pl
 ```lisp
 (bark:make-json-formatter &key (timestamp :unix-ms) (level-format :string)
                                (level-key "level") (timestamp-key "ts")
-                               (message-key "msg"))
+                               (message-key "msg")
+                               max-depth max-length max-stack-frames)
 ```
 
 | Parameter | Values | Default |
@@ -52,6 +53,11 @@ Both `:prepare-fn` and `:format-fn` are required. The `prepare-fn` receives a pl
 | `level-key` | any string, or `nil` (omit) | `"level"` |
 | `timestamp-key` | any string | `"ts"` |
 | `message-key` | any string | `"msg"` |
+| `max-depth` | non-negative integer, or `nil` (read `*max-json-depth*`) | `nil` |
+| `max-length` | non-negative integer, or `nil` (read `*max-json-length*`) | `nil` |
+| `max-stack-frames` | non-negative integer, `:unlimited`, or `nil` (read `*max-json-stack-frames*`) | `nil` |
+
+The limits are described in [Limits per formatter](#limits-per-formatter).
 
 ```lisp
 ;; GCP Cloud Logging format
@@ -92,16 +98,44 @@ Level is always a string in logfmt. Pass `:level-key nil` to omit it. Timestamp 
 `make-pretty-formatter`
 
 ```lisp
-(bark:make-pretty-formatter &key timestamp (timestamp-key "ts") (show-level t))
+(bark:make-pretty-formatter &key timestamp (timestamp-key "ts") (show-level t)
+                                 max-depth max-length max-stack-frames)
 ```
 
-The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display. Pass `:show-level nil` to omit the colored level label.
+The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display. Pass `:show-level nil` to omit the colored level label. `max-depth`, `max-length` and `max-stack-frames` take a non-negative integer, `:unlimited`, or `nil` (the default) to read `*max-pretty-depth*`, `*max-pretty-length*` and `*max-pretty-stack-frames*`; see [Limits per formatter](#limits-per-formatter).
 
 ```lisp
 ;; Pretty with ISO 8601 timestamps
 (setf bark:*logger* (bark:make-logger :formatter (bark:make-pretty-formatter :timestamp :iso8601)))
 ;; => INFO  ts="2025-01-15T12:00:00.000Z" ready port=8080
 ```
+
+### Limits per formatter
+
+The size limits are special variables (`*max-json-depth*`, `*max-json-length*`, `*max-json-stack-frames*` and their
+`*max-pretty-...*` counterparts), so a `setf` changes them for every logger in the image, also for other libraries that
+use cl-bark. To give one logger its own limits, pass them to the formatter's constructor:
+
+```lisp
+;; Events: short collections, the default stack limit.
+(defvar *events*
+  (bark:make-logger :output events-stream
+                    :formatter (bark:make-json-formatter :max-length 100)))
+
+;; Diagnostics: every frame of a captured error.
+(defvar *diagnostics*
+  (bark:make-logger :output diagnostics-stream
+                    :formatter (bark:make-json-formatter :max-stack-frames :unlimited)))
+```
+
+A limit left NIL reads its special when a line is formatted, so `setf` and `let` of the special still work, also for
+a formatter made before them. A limit that is set holds for the context a child logger adds as well as for each line.
+`:unlimited` is accepted where the special accepts NIL: the stack frame limits and the pretty formatter's depth and
+length. JSON depth and length must stay bounded, because the JSON writer has no circularity check. A bad value signals
+`bark-configuration-error` when the formatter is made.
+
+`make-logfmt-formatter` takes none of these limits: logfmt writes a collection as a `<type>` placeholder and a
+condition without its stack.
 
 ## Condition logging
 
@@ -144,3 +178,6 @@ Stack frame limits at format time, applied on top of the `capture` limit:
 (setf bark:*max-json-stack-frames* 20)    ; default 10, NIL = unlimited
 (setf bark:*max-pretty-stack-frames* 30)  ; default 20, NIL = unlimited
 ```
+
+`make-json-formatter` and `make-pretty-formatter` also take `:max-stack-frames`, for one logger only (see
+[Limits per formatter](#limits-per-formatter)).

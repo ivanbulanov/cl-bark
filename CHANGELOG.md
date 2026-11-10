@@ -43,6 +43,9 @@ minor versions, and such changes are listed under **Changed**.
 
 ### Added
 
+- Add `:max-depth`, `:max-length` and `:max-stack-frames` to `make-json-formatter` and `make-pretty-formatter`, so one
+  logger can have its own limits without a `setf` of the process-wide specials. A limit left NIL reads the special when
+  a line is formatted, as before; `:max-stack-frames` (and the pretty depth and length) also take `:unlimited`.
 - Add and export `current-level`, which returns a logger's level as a keyword.
 - Add and export `healthy-p`, which returns NIL when an async writer of a logger has failed.
 - Add and export `emit`, a function form of the logging macros that takes the fields as a plist built at run time.

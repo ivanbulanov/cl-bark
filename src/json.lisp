@@ -306,12 +306,21 @@
 
 (defun make-json-formatter (&key (timestamp :unix-ms) (level-format :string)
                                   (level-key "level") (timestamp-key "ts")
-                                  (message-key "msg"))
+                                  (message-key "msg")
+                                  max-depth max-length max-stack-frames)
   "Return a JSON formatter struct with custom keys and formats.
    Pre-computes level prefix vector, timestamp key fragment, and message key fragment.
    Pass :level-key NIL to omit the level field entirely.
-   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or LEVEL-FORMAT."
+   MAX-DEPTH, MAX-LENGTH and MAX-STACK-FRAMES bound this formatter's output in
+   place of *MAX-JSON-DEPTH*, *MAX-JSON-LENGTH* and *MAX-JSON-STACK-FRAMES*.
+   Each is a non-negative integer, or NIL (the default) to read the special when
+   a line is formatted; MAX-STACK-FRAMES may also be :UNLIMITED.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or LEVEL-FORMAT, or
+   a bad limit."
   (check-timestamp-format timestamp)
+  (check-limit :max-depth max-depth)
+  (check-limit :max-length max-length)
+  (check-limit :max-stack-frames max-stack-frames :allow-unlimited t)
   (unless (member level-format '(:numeric :string))
     (cl:error 'bark-configuration-error
               :detail (format nil ":level-format must be :numeric or :string, got ~S" level-format)))
@@ -319,7 +328,10 @@
                     (build-json-level-prefixes level-key level-format)))
         (ts-key (when timestamp (format nil "\"~a\":" timestamp-key)))
         (msg-key (format nil "\"~a\":\"" message-key)))
-    (make-formatter
+    (make-limited-formatter
+        ((*max-json-depth* max-depth)
+         (*max-json-length* max-length)
+         (*max-json-stack-frames* max-stack-frames))
      :prepare-fn (make-concat-prepare-fn #'serialize-bindings-json)
      :format-fn
      (lambda (level prepared context message fields)
