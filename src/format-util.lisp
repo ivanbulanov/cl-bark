@@ -125,9 +125,14 @@
   "Write type: message for CONDITION to STREAM."
   (write-string (type-name-string condition) stream)
   (write-string ": " stream)
-  (write-string (condition-message-string condition) stream))
+  (write-limited-string (condition-message-string condition) stream #'write-string-range))
 
 ;;; --- Formatter limits ---
+
+(defvar *max-string-length* nil
+  "Most characters a formatter writes of a string value, a condition message or
+   the log message.  A longer string keeps its head and its tail around a marker
+   that says how many characters were cut.  NIL means unlimited.")
 
 (defun check-limit (key value &key allow-unlimited)
   "Signal BARK-CONFIGURATION-ERROR unless VALUE is NIL, a non-negative fixnum
@@ -177,3 +182,38 @@
                          (with-formatter-limits ,bindings
                            (funcall ,format level prepared context message fields))))
            (make-formatter :prepare-fn ,prepare :format-fn ,format)))))
+
+(declaim (inline string-cut))
+(defun string-cut (length)
+  "When LENGTH exceeds *MAX-STRING-LENGTH*, return the end of the head to keep,
+   the start of the tail to keep and the number of characters cut; else NIL.
+   The head gets the extra character of an odd limit."
+  (let ((max *max-string-length*))
+    (if (and max (> length max))
+        (let ((head (ceiling max 2)))
+          (values head (- length (- max head)) (- length max)))
+        nil)))
+
+(defun write-cut-marker (stream cut)
+  "Write the marker that stands for CUT characters taken out of a string.
+   It holds no character that JSON or logfmt quoting escapes."
+  (format stream "...[~d chars cut]..." cut))
+
+(defun write-limited-string (string stream write-range)
+  "Write STRING to STREAM with WRITE-RANGE, a function of (simple-string stream
+   start end), cut by *MAX-STRING-LENGTH*: a longer string is written as its head,
+   the cut marker and its tail, read from STRING itself."
+  (declare (type function write-range))
+  (let* ((string (coerce string 'simple-string))
+         (length (length string)))
+    (multiple-value-bind (head-end tail-start cut) (string-cut length)
+      (cond
+        (head-end
+         (funcall write-range string stream 0 head-end)
+         (write-cut-marker stream cut)
+         (funcall write-range string stream tail-start length))
+        (t (funcall write-range string stream 0 length))))))
+
+(defun write-string-range (string stream start end)
+  "Write the characters of STRING from START to END to STREAM as they are."
+  (write-string string stream :start start :end end))

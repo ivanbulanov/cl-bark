@@ -58,4 +58,5 @@
    #:bark-configuration-error-detail
    #:bark-error
    #:bark-lifecycle-error
-   #:level-name))
+   #:level-name
+   #:*max-string-length*))

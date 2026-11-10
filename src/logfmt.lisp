@@ -27,32 +27,56 @@
                            c)
                        stream)))
 
-(defun logfmt-write-bare-or-quoted (stream string)
+(defun logfmt-needs-quoting-p (string start end)
+  "True when the characters of STRING from START to END hold a space, quote,
+   equals sign, backslash or control character."
+  (declare (optimize (speed 3) (safety 1))
+           (type simple-string string)
+           (type fixnum start end))
+  (loop for i of-type fixnum from start below end
+        for c of-type character = (schar string i)
+        thereis (or (char= c #\Space) (char= c #\") (char= c #\=)
+                    (char= c #\\) (< (char-code c) 32))))
+
+(defun logfmt-write-escaped-range (string stream start end)
+  "Write the characters of STRING from START to END to STREAM, escaping quotes,
+   backslashes and control characters for a quoted logfmt value."
+  (declare (optimize (speed 3) (safety 1))
+           (type simple-string string)
+           (type fixnum start end))
+  (loop for i of-type fixnum from start below end
+        for c of-type character = (schar string i)
+        do (case c
+             (#\" (write-string "\\\"" stream))
+             (#\\ (write-string "\\\\" stream))
+             (#\Newline (write-string "\\n" stream))
+             (#\Return (write-string "\\r" stream))
+             (#\Tab (write-string "\\t" stream))
+             (t (if (< (char-code c) 32)
+                    (format stream "\\u~4,'0X" (char-code c))
+                    (write-char c stream))))))
+
+(defun logfmt-write-bare-or-quoted (stream string &optional limited)
   "Write STRING to STREAM, quoting if it contains space, quote, equals, backslash,
-   or control characters. Escapes quotes, backslashes, newlines, returns, and tabs."
-  (declare (optimize (speed 3) (safety 1)))
-  (let ((string (coerce string 'simple-string)))
-    (declare (type simple-string string))
-    (let ((needs-quoting nil))
-      (loop for c of-type character across string
-            when (or (char= c #\Space) (char= c #\") (char= c #\=)
-                     (char= c #\\) (< (char-code c) 32))
-              do (setf needs-quoting t) (loop-finish))
-      (if needs-quoting
-          (progn
-            (write-char #\" stream)
-            (loop for c of-type character across string do
-              (case c
-                (#\" (write-string "\\\"" stream))
-                (#\\ (write-string "\\\\" stream))
-                (#\Newline (write-string "\\n" stream))
-                (#\Return (write-string "\\r" stream))
-                (#\Tab (write-string "\\t" stream))
-                (t (if (< (char-code c) 32)
-                       (format stream "\\u~4,'0X" (char-code c))
-                       (write-char c stream)))))
-            (write-char #\" stream))
-          (write-string string stream)))))
+   or control characters. Escapes quotes, backslashes, newlines, returns, and tabs.
+   When LIMITED, a string longer than *MAX-STRING-LENGTH* is written as its head,
+   the cut marker and its tail, always quoted, since the marker holds spaces."
+  (let* ((string (coerce string 'simple-string))
+         (length (length string)))
+    (multiple-value-bind (head-end tail-start cut)
+        (if limited (string-cut length) nil)
+      (cond
+        (head-end
+         (write-char #\" stream)
+         (logfmt-write-escaped-range string stream 0 head-end)
+         (write-cut-marker stream cut)
+         (logfmt-write-escaped-range string stream tail-start length)
+         (write-char #\" stream))
+        ((logfmt-needs-quoting-p string 0 length)
+         (write-char #\" stream)
+         (logfmt-write-escaped-range string stream 0 length)
+         (write-char #\" stream))
+        (t (write-string string stream))))))
 
 ;;; --- Logfmt formatting ---
 
@@ -68,7 +92,7 @@
    Strings, characters and symbols are quoted when they contain characters that
    would break the key=value grammar; numbers use JSON number syntax."
   (typecase value
-    (string (logfmt-write-bare-or-quoted stream value))
+    (string (logfmt-write-bare-or-quoted stream value t))
     (character (logfmt-write-bare-or-quoted stream (string value)))
     (real (write-json-number stream value))
     (null (write-string "null" stream))
@@ -96,18 +120,24 @@
           do (emit-logfmt-field s k v))))
 
 (defun make-logfmt-formatter (&key (timestamp :unix-ms) (level-key "level")
-                                    (timestamp-key "ts") (message-key "msg"))
+                                    (timestamp-key "ts") (message-key "msg")
+                                    max-string-length)
   "Return a logfmt formatter struct with custom keys.
    Level is always string for logfmt. Pre-computes key name strings.
    Pass :level-key NIL to omit the level field entirely.
-   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP."
+   MAX-STRING-LENGTH bounds this formatter's strings in place of
+   *MAX-STRING-LENGTH*: a non-negative integer, :UNLIMITED, or NIL (the
+   default) to read the special when a line is formatted.
+   Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or a bad limit."
   (check-timestamp-format timestamp)
+  (check-limit :max-string-length max-string-length :allow-unlimited t)
   (let ((level-prefix (when level-key (format nil "~a=" level-key)))
         (ts-prefix (when timestamp (format nil " ~a=" timestamp-key)))
         (ts-prefix-first (when timestamp (format nil "~a=" timestamp-key)))
         (msg-prefix (format nil " ~a=" message-key))
         (msg-prefix-first (format nil "~a=" message-key)))
-    (make-formatter
+    (make-limited-formatter
+        ((*max-string-length* max-string-length))
      :prepare-fn (make-concat-prepare-fn #'serialize-bindings-logfmt)
      :format-fn
      (lambda (level prepared context message fields)

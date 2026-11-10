@@ -33,21 +33,31 @@
 
 ;;; --- Serialization ---
 
+(defun write-json-escaped-range (string stream start end)
+  "Write the characters of STRING from START to END to STREAM with JSON escaping."
+  (declare (optimize (speed 3) (safety 1))
+           (type simple-string string)
+           (type fixnum start end))
+  (loop for i of-type fixnum from start below end
+        for c of-type character = (schar string i)
+        do (case c
+             (#\" (write-string "\\\"" stream))
+             (#\\ (write-string "\\\\" stream))
+             (#\Newline (write-string "\\n" stream))
+             (#\Return (write-string "\\r" stream))
+             (#\Tab (write-string "\\t" stream))
+             (t (if (< (char-code c) 32)
+                    (format stream "\\u~4,'0X" (char-code c))
+                    (write-char c stream))))))
+
 (defun write-json-escaped-string (string stream)
   "Write STRING to STREAM with JSON escaping."
-  (declare (optimize (speed 3) (safety 1)))
   (let ((string (coerce string 'simple-string)))
-    (declare (type simple-string string))
-  (loop for c of-type character across string do
-    (case c
-      (#\" (write-string "\\\"" stream))
-      (#\\ (write-string "\\\\" stream))
-      (#\Newline (write-string "\\n" stream))
-      (#\Return (write-string "\\r" stream))
-      (#\Tab (write-string "\\t" stream))
-      (t (if (< (char-code c) 32)
-             (format stream "\\u~4,'0X" (char-code c))
-             (write-char c stream)))))))
+    (write-json-escaped-range string stream 0 (length string))))
+
+(defun write-json-limited-string (string stream)
+  "Write STRING to STREAM with JSON escaping, cut by *MAX-STRING-LENGTH*."
+  (write-limited-string string stream #'write-json-escaped-range))
 
 (declaim (inline write-json-string))
 (defun write-json-string (stream string)
@@ -68,7 +78,7 @@
   (write-string "\"type\":\"" stream)
   (write-json-escaped-string (type-name-string condition) stream)
   (write-string "\",\"msg\":\"" stream)
-  (write-json-escaped-string (condition-message-string condition) stream)
+  (write-json-limited-string (condition-message-string condition) stream)
   (write-char #\" stream))
 
 (defun write-json-float (stream value)
@@ -155,7 +165,9 @@
   (declare (optimize (speed 3) (safety 1))
            (type fixnum depth))
   (typecase value
-    (string    (write-json-string stream value))
+    (string    (write-char #\" stream)
+               (write-json-limited-string value stream)
+               (write-char #\" stream))
     (character (write-json-string stream (string value)))
     (real (write-json-number stream value))
     ((eql t) (write-string "true" stream))
@@ -307,7 +319,8 @@
 (defun make-json-formatter (&key (timestamp :unix-ms) (level-format :string)
                                   (level-key "level") (timestamp-key "ts")
                                   (message-key "msg")
-                                  max-depth max-length max-stack-frames)
+                                  max-depth max-length max-stack-frames
+                                  max-string-length)
   "Return a JSON formatter struct with custom keys and formats.
    Pre-computes level prefix vector, timestamp key fragment, and message key fragment.
    Pass :level-key NIL to omit the level field entirely.
@@ -315,12 +328,15 @@
    place of *MAX-JSON-DEPTH*, *MAX-JSON-LENGTH* and *MAX-JSON-STACK-FRAMES*.
    Each is a non-negative integer, or NIL (the default) to read the special when
    a line is formatted; MAX-STACK-FRAMES may also be :UNLIMITED.
+   MAX-STRING-LENGTH does the same for *MAX-STRING-LENGTH* and may also be
+   :UNLIMITED.
    Signals BARK-CONFIGURATION-ERROR for an unknown TIMESTAMP or LEVEL-FORMAT, or
    a bad limit."
   (check-timestamp-format timestamp)
   (check-limit :max-depth max-depth)
   (check-limit :max-length max-length)
   (check-limit :max-stack-frames max-stack-frames :allow-unlimited t)
+  (check-limit :max-string-length max-string-length :allow-unlimited t)
   (unless (member level-format '(:numeric :string))
     (cl:error 'bark-configuration-error
               :detail (format nil ":level-format must be :numeric or :string, got ~S" level-format)))
@@ -331,7 +347,8 @@
     (make-limited-formatter
         ((*max-json-depth* max-depth)
          (*max-json-length* max-length)
-         (*max-json-stack-frames* max-stack-frames))
+         (*max-json-stack-frames* max-stack-frames)
+         (*max-string-length* max-string-length))
      :prepare-fn (make-concat-prepare-fn #'serialize-bindings-json)
      :format-fn
      (lambda (level prepared context message fields)
@@ -366,7 +383,7 @@
              (when message
                (when sep (write-char sep s))
                (write-string msg-key s)
-               (write-json-escaped-string message s)
+               (write-json-limited-string message s)
                (write-string "\"" s))))
          (write-string "}" s))))))
 

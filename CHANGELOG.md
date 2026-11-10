@@ -43,6 +43,9 @@ minor versions, and such changes are listed under **Changed**.
 
 ### Added
 
+- Add and export `*max-string-length*` (default NIL) and a `:max-string-length` argument to all three formatter
+  constructors: a longer string value, condition message or message is written as its head, a
+  `...[N chars cut]...` marker and its tail, without a copy.
 - Add `:max-depth`, `:max-length` and `:max-stack-frames` to `make-json-formatter` and `make-pretty-formatter`, so one
   logger can have its own limits without a `setf` of the process-wide specials. A limit left NIL reads the special when
   a line is formatted, as before; `:max-stack-frames` (and the pretty depth and length) also take `:unlimited`.

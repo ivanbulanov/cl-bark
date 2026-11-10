@@ -3421,6 +3421,81 @@ level signals bark-configuration-error."
   (5am:signals bark:bark-configuration-error (bark:make-json-formatter :max-stack-frames "5"))
   (5am:signals bark:bark-configuration-error (bark:make-pretty-formatter :max-depth 1.5)))
 
+(defun cut-test-string ()
+  "A 38-character string with a distinct head and tail."
+  (concatenate 'string "HEAD" (make-string 30 :initial-element #\a) "TAIL"))
+
+(5am:test test-max-string-length-json
+  "make-json-formatter :max-string-length cuts string values, condition messages and the message."
+  (let* ((long (cut-test-string))
+         (c (make-condition 'simple-error :format-control "~a" :format-arguments (list long)))
+         (fmt (bark:make-json-formatter :timestamp nil :max-string-length 8))
+         (parsed (yason:parse (funcall (formatter-format-fn fmt) +info+ "" nil long
+                                       (list :s long :e c :k "short" :l (list long)))))
+         (cut "HEAD...[30 chars cut]...TAIL"))
+    (5am:is (string= cut (gethash "s" parsed)))
+    (5am:is (string= cut (gethash "msg" (gethash "e" parsed))))
+    (5am:is (string= cut (gethash "msg" parsed)))
+    (5am:is (string= cut (first (gethash "l" parsed))))
+    (5am:is (string= "short" (gethash "k" parsed)))))
+
+(5am:test test-max-string-length-logfmt
+  "make-logfmt-formatter :max-string-length cuts and quotes long strings, and leaves short ones bare."
+  (let* ((long (cut-test-string))
+         (c (make-condition 'simple-error :format-control "~a" :format-arguments (list long)))
+         (fmt (bark:make-logfmt-formatter :timestamp nil :max-string-length 8))
+         (result (funcall (formatter-format-fn fmt) +info+ "" nil long (list :s long :e c :k "short"))))
+    (5am:is (string= (concatenate 'string
+                                  "level=info s=\"HEAD...[30 chars cut]...TAIL\""
+                                  " e=\"simple-error: HEAD...[30 chars cut]...TAIL\""
+                                  " k=short msg=\"HEAD...[30 chars cut]...TAIL\"")
+                     result))))
+
+(defun count-substrings (needle haystack)
+  "How many times NEEDLE occurs in HAYSTACK, without overlaps."
+  (loop with start = 0
+        for pos = (search needle haystack :start2 start)
+        while pos
+        count t
+        do (setf start (+ pos (length needle)))))
+
+(5am:test test-max-string-length-pretty
+  "make-pretty-formatter :max-string-length cuts the message, string values and condition messages."
+  (let* ((long (cut-test-string))
+         (c (make-condition 'simple-error :format-control "~a" :format-arguments (list long)))
+         (fmt (bark:make-pretty-formatter :show-level nil :max-string-length 8))
+         (result (funcall (formatter-format-fn fmt) +info+ "" nil long (list :s long :e c)))
+         (cut "HEAD...[30 chars cut]...TAIL"))
+    (5am:is (= 3 (count-substrings cut result)))
+    (5am:is-false (search long result))))
+
+(5am:test test-max-string-length-special
+  "A formatter without :max-string-length reads *max-string-length* at format time; the head gets the odd character."
+  (let ((fmt (bark:make-json-formatter :timestamp nil)))
+    (5am:is (search "\"msg\":\"HEAD...[31 chars cut]...AIL\""
+                    (let ((bark:*max-string-length* 7))
+                      (funcall (formatter-format-fn fmt) +info+ "" nil (cut-test-string) nil))))
+    (5am:is (search "\"msg\":\"...[3 chars cut]...\""
+                    (let ((bark:*max-string-length* 0))
+                      (funcall (formatter-format-fn fmt) +info+ "" nil "abc" nil))))
+    (5am:is (search "\"msg\":\"abc\""
+                    (let ((bark:*max-string-length* 3))
+                      (funcall (formatter-format-fn fmt) +info+ "" nil "abc" nil))))))
+
+(5am:test test-max-string-length-unlimited-and-child-context
+  ":max-string-length :unlimited lifts the special; a set limit also cuts context a child adds."
+  (let ((long (cut-test-string)))
+    (let ((bark:*max-string-length* 4))
+      (5am:is (search long (funcall (formatter-format-fn
+                                     (bark:make-json-formatter :timestamp nil
+                                                               :max-string-length :unlimited))
+                                    +info+ "" nil long nil))))
+    (let* ((fmt (bark:make-logfmt-formatter :timestamp nil :max-string-length 8))
+           (prepared (funcall (formatter-prepare-fn fmt) nil (list :ctx long))))
+      (5am:is (search "ctx=\"HEAD...[30 chars cut]...TAIL\"" prepared)))
+    (5am:signals bark:bark-configuration-error
+      (bark:make-logfmt-formatter :max-string-length -3))))
+
 (5am:test test-make-json-formatter-no-level
   "make-json-formatter with :level-key nil omits the level field."
   (let ((fmt (bark:make-json-formatter :level-key nil :timestamp nil)))

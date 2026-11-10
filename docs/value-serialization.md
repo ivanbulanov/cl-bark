@@ -171,6 +171,12 @@ and around the context a child logger adds, so the limit belongs to that formatt
 variable at format time, as above. Details and examples are in
 [formatters.md](formatters.md#limits-per-formatter).
 
+### String Length Limit
+
+`*max-string-length*` (default NIL, unlimited) caps string values, condition messages and the log message in all three
+formatters; `:max-string-length` sets it for one formatter. A longer string is written as its head, a
+`...[N chars cut]...` marker and its tail. See [formatters.md](formatters.md#string-length).
+
 ## API
 
 `capture` and the variables below are exported. The functions named in this page's headings, such as `emit-json-value`, `emit-json-key`, `emit-logfmt-value` and `write-json-escaped-string`, are internal to the `bark` package: reach them with `bark::` at your own risk.
@@ -185,3 +191,4 @@ variable at format time, as above. Details and examples are in
 | `*max-pretty-length*` | `20` | Elements per collection for pretty-formatter (binds `*print-length*`) |
 | `*max-json-stack-frames*` | `10` | Max stack frames in JSON condition output |
 | `*max-pretty-stack-frames*` | `20` | Max stack frames in pretty-formatter condition output |
+| `*max-string-length*` | `nil` | Max characters of a string value, condition message or message, in every formatter (NIL is unlimited) |

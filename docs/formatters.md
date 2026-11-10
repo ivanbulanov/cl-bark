@@ -43,7 +43,8 @@ Both `:prepare-fn` and `:format-fn` are required. The `prepare-fn` receives a pl
 (bark:make-json-formatter &key (timestamp :unix-ms) (level-format :string)
                                (level-key "level") (timestamp-key "ts")
                                (message-key "msg")
-                               max-depth max-length max-stack-frames)
+                               max-depth max-length max-stack-frames
+                               max-string-length)
 ```
 
 | Parameter | Values | Default |
@@ -56,6 +57,7 @@ Both `:prepare-fn` and `:format-fn` are required. The `prepare-fn` receives a pl
 | `max-depth` | non-negative integer, or `nil` (read `*max-json-depth*`) | `nil` |
 | `max-length` | non-negative integer, or `nil` (read `*max-json-length*`) | `nil` |
 | `max-stack-frames` | non-negative integer, `:unlimited`, or `nil` (read `*max-json-stack-frames*`) | `nil` |
+| `max-string-length` | non-negative integer, `:unlimited`, or `nil` (read `*max-string-length*`) | `nil` |
 
 The limits are described in [Limits per formatter](#limits-per-formatter).
 
@@ -83,10 +85,11 @@ The limits are described in [Limits per formatter](#limits-per-formatter).
 
 ```lisp
 (bark:make-logfmt-formatter &key (timestamp :unix-ms) (level-key "level")
-                                  (timestamp-key "ts") (message-key "msg"))
+                                  (timestamp-key "ts") (message-key "msg")
+                                  max-string-length)
 ```
 
-Level is always a string in logfmt. Pass `:level-key nil` to omit it. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`.
+Level is always a string in logfmt. Pass `:level-key nil` to omit it. Timestamp accepts `:unix-ms`, `:iso8601`, or `nil`. `max-string-length` is described in [Limits per formatter](#limits-per-formatter).
 
 ```lisp
 (setf bark:*logger*
@@ -99,10 +102,11 @@ Level is always a string in logfmt. Pass `:level-key nil` to omit it. Timestamp 
 
 ```lisp
 (bark:make-pretty-formatter &key timestamp (timestamp-key "ts") (show-level t)
-                                 max-depth max-length max-stack-frames)
+                                 max-depth max-length max-stack-frames
+                                 max-string-length)
 ```
 
-The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display. Pass `:show-level nil` to omit the colored level label. `max-depth`, `max-length` and `max-stack-frames` take a non-negative integer, `:unlimited`, or `nil` (the default) to read `*max-pretty-depth*`, `*max-pretty-length*` and `*max-pretty-stack-frames*`; see [Limits per formatter](#limits-per-formatter).
+The standard `pretty-formatter` omits timestamps (REPL use). The factory adds optional timestamp display. Pass `:show-level nil` to omit the colored level label. `max-depth`, `max-length`, `max-stack-frames` and `max-string-length` take a non-negative integer, `:unlimited`, or `nil` (the default) to read `*max-pretty-depth*`, `*max-pretty-length*`, `*max-pretty-stack-frames*` and `*max-string-length*`; see [Limits per formatter](#limits-per-formatter).
 
 ```lisp
 ;; Pretty with ISO 8601 timestamps
@@ -134,8 +138,26 @@ a formatter made before them. A limit that is set holds for the context a child 
 length. JSON depth and length must stay bounded, because the JSON writer has no circularity check. A bad value signals
 `bark-configuration-error` when the formatter is made.
 
-`make-logfmt-formatter` takes none of these limits: logfmt writes a collection as a `<type>` placeholder and a
+`make-logfmt-formatter` takes only `:max-string-length`: logfmt writes a collection as a `<type>` placeholder and a
 condition without its stack.
+
+### String length
+
+Nothing else bounds a string, so one large value (a model result, a request body) can make a line of many megabytes.
+`bark:*max-string-length*` (default NIL, unlimited) and the `:max-string-length` argument of all three constructors cap
+string field values, condition messages and the log message. A longer string keeps its head and its tail, with a
+marker between them that says how many characters were cut:
+
+```lisp
+(let ((bark:*max-string-length* 8))
+  (bark:info "result" :body (format nil "HEAD~aTAIL" (make-string 1000 :initial-element #\x))))
+;; => {"level":"info","ts":...,"body":"HEAD...[1000 chars cut]...TAIL","msg":"result"}
+```
+
+The kept characters number the limit, the head getting one more for an odd limit; the marker comes on top. The cut is
+made while the string is written, so the string is not copied. In JSON a string inside a collection is cut too; in
+logfmt a cut string is always quoted, because the marker holds spaces. Keys, type names and stack frames are not cut,
+and no limit applies to a whole line.
 
 ## Condition logging
 

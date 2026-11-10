@@ -5,7 +5,8 @@ lists the special variables and gives one line for each exported symbol, with th
 
 The `*max-json-...*` and `*max-pretty-...*` limits below hold for every formatter that was made without its own limit;
 `make-json-formatter` and `make-pretty-formatter` take `:max-depth`, `:max-length` and `:max-stack-frames` for one
-formatter (see [formatters.md](formatters.md#limits-per-formatter)).
+formatter, and all three constructors take `:max-string-length` (see
+[formatters.md](formatters.md#limits-per-formatter)).
 
 ## Special variables
 
@@ -22,6 +23,7 @@ formatter (see [formatters.md](formatters.md#limits-per-formatter)).
 | `bark:*capture-max-frames*` | `50` | Default for `capture`'s `:max-frames`: the most stack frames a captured error keeps (NIL is unlimited). |
 | `bark:*max-json-stack-frames*` | `10` | Maximum stack frames in JSON condition output (NIL is unlimited). |
 | `bark:*max-pretty-stack-frames*` | `20` | Maximum stack frames in pretty condition output (NIL is unlimited). |
+| `bark:*max-string-length*` | `nil` | Maximum characters of a string value, condition message or message; a longer one keeps its head and tail around a marker (NIL is unlimited). |
 | `bark:*default-json-formatter*`, `bark:*default-logfmt-formatter*`, `bark:*default-pretty-formatter*` | | The formatter instances `make-logger` and `make-tee` use by default. |
 
 ## Exports by topic
