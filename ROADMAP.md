@@ -188,10 +188,12 @@ its loggers and for any other cl-bark user in the image.
 Nothing bounds a string. The application logged a 10 MB model result whole: 500 MB of log per hour per image, and
 pruning then deleted the service's own log. It now cuts results itself, keeping the head and the tail around a marker.
 
-- [ ] Add `:max-string-length` to the three formatters, with the same NIL rule as 3.1 and a special
+- [x] Add `:max-string-length` to the three formatters, with the same NIL rule as 3.1 and a special
   `*max-string-length*`, default NIL. The cut keeps the head and the tail with a marker that says how many characters
   were cut, and is made while the string is written, without a copy. It applies to string values, condition messages
   and the message.
+  Done in 260c00e. Marker `...[N chars cut]...`; the kept characters number the limit. JSON also cuts strings inside
+  collections; logfmt quotes a cut string.
 - No total line cap: a valid JSON line cut in the middle is hard, and a library bounds its own lines.
 
 ### 3.3 Synchronous stream output (application)
