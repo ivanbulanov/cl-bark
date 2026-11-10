@@ -67,6 +67,7 @@ application.
   `*compile-time-min-level*`, `register-exit-hook` is removed, `flush` and `stop` return a value, and every other
   rename in the release. (611bc26)
 - [x] *0.2.0*: the release commit: changelog heading and date, `:version "0.2.0"` in `cl-bark.asd`. (f6e9ec9)
+- [x] Tag `v0.2.0` at `f6e9ec9` (annotated, dated at the commit) and push it with `main` (fffc13a).
 
 ### 1.2 Bump the `.asd` version on every release (sql-zealot)
 
