@@ -110,7 +110,7 @@ application has four near-identical branches for one event), `(apply (bark::logg
 sql-zealot, `with-context` branches and a closure per line (`call-with-log-context`). The library adapter needs it to
 pass a sink's plist on.
 
-- [ ] Export `(bark:emit logger level message fields)`, `fields` a plist. The list form keeps it visibly different
+- [x] Export `(bark:emit logger level message fields)`, `fields` a plist. (ecde731) The list form keeps it visibly different
   from the macros, so nobody uses it by habit and loses lazy evaluation of the fields. Specify:
   1. It dispatches through the logger's level functions, so samplers, the field transform and a buffer logger apply.
      Inside `with-log-buffer` samplers are bypassed, as for the macros. To join a buffer, pass `bark:*logger*` at
