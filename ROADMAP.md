@@ -149,9 +149,10 @@ after `save-lisp-and-die`, and its deployment doc names `bark::save-live-outputs
 whether a writer has died; the state type has four values, and a list of them per tee destination says nothing about
 which destination failed.
 
-- [ ] Export `(bark:healthy-p logger)`: true when no async writer of the logger is `:failed`. With `dropped-count`,
-  that is a health check.
-- [ ] Document the save and init hooks by behaviour, so that nobody names internal functions.
+- [x] Export `(bark:healthy-p logger)`: true when no async writer of the logger is `:failed`. With `dropped-count`,
+  that is a health check. (e43083b)
+- [x] Document the save and init hooks by behaviour, so that nobody names internal functions. `docs/lifecycle.md`
+  already did; it now points at `healthy-p` for the check after a restore. (e43083b)
 
 ### 2.4 Export a level reader (sql-zealot, October review)
 
