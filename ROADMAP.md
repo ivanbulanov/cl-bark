@@ -85,12 +85,8 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
 - [ ] Check first whether a Quicklisp dist build accepts a secondary system (`sql-zealot-postgres/cl-bark`) whose
   dependency is not in the dist. The library model assumes it does.
 
-### 1.4 Follow-ups in the users (not cl-bark work)
+### 1.4 Follow-ups in sql-zealot (not cl-bark work)
 
-- The application: pin the 0.2.0 tag in its `qlfile` and run `qlot update cl-bark`. Then drop its uses of `bark::`
-  as phase 2 lands. It should also test, in its own suite, loading a renamed vendored copy next to the normal one and
-  saving an image with a live async logger in each. Each copy has its own `*stream-locks*`, so two copies writing to
-  stderr do not serialize against each other.
 - sql-zealot, short term: require cl-bark 0.2.0 in the `.asd` and delete the `bark-logger` deftype.
 - sql-zealot, the library model, written up in sql-zealot's own roadmap: the sink and the predicate threshold, the
   fallback sink, `zl:rate-limited-sink` around the default sink, caps as options (`:log-sql-limit`),
@@ -104,7 +100,8 @@ head, so submitting before the tag would ship unreleased `main`. All four depend
 
 ## Phase 2. Public API for what users reach into internals for
 
-Exit criterion: no `bark::` in the application's source or in sql-zealot.
+Exit criterion: every internal the users call has a public replacement, and sql-zealot uses no `bark::`. The
+application switches over in phase 6.
 
 ### 2.1 `bark:emit`: a function entry point that takes a field list (application, sql-zealot)
 
@@ -262,6 +259,19 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 
 - [x] *0.2.0*: `src/writer.lisp` pushes the save and init hooks twice, once bare and once inside a `progn`. Delete one. (5a426a1)
 
+## Phase 6. Changes in the application (last)
+
+The application is under active development, so changes to it wait until the cl-bark work above is done and its
+owner is ready. Nothing in phases 1 to 5 depends on them.
+
+- [ ] Pin the 0.2.0 tag in its `qlfile` and run `qlot update cl-bark`.
+- [ ] Replace its uses of `bark::` with the public API from phase 2 (`emit`, plain-data `capture`), and its `setf` of
+  the serialization specials with per-formatter limits (3.1) and `:max-string-length` (3.2). Consider `:async nil`
+  for its diagnostics logger (3.3).
+- [ ] Test, in its own suite, loading a renamed vendored copy next to the normal one and saving an image with a live
+  async logger in each. Each copy has its own `*stream-locks*`, so two copies writing to stderr do not serialize
+  against each other.
+
 ## Parked (no user yet)
 
 - **Rate limit per event key, with a suppressed count** (sql-zealot F39 asked for it; sql-zealot keeps its own
@@ -297,7 +307,7 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 | sql-zealot F39 | `make-child` has no sampler of its own | Documented; keyed limit parked |
 | sql-zealot F40 | No dropped-line count | Fixed in `f3294fc` (`dropped-count`), unreleased |
 | sql-zealot F41 | Load-time push onto `bt:*default-special-bindings*` | Kept by decision |
-| sql-zealot | Cannot tell which cl-bark is loaded | Export fixed; version 1.2; pin 1.4 |
+| sql-zealot | Cannot tell which cl-bark is loaded | Export fixed; version 1.2 |
 | sql-zealot F109 | Not in Quicklisp | Postponed; 1.3 |
 | sql-zealot | Deploy scripts read writer internals | 2.3 |
 | sql-zealot | Optional fields through `with-context` branches | 2.1 |
@@ -306,4 +316,4 @@ The audit of 2026-11-10 found docs that contradict the code, duplicated topics a
 | application | Process-wide serialization limits | 3.1 |
 | application | No string cap (10 MB result) | 3.2 |
 | application | Diagnostics must survive a crash; `:abort t` skips the drain | 3.3 |
-| application | No `flush` timeout or result in the pinned version | Fixed in `dc44995`; pin 1.4 |
+| application | No `flush` timeout or result in the pinned version | Fixed in `dc44995`; pin 6 |
