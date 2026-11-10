@@ -2147,6 +2147,21 @@ level signals bark-configuration-error."
   (5am:signals bark:bark-configuration-error
     (bark:make-tee (list (list :stream (make-string-output-stream) :async nil :capacity 64)))))
 
+(5am:test test-async-nil-write-reentered-by-an-interrupt-counts-a-drop
+  "A line logged while this thread already holds the stream lock (an interrupt
+   that logs in the middle of a write) is counted as dropped; the output stays
+   healthy and the next line is written."
+  (let* ((s (make-string-output-stream))
+         (lgr (bark:make-logger :output s :async nil :formatter (bark:make-logfmt-formatter))))
+    (bt:with-lock-held ((bark::stream-lock s))
+      (bark:info lgr "nested"))
+    (5am:is (= 1 (bark:dropped-count lgr)))
+    (5am:is-true (bark:healthy-p lgr))
+    (bark:info lgr "after")
+    (let ((out (get-output-stream-string s)))
+      (5am:is (= 0 (count-substrings "nested" out)))
+      (5am:is (= 1 (count-substrings "after" out))))))
+
 (5am:test test-async-nil-stream-error-marks-the-output-failed
   "Without :on-error a stream error is reported once, the line is counted as
    dropped and the output fails; later lines are dropped too."

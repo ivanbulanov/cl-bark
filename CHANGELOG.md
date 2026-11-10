@@ -49,6 +49,9 @@ minor versions, and such changes are listed under **Changed**.
 - Add `make-logger :async nil` and an `:async` key for tee destinations: a stream output with no writer thread and
   no queue, each line written on the caller's thread under the stream lock and forced out before the call returns, so
   it survives SIGKILL or a crash. `:on-error` runs on the caller's thread; the queue keywords are refused with it.
+  A line logged by an interrupt while its thread is writing to the same stream is counted as dropped.
+- Document which logging calls block or take a lock (also from finalizers and with interrupts disabled), what a child
+  logger copies and shares, and log rotation with logrotate `copytruncate` or journald.
 - Document that `(sb-ext:exit :abort t)` skips the exit drain; call `bark:flush` first.
 - Add and export `*max-string-length*` (default NIL) and a `:max-string-length` argument to all three formatter
   constructors: a longer string value, condition message or message is written as its head, a

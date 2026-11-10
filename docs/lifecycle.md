@@ -108,7 +108,7 @@ Interrupts disabled (inside `sb-sys:without-interrupts`, or in code that an inte
 
 - Drop mode is safe. The push itself runs with interrupts disabled, so an interrupt cannot leave a half-claimed slot behind.
 - In blocking mode the wait still ends after `:block-timeout`, but nothing can interrupt it before then; with `:block-timeout nil` and a writer that never catches up, it never ends.
-- With `:async nil` (or after `bark:stop`) the write cannot be interrupted either. An interrupt that logs to such an output while its thread is writing to the same stream finds the per-stream lock held by its own thread. SBCL then signals a recursive lock error, which cl-bark treats as a stream error: an `:async nil` output calls `:on-error`, or without one is marked failed; after `bark:stop` the line is counted as dropped. Log from interrupt handlers through a drop-mode async output.
+- With `:async nil` (or after `bark:stop`) the write cannot be interrupted either. An interrupt that logs to such an output while its thread is writing to the same stream finds the per-stream lock held by its own thread; that line is counted as dropped, and the output stays healthy. Log from interrupt handlers through a drop-mode async output to keep those lines.
 
 Do not log inside `sb-sys:without-gcing`: formatting conses, and a thread that waits there for a lock can deadlock with the thread that holds it and waits for the GC.
 

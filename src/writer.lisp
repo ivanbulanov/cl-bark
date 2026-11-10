@@ -334,17 +334,22 @@ output failed. The output is tracked so that a saved core reopens its stream."
     (register-live-output ao)
     ao))
 
-(declaim (ftype (function (t string) (values (or null condition) &optional)) write-line-locked))
+(declaim (ftype (function (t string) (values (or null condition (eql :reentered)) &optional)) write-line-locked))
 (defun write-line-locked (stream line)
   "Write LINE and a newline to STREAM under its stream lock and force it out.
-   Return NIL, or the error that writing signaled."
+   Return NIL, or the error that writing signaled. Return :REENTERED, writing
+   nothing, when this thread already holds the lock: an interrupt that logs
+   while its thread is writing to STREAM."
   (handler-case
-      (progn
-        (bt:with-lock-held ((stream-lock stream))
-          (write-string line stream)
-          (terpri stream)
-          (force-output stream))
-        nil)
+      (let ((lock (stream-lock stream)))
+        (if (sb-thread:holding-mutex-p lock)
+            :reentered
+            (progn
+              (bt:with-lock-held (lock)
+                (write-string line stream)
+                (terpri stream)
+                (force-output stream))
+              nil)))
     (cl:error (condition) condition)))
 
 (declaim (ftype (function (async-output string condition) (values &optional)) handle-sync-stream-error))
@@ -360,6 +365,9 @@ output failed. The output is tracked so that a saved core reopens its stream."
              (handle-stream-error async-output condition))
         (let ((retry-error (write-line-locked (async-output-stream async-output) line)))
           (cond
+            ((eq retry-error :reentered)
+             (atomics:atomic-incf (ring-buffer-dropped ring))
+             (setf (async-output-state async-output) :sync))
             (retry-error
              (%report "bark: replacement stream failed too: ~a~%" retry-error)
              (atomics:atomic-incf (ring-buffer-dropped ring)))
@@ -371,10 +379,14 @@ output failed. The output is tracked so that a saved core reopens its stream."
 (declaim (ftype (function (async-output string) (values &optional)) write-sync-line))
 (defun write-sync-line (async-output line)
   "Write LINE for an output made with :async nil, on the caller's thread.
-   A stream error goes to HANDLE-SYNC-STREAM-ERROR."
-  (let ((condition (write-line-locked (async-output-stream async-output) line)))
-    (when condition
-      (handle-sync-stream-error async-output line condition)))
+   A stream error goes to HANDLE-SYNC-STREAM-ERROR. A line logged by an
+   interrupt while this thread writes to the same stream is counted as dropped."
+  (let ((result (write-line-locked (async-output-stream async-output) line)))
+    (cond ((null result))
+          ((eq result :reentered)
+           (atomics:atomic-incf (ring-buffer-dropped (async-output-ring async-output))))
+          (t
+           (handle-sync-stream-error async-output line result))))
   (values))
 
 (declaim (ftype (function (async-output string) (values &optional)) write-line-synchronously))
