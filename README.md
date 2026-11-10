@@ -20,7 +20,7 @@ git clone https://github.com/ivanbulanov/cl-bark.git ~/quicklisp/local-projects/
 
 With [qlot](https://github.com/fukamachi/qlot), add `github cl-bark ivanbulanov/cl-bark` to your `qlfile`.
 
-SBCL only. Tested on x86-64; the ring buffer relies on x86-64 store ordering and ARM64 is untested. See [dependencies](#dependencies).
+SBCL only. Tested on x86-64; the ring buffer has memory barriers for weakly ordered CPUs, but ARM64 is untested. See [dependencies](#dependencies).
 
 ## Quick Start
 

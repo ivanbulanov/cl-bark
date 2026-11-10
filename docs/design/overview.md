@@ -10,7 +10,7 @@ A logger sits inside the code it observes, so its cost is paid by application th
 - Enabled calls. Formatting and I/O must not make the application wait on a slow disk, pipe or socket.
 - Structure. Operators want key-value fields, not format strings, so output can be parsed by machines.
 
-The design (Pino-inspired, extended with ideas from zerolog and slog) has four goals: high performance, structured output, flexibility (runtime level changes, swappable formatters, child loggers, dynamic context) and portability., and portability is limited to SBCL on x86-64; see "Invariants and Trade-offs".
+The design (Pino-inspired, extended with ideas from zerolog and slog) has four goals: high performance, structured output, flexibility (runtime level changes, swappable formatters, child loggers, dynamic context) portability, which is limited to SBCL; see "Invariants and Trade-offs".
 
 ## Design Summary
 
@@ -100,7 +100,7 @@ Producer threads              Writer thread
                                     +- wait on semaphore
 ```
 
-The payload slots are written and read with plain `svref` and `setf`, with no memory barriers around the string. Correctness relies on x86 total store order: the payload is visible before the semaphore signal that wakes the writer. cl-bark is tested on x86-64 only. SBCL also runs on ARM64, which is weakly ordered and untested here; running there would need acquire/release barriers on the payload slot accesses.
+The payload slots are written and read with plain `svref` and `setf`, fenced by a pair of barriers: the producer issues a write barrier after claiming the slot and before storing the string into it, and the writer issues a read barrier after it loads the string, so the string's contents are visible once its pointer is. On x86-64 (total store order) both are no-ops. A memory barrier on each side of the sleeping flag (`notify-writer`, `writer-wait`) makes sure a writer about to sleep either sees the new line or gets the semaphore signal. cl-bark is tested on x86-64 only; ARM64, which is weakly ordered, is untested.
 
 ### Caller-thread formatting
 
@@ -169,7 +169,7 @@ The comparative benchmark against log4cl and vom, and how to read it, is in [../
 ## Invariants and Trade-offs
 
 - The ring buffer holds strings. Nothing downstream of `deliver-line` interprets events. Filters, sampling and transforms therefore run before the push.
-- The payload is not fenced. Ring-buffer slot reads and writes are plain `svref`. Correctness depends on x86 store ordering; see [Ring buffer](#ring-buffer). A port to a weakly ordered CPU needs barriers.
+- The payload is fenced by a write barrier in the producer and a read barrier in the writer, which cost nothing on x86-64; see [Ring buffer](#ring-buffer). Only x86-64 is tested.
 - Single consumer. `ring-buffer-pop` and the drain loop assume one reader per ring. `stop-async-output` drains the remainder after joining the thread for the same reason.
 - A logger needs `stop` for a clean shutdown. Writers wake every 0.1 s without a signal, but only `stop` (or the automatic exit drain, see `*exit-flush-timeout*`) joins the thread and drains. Child loggers cannot be stopped; `stop` on a child signals `bark-child-operation-error`.
 - Child loggers snapshot at creation. A child copies the parent's formatter, output and `prepared` string and receives the parent's sampler objects at creation; later parent changes are not reflected.

@@ -195,7 +195,7 @@ Trade-offs:
 - Deadlock risk exists when the writer's own work logs to the same blocking destination (a stream whose write path logs, or an `on-error` handler that logs): the writer becomes a producer waiting for itself and recovers only through the timeout, never with `nil`. The same holds for a lock a producer holds that the sink path also needs.
 - Priority inversion: a producer waits on a writer thread and on whatever the sink depends on.
 - Wake-up cost is proportional to the number of waiters per cycle. With N concurrent producers a capacity of at least 2N keeps retries rare (see the [user guide](../blocking-mode.md)).
-- The ring buffer's payload slots rely on x86 store ordering ([overview.md](overview.md#ring-buffer)). The blocking path adds mutex and condition-variable operations and no new reliance on that assumption.
+- The ring buffer's payload slots are fenced by barriers ([overview.md](overview.md#ring-buffer)). The blocking path adds mutex and condition-variable operations, which order memory on their own.
 
 ## Interactions
 
